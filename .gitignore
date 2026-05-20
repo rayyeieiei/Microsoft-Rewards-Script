@@ -1,22 +1,23 @@
-sessions/
-dist/
-.dev/
+# Mengabaikan semua dependencies (biar gak berceceran)
 node_modules/
-src/accounts.json
+uri-js/
+v8-compile-cache-lib/
+vali-date/
+whatwg-encoding/
+whatwg-mimetype/
+which/
+word-wrap/
+yn/
+yocto-queue/
+zod/
+
+# Mengabaikan file kredensial asli di folder src
+src/account.json
+src/accounts.dev.json
 src/config.json
-/.vscode
-/diagnostics
-note
-accounts.dev.json
-accounts.main.json
-.DS_Store
-.playwright-chromium-installed
-bun.lock
-logs/
-.stfolder/
-.env
-accounts.json
-config.dev.json
-sessions/
-cookies/
+
+# Mengabaikan semua sesi cookies (Paling Penting!)
+src/sessions/
+
+# Mengabaikan file log sampah
 *.log
