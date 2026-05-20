@@ -62,6 +62,10 @@ export const ConfigSchema = z.object({
         doDailyCheckIn: z.boolean(),
         doReadToEarn: z.boolean()
     }),
+    loginRateLimit: z.object({ 
+        delay: NumberOrString,
+        maxAttempts: z.number().int().positive()
+    }).optional(),
     searchOnBingLocalQueries: z.boolean(),
     globalTimeout: NumberOrString,
     searchSettings: z.object({
@@ -74,9 +78,7 @@ export const ConfigSchema = z.object({
         readDelay: DelaySchema
     }),
     debugLogs: z.boolean(),
-    proxy: z.object({
-        queryEngine: z.boolean()
-    }),
+    proxy: z.object({ queryEngine: z.boolean() }),
     consoleLogFilter: LogFilterSchema,
     webhook: WebhookSchema
 })

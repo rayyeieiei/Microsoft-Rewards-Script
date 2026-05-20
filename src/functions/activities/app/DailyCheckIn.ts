@@ -3,17 +3,12 @@ import { randomUUID } from 'crypto'
 import { Workers } from '../../Workers'
 
 export class DailyCheckIn extends Workers {
-    private gainedPoints: number = 0
-
-    private oldBalance: number = this.bot.userData.currentPoints
+    private oldBalance: number = 0
 
     public async doDailyCheckIn() {
+        // 1. VALIDASI TOKEN (Wajib buat jalur API)
         if (!this.bot.accessToken) {
-            this.bot.logger.warn(
-                this.bot.isMobile,
-                'DAILY-CHECK-IN',
-                'Skipping: App access token not available, this activity requires it!'
-            )
+            this.bot.logger.warn(this.bot.isMobile, 'DAILY-CHECK-IN', 'Skipping: Access token not available.')
             return
         }
 
@@ -22,140 +17,112 @@ export class DailyCheckIn extends Workers {
         this.bot.logger.info(
             this.bot.isMobile,
             'DAILY-CHECK-IN',
-            `Starting Daily Check-In | geo=${this.bot.userData.geoLocale} | currentPoints=${this.oldBalance}`
+            `Starting Daily Check-In Sequence | Balance: ${this.oldBalance}`
         )
 
         try {
-            // Try type 101 first
-            this.bot.logger.debug(this.bot.isMobile, 'DAILY-CHECK-IN', 'Attempting Daily Check-In | type=101')
+            // STEP 1: JALUR STANDARD (Type 101 & 103)
+            let success = await this.runStandardSequence()
 
-            let response = await this.submitDaily(101) // Try using 101 (EU Variant?)
-            this.bot.logger.debug(
-                this.bot.isMobile,
-                'DAILY-CHECK-IN',
-                `Received Daily Check-In response | type=101 | status=${response?.status ?? 'unknown'}`
-            )
-
-            let newBalance = Number(response?.data?.response?.balance ?? this.oldBalance)
-            this.gainedPoints = newBalance - this.oldBalance
-
-            this.bot.logger.debug(
-                this.bot.isMobile,
-                'DAILY-CHECK-IN',
-                `Balance delta after Daily Check-In | type=101 | oldBalance=${this.oldBalance} | newBalance=${newBalance} | gainedPoints=${this.gainedPoints}`
-            )
-
-            if (this.gainedPoints > 0) {
-                this.bot.userData.currentPoints = newBalance
-                this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + this.gainedPoints
-
-                this.bot.logger.info(
-                    this.bot.isMobile,
-                    'DAILY-CHECK-IN',
-                    `Completed Daily Check-In | type=101 | gainedPoints=${this.gainedPoints} | oldBalance=${this.oldBalance} | newBalance=${newBalance}`,
-                    'green'
-                )
-                return
+            // STEP 2: JALUR STEALTH (Kalau Jalur Standard Gagal dapet poin)
+            if (!success) {
+                this.bot.logger.info(this.bot.isMobile, 'DAILY-CHECK-IN', 'Standard failed to gain points. Launching Stealth Sapphire Mode...', 'yellow')
+                await this.forceAppCheckIn()
             }
 
-            this.bot.logger.debug(
-                this.bot.isMobile,
-                'DAILY-CHECK-IN',
-                `No points gained with type=101 | oldBalance=${this.oldBalance} | newBalance=${newBalance} | retryingWithType=103`
-            )
+            // FINAL SYNC: Cek saldo akhir setelah semua usaha dilakukan
+            const finalBalance = await this.bot.browser.func.getCurrentPoints()
+            const totalGained = finalBalance - this.oldBalance
 
-            // Fallback to type 103
-            this.bot.logger.debug(this.bot.isMobile, 'DAILY-CHECK-IN', 'Attempting Daily Check-In | type=103')
-
-            response = await this.submitDaily(103) // Try using 103 (USA Variant?)
-            this.bot.logger.debug(
-                this.bot.isMobile,
-                'DAILY-CHECK-IN',
-                `Received Daily Check-In response | type=103 | status=${response?.status ?? 'unknown'}`
-            )
-
-            newBalance = Number(response?.data?.response?.balance ?? this.oldBalance)
-            this.gainedPoints = newBalance - this.oldBalance
-
-            this.bot.logger.debug(
-                this.bot.isMobile,
-                'DAILY-CHECK-IN',
-                `Balance delta after Daily Check-In | type=103 | oldBalance=${this.oldBalance} | newBalance=${newBalance} | gainedPoints=${this.gainedPoints}`
-            )
-
-            if (this.gainedPoints > 0) {
-                this.bot.userData.currentPoints = newBalance
-                this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + this.gainedPoints
-
-                this.bot.logger.info(
-                    this.bot.isMobile,
-                    'DAILY-CHECK-IN',
-                    `Completed Daily Check-In | type=103 | gainedPoints=${this.gainedPoints} | oldBalance=${this.oldBalance} | newBalance=${newBalance}`,
-                    'green'
-                )
+            if (totalGained > 0) {
+                this.bot.userData.currentPoints = finalBalance
+                this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + totalGained
+                this.bot.logger.info(this.bot.isMobile, 'DAILY-CHECK-IN', `GG! Sequence Complete | Total Gained: +${totalGained} | New Balance: ${finalBalance}`, 'green')
+                
+                if (finalBalance >= 500 && this.oldBalance < 500) {
+                    this.bot.logger.info(this.bot.isMobile, 'MAIN', '!!! CONGRATULATIONS: ACCOUNT PROMOTED TO LEVEL 2 !!!', 'green')
+                }
             } else {
-                this.bot.logger.warn(
-                    this.bot.isMobile,
-                    'DAILY-CHECK-IN',
-                    `Daily Check-In completed but no points gained | typesTried=101,103 | oldBalance=${this.oldBalance} | finalBalance=${newBalance}`
-                )
+                this.bot.logger.warn(this.bot.isMobile, 'DAILY-CHECK-IN', 'Sequence finished but balance remains same (Already checked-in manual?)')
             }
-        } catch (error) {
-            this.bot.logger.error(
-                this.bot.isMobile,
-                'DAILY-CHECK-IN',
-                `Error during Daily Check-In | message=${error instanceof Error ? error.message : String(error)}`
-            )
+
+        } catch (error: any) {
+            this.bot.logger.error(this.bot.isMobile, 'DAILY-CHECK-IN', `Critical Failure: ${error.message}`)
         }
     }
 
-    private async submitDaily(type: number) {
-        try {
-            const jsonData = {
-                id: randomUUID(),
-                amount: 1,
-                type: type,
-                attributes: {
-                    offerid: 'Gamification_Sapphire_DailyCheckIn'
-                },
-                country: this.bot.userData.geoLocale
+    // Sequence Nyoba 101 dan 103
+    private async runStandardSequence(): Promise<boolean> {
+        const types = [101, 103]
+        for (const type of types) {
+            this.bot.logger.debug(this.bot.isMobile, 'DAILY-CHECK-IN', `Attempting Standard Type: ${type}`)
+            const response = await this.submitDaily(type).catch(() => null)
+            
+            const currentBalance = Number(response?.data?.response?.balance ?? 0)
+            if (currentBalance > this.oldBalance) {
+                return true
             }
+            await this.bot.utils.wait(2000)
+        }
+        return false
+    }
 
-            this.bot.logger.debug(
-                this.bot.isMobile,
-                'DAILY-CHECK-IN',
-                `Preparing Daily Check-In payload | type=${type} | id=${jsonData.id} | amount=${jsonData.amount} | country=${jsonData.country}`
-            )
+    private async submitDaily(type: number) {
+        const jsonData = {
+            id: randomUUID(),
+            amount: 1,
+            type: type,
+            attributes: { offerid: 'Gamification_Sapphire_DailyCheckIn' },
+            country: this.bot.userData.geoLocale
+        }
 
-            const request: AxiosRequestConfig = {
+        const request: AxiosRequestConfig = {
+            url: 'https://prod.rewardsplatform.microsoft.com/dapi/me/activities',
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${this.bot.accessToken}`,
+                'User-Agent': 'Bing/32.5.431027001 (com.microsoft.bing; build:431027001; iOS 17.6.1) Alamofire/5.10.2',
+                'Content-Type': 'application/json',
+                'X-Rewards-Country': this.bot.userData.geoLocale,
+                'X-Rewards-Language': 'en',
+                'X-Rewards-ismobile': 'true'
+            },
+            data: JSON.stringify(jsonData)
+        }
+        return this.bot.axios.request(request)
+    }
+
+    // FUNGSI STEALTH: Nyamar jadi Bing App Android (Sapphire API)
+    public async forceAppCheckIn() {
+        this.bot.logger.info(this.bot.isMobile, 'APP-CHECKIN', 'Injecting Stealth Sapphire Headers...')
+
+        try {
+            // Gunakan appToken (fallback ke accessToken jika appToken tidak ada)
+            const token = (this.bot.userData as any).appToken || this.bot.accessToken
+
+            const response = await this.bot.axios.request({
                 url: 'https://prod.rewardsplatform.microsoft.com/dapi/me/activities',
                 method: 'POST',
                 headers: {
-                    Authorization: `Bearer ${this.bot.accessToken}`,
-                    'User-Agent':
-                        'Bing/32.5.431027001 (com.microsoft.bing; build:431027001; iOS 17.6.1) Alamofire/5.10.2',
+                    'Authorization': `Bearer ${token}`,
+                    'X-Ms-User-Agent': 'BingSapphire/28.9.411025301 (Android 13; id-ID)',
                     'Content-Type': 'application/json',
-                    'X-Rewards-Country': this.bot.userData.geoLocale,
-                    'X-Rewards-Language': 'en',
-                    'X-Rewards-ismobile': 'true'
+                    'User-Agent': 'Mozilla/5.0 (Linux; Android 13; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36'
                 },
-                data: JSON.stringify(jsonData)
+                data: JSON.stringify({
+                    "amount": 1,
+                    "country": "id",
+                    "id": "daily_checkin", 
+                    "type": 101
+                })
+            })
+
+            if (response.status === 200) {
+                this.bot.logger.info(this.bot.isMobile, 'APP-CHECKIN', 'Stealth Packet Sent Successfully!', 'green')
             }
 
-            this.bot.logger.debug(
-                this.bot.isMobile,
-                'DAILY-CHECK-IN',
-                `Sending Daily Check-In request | type=${type} | url=${request.url}`
-            )
-
-            return this.bot.axios.request(request)
-        } catch (error) {
-            this.bot.logger.error(
-                this.bot.isMobile,
-                'DAILY-CHECK-IN',
-                `Error in submitDaily | type=${type} | message=${error instanceof Error ? error.message : String(error)}`
-            )
-            throw error
+        } catch (error: any) {
+            this.bot.logger.debug(this.bot.isMobile, 'APP-CHECKIN', `Stealth attempt finished with status: ${error.response?.status ?? 'Unknown'}`)
         }
     }
 }

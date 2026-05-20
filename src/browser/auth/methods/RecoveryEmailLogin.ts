@@ -3,7 +3,8 @@ import type { MicrosoftRewardsBot } from '../../../index'
 import { getErrorMessage, promptInput } from './LoginUtils'
 
 export class RecoveryLogin {
-    private readonly textInputSelector = '[data-testid="proof-confirmation"]'
+    // FIX RPL 1: Gabungkan selector alternatif biar gak lolos pas Microsoft ganti UI (image_0efe12.jpg)
+    private readonly textInputSelector = 'input[type="email"], input[name="proof"], #iProofEmail, [data-testid="proof-confirmation"] input, [data-testid="proof-confirmation"]'
     private readonly maxManualSeconds = 60
     private readonly maxManualAttempts = 5
 
@@ -14,12 +15,22 @@ export class RecoveryLogin {
             this.bot.logger.info(this.bot.isMobile, 'LOGIN-RECOVERY', `Attempting to fill email: ${email}`)
 
             const visibleInput = await page
-                .waitForSelector(this.textInputSelector, { state: 'visible', timeout: 500 })
+                .waitForSelector(this.textInputSelector, { state: 'visible', timeout: 2000 })
                 .catch(() => null)
 
             if (visibleInput) {
-                await page.keyboard.type(email, { delay: 50 })
+                // FIX RPL 2: Gunakan .fill() bawaan Playwright karena otomatis melakukan autofocus + clear text lama
+                await visibleInput.click().catch(() => {})
+                await visibleInput.fill(email)
+                await this.bot.utils.wait(500)
                 await page.keyboard.press('Enter')
+                
+                // Fallback: Klik tombol "Send code" secara fisik jika tombol Enter di-block script MS
+                const submitBtn = page.locator('button[type="submit"], input[type="submit"], #idSubmitButton, text="Send code"').first()
+                if (await submitBtn.count() > 0 && await submitBtn.isVisible()) {
+                    await submitBtn.click().catch(() => {})
+                }
+
                 this.bot.logger.info(this.bot.isMobile, 'LOGIN-RECOVERY', 'Successfully filled email input field')
                 return true
             }

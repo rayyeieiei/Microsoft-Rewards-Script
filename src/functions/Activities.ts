@@ -1,102 +1,44 @@
 import type { MicrosoftRewardsBot } from '../index'
 import type { Page } from 'patchright'
 
-// App
 import { DailyCheckIn } from './activities/app/DailyCheckIn'
 import { ReadToEarn } from './activities/app/ReadToEarn'
 import { AppReward } from './activities/app/AppReward'
-
-// API
 import { UrlReward } from './activities/api/UrlReward'
 import { Quiz } from './activities/api/Quiz'
 import { FindClippy } from './activities/api/FindClippy'
 import { DoubleSearchPoints } from './activities/api/DoubleSearchPoints'
-
-// Browser
 import { SearchOnBing } from './activities/browser/SearchOnBing'
 import { Search } from './activities/browser/Search'
 
-import type {
-    BasePromotion,
-    DashboardData,
-    FindClippyPromotion,
-    PurplePromotionalItem
-} from '../interface/DashboardData'
+// FIX: Tambahkan PunchCard di baris import ini
+import type { BasePromotion, DashboardData, FindClippyPromotion, PurplePromotionalItem, PunchCard } from '../interface/DashboardData'
 import type { Promotion } from '../interface/AppDashBoardData'
 
 export default class Activities {
-    private bot: MicrosoftRewardsBot
+    constructor(private bot: MicrosoftRewardsBot) {}
 
-    constructor(bot: MicrosoftRewardsBot) {
-        this.bot = bot
+    doSearch = async (data: DashboardData, page: Page, isMobile: boolean) => await new Search(this.bot).doSearch(data, page, isMobile)
+    
+    doSearchOnBing = async (promotion: BasePromotion, page: Page) => await new SearchOnBing(this.bot).doSearchOnBing(promotion, page)
+
+    // FIX: Tambahkan punchCard?: PunchCard agar sinkron dengan Workers.ts dan UrlReward.ts
+    doUrlReward = async (promotion: BasePromotion, page: Page, punchCard?: PunchCard) => {
+        await new UrlReward(this.bot).doUrlReward(promotion, page, punchCard)
     }
 
-    // Browser Activities
-    doSearch = async (data: DashboardData, page: Page, isMobile: boolean): Promise<number> => {
-        const search = new Search(this.bot)
-        return await search.doSearch(data, page, isMobile)
+    // SINKRONISASI: Menyiapkan quiz untuk masa depan jika ingin dibuat Hybrid juga
+    doQuiz = async (promotion: BasePromotion, page: Page) => {
+        await new Quiz(this.bot).doQuiz(promotion) 
     }
 
-    doSearchOnBing = async (promotion: BasePromotion, page: Page): Promise<void> => {
-        const searchOnBing = new SearchOnBing(this.bot)
-        await searchOnBing.doSearchOnBing(promotion, page)
-    }
+    doFindClippy = async (promotion: FindClippyPromotion) => await new FindClippy(this.bot).doFindClippy(promotion)
 
-    /*
-    doABC = async (page: Page): Promise<void> => {
-        const abc = new ABC(this.bot)
-        await abc.doABC(page)
-    }
-    */
+    doDoubleSearchPoints = async (promotion: PurplePromotionalItem) => await new DoubleSearchPoints(this.bot).doDoubleSearchPoints(promotion)
 
-    /*
-    doPoll = async (page: Page): Promise<void> => {
-        const poll = new Poll(this.bot)
-        await poll.doPoll(page)
-    }
-    */
+    doAppReward = async (promotion: Promotion) => await new AppReward(this.bot).doAppReward(promotion)
 
-    /*
-    doThisOrThat = async (page: Page): Promise<void> => {
-        const thisOrThat = new ThisOrThat(this.bot)
-        await thisOrThat.doThisOrThat(page)
-    }
-    */
+    doReadToEarn = async () => await new ReadToEarn(this.bot).doReadToEarn()
 
-    // API Activities
-    doUrlReward = async (promotion: BasePromotion): Promise<void> => {
-        const urlReward = new UrlReward(this.bot)
-        await urlReward.doUrlReward(promotion)
-    }
-
-    doQuiz = async (promotion: BasePromotion): Promise<void> => {
-        const quiz = new Quiz(this.bot)
-        await quiz.doQuiz(promotion)
-    }
-
-    doFindClippy = async (promotion: FindClippyPromotion): Promise<void> => {
-        const findClippy = new FindClippy(this.bot)
-        await findClippy.doFindClippy(promotion)
-    }
-
-    doDoubleSearchPoints = async (promotion: PurplePromotionalItem): Promise<void> => {
-        const doubleSearchPoints = new DoubleSearchPoints(this.bot)
-        await doubleSearchPoints.doDoubleSearchPoints(promotion)
-    }
-
-    // App Activities
-    doAppReward = async (promotion: Promotion): Promise<void> => {
-        const urlReward = new AppReward(this.bot)
-        await urlReward.doAppReward(promotion)
-    }
-
-    doReadToEarn = async (): Promise<void> => {
-        const readToEarn = new ReadToEarn(this.bot)
-        await readToEarn.doReadToEarn()
-    }
-
-    doDailyCheckIn = async (): Promise<void> => {
-        const dailyCheckIn = new DailyCheckIn(this.bot)
-        await dailyCheckIn.doDailyCheckIn()
-    }
+    doDailyCheckIn = async () => await new DailyCheckIn(this.bot).doDailyCheckIn()
 }

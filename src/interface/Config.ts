@@ -1,3 +1,4 @@
+export type NumberOrString = number | string;
 export interface Config {
     baseURL: string
     sessionPath: string
@@ -12,6 +13,10 @@ export interface Config {
     proxy: ConfigProxy
     consoleLogFilter: LogFilter
     webhook: ConfigWebhook
+    loginRateLimit?: {
+        delay: NumberOrString;
+        maxAttempts: number;
+    };
 }
 
 export type QueryEngine = 'google' | 'wikipedia' | 'reddit' | 'local'

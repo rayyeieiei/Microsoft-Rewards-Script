@@ -1,6 +1,8 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import cluster, { Worker } from 'cluster'
 import type { BrowserContext, Cookie, Page } from 'patchright'
+import readline from 'node:readline'
+import axios from 'axios' // FIX RPL: Gunakan axios mentah untuk cek IP publik network utama
 import pkg from '../package.json'
 
 import type { BrowserFingerprintWithHeaders } from 'fingerprint-generator'
@@ -71,7 +73,7 @@ interface UserData {
 
 export class MicrosoftRewardsBot {
     public logger: Logger
-    public config
+    public config: any 
     public utils: Utils
     public activities: Activities = new Activities(this)
     public browser: { func: BrowserFunc; utils: BrowserUtils }
@@ -93,7 +95,7 @@ export class MicrosoftRewardsBot {
     private activeWorkers: number
     private exitedWorkers: number[]
     private browserFactory: Browser = new Browser(this)
-    private accounts: Account[]
+    private accounts: Account[] = []
     private workers: Workers
     private login = new Login(this)
     private searchManager: SearchManager
@@ -110,7 +112,6 @@ export class MicrosoftRewardsBot {
             gainedPoints: 0
         }
         this.logger = new Logger(this)
-        this.accounts = []
         this.cookies = { mobile: [], desktop: [] }
         this.utils = new Utils()
         this.workers = new Workers(this)
@@ -126,6 +127,13 @@ export class MicrosoftRewardsBot {
 
     get isMobile(): boolean {
         return getCurrentContext().isMobile
+    }
+
+    // FIX RPL: Helper function buat nembak ipify tanpa lewat proxy biar akurat dapet IP internet asli komputer
+    private async getCurrentIP(): Promise<string> {
+        return await axios.get('https://api.ipify.org', { timeout: 5000 })
+            .then(res => res.data.trim())
+            .catch(() => 'UNKNOWN_IP')
     }
 
     async initialize(): Promise<void> {
@@ -177,7 +185,6 @@ export class MicrosoftRewardsBot {
                     const { webhook } = this.config
                     const { content, level } = log
 
-                    // Webhooks, for later expansion?
                     if (webhook.discord?.enabled && webhook.discord.url) {
                         sendDiscord(webhook.discord.url, content, level)
                     }
@@ -187,7 +194,6 @@ export class MicrosoftRewardsBot {
                 }
             })
 
-            // Startup delay for clusters due to resource usage
             if (accountChunks.indexOf(chunk) !== accountChunks.length - 1) {
                 await this.utils.wait(5000)
             }
@@ -195,19 +201,12 @@ export class MicrosoftRewardsBot {
 
         const onWorkerExit = async (worker: Worker, code?: number, signal?: string): Promise<void> => {
             const { pid } = worker.process
-
-            if (!pid || this.exitedWorkers.includes(pid)) {
-                return
-            }
+            if (!pid || this.exitedWorkers.includes(pid)) return
 
             this.exitedWorkers.push(pid)
             this.activeWorkers -= 1
 
-            // exit 0 = good, exit 1 = crash
-            const failed = (code ?? 0) !== 0 || Boolean(signal)
-            if (failed) {
-                hadWorkerFailure = true
-            }
+            if ((code ?? 0) !== 0 || Boolean(signal)) hadWorkerFailure = true
 
             this.logger.warn(
                 'main',
@@ -216,20 +215,19 @@ export class MicrosoftRewardsBot {
             )
 
             if (this.activeWorkers <= 0) {
-                const totalCollectedPoints = allAccountStats.reduce((sum, s) => sum + s.collectedPoints, 0)
-                const totalInitialPoints = allAccountStats.reduce((sum, s) => sum + s.initialPoints, 0)
-                const totalFinalPoints = allAccountStats.reduce((sum, s) => sum + s.finalPoints, 0)
-                const totalDurationMinutes = ((Date.now() - runStartTime) / 1000 / 60).toFixed(1)
+                const totalCollected = allAccountStats.reduce((sum, s) => sum + s.collectedPoints, 0)
+                const totalInitial = allAccountStats.reduce((sum, s) => sum + s.initialPoints, 0)
+                const totalFinal = allAccountStats.reduce((sum, s) => sum + s.finalPoints, 0)
+                const totalDuration = ((Date.now() - runStartTime) / 1000 / 60).toFixed(1)
 
                 this.logger.info(
                     'main',
                     'RUN-END',
-                    `Completed all accounts | Accounts processed: ${allAccountStats.length} | Total points collected: +${totalCollectedPoints} | Old total: ${totalInitialPoints} → New total: ${totalFinalPoints} | Total runtime: ${totalDurationMinutes}min`,
+                    `Completed all accounts | Total points collected: +${totalCollected} | Old total: ${totalInitial} → New total: ${totalFinal} | Total runtime: ${totalDuration}min`,
                     'green'
                 )
 
                 await flushAllWebhooks()
-
                 process.exit(hadWorkerFailure ? 1 : 0)
             }
         }
@@ -240,7 +238,7 @@ export class MicrosoftRewardsBot {
 
         cluster.on('disconnect', worker => {
             const pid = worker.process?.pid
-            this.logger.warn('main', 'CLUSTER-WORKER-DISCONNECT', `Worker ${pid ?? '?'} disconnected`) // <-- Warning only
+            this.logger.warn('main', 'CLUSTER-WORKER-DISCONNECT', `Worker ${pid ?? '?'} disconnected`)
         })
     }
 
@@ -248,29 +246,13 @@ export class MicrosoftRewardsBot {
         void this.logger.info('main', 'CLUSTER-WORKER-START', `Worker spawned | PID: ${process.pid}`)
 
         process.on('message', async ({ chunk, runStartTime }: { chunk: Account[]; runStartTime: number }) => {
-            void this.logger.info(
-                'main',
-                'CLUSTER-WORKER-TASK',
-                `Worker ${process.pid} received ${chunk.length} accounts.`
-            )
-
             try {
                 const stats = await this.runTasks(chunk, runStartTime ?? runStartTimeFromMaster ?? Date.now())
-
-                // Send and flush before exit
-                if (process.send) {
-                    process.send({ __stats: stats })
-                }
-
+                if (process.send) process.send({ __stats: stats })
                 await flushAllWebhooks()
                 process.exit(0)
             } catch (error) {
-                this.logger.error(
-                    'main',
-                    'CLUSTER-WORKER-ERROR',
-                    `Worker task crash: ${error instanceof Error ? error.message : String(error)}`
-                )
-
+                this.logger.error('main', 'CLUSTER-WORKER-ERROR', `Worker task crash: ${error instanceof Error ? error.message : String(error)}`)
                 await flushAllWebhooks()
                 process.exit(1)
             }
@@ -279,6 +261,11 @@ export class MicrosoftRewardsBot {
 
     private async runTasks(accounts: Account[], runStartTime: number): Promise<AccountStats[]> {
         const accountStats: AccountStats[] = []
+        let processedCount = 0
+
+        // Ambil data IP pertama pas start script
+        let currentIpAddress = await this.getCurrentIP()
+        this.logger.info('main', 'NETWORK', `Current Active IP: [ ${currentIpAddress} ]`)
 
         for (const account of accounts) {
             const accountStartTime = Date.now()
@@ -286,22 +273,11 @@ export class MicrosoftRewardsBot {
             this.userData.userName = this.utils.getEmailUsername(accountEmail)
 
             try {
-                this.logger.info(
-                    'main',
-                    'ACCOUNT-START',
-                    `Starting account: ${accountEmail} | geoLocale: ${account.geoLocale}`
-                )
-
+                this.logger.info('main', 'ACCOUNT-START', `Starting account: ${accountEmail} | geoLocale: ${account.geoLocale}`)
                 this.axios = new AxiosClient(account.proxy)
 
-                const result: { initialPoints: number; collectedPoints: number } | undefined = await this.Main(
-                    account
-                ).catch(error => {
-                    void this.logger.error(
-                        true,
-                        'FLOW',
-                        `Mobile flow failed for ${accountEmail}: ${error instanceof Error ? error.message : String(error)}`
-                    )
+                const result = await this.Main(account).catch(error => {
+                    void this.logger.error(true, 'FLOW', `Mobile flow failed for ${accountEmail}: ${error instanceof Error ? error.message : String(error)}`)
                     return undefined
                 })
 
@@ -321,56 +297,63 @@ export class MicrosoftRewardsBot {
                         success: true
                     })
 
-                    this.logger.info(
-                        'main',
-                        'ACCOUNT-END',
-                        `Completed account: ${accountEmail} | Total: +${collectedPoints} | Old: ${accountInitialPoints} → New: ${accountFinalPoints} | Duration: ${durationSeconds}s`,
-                        'green'
-                    )
+                    this.logger.info('main', 'ACCOUNT-END', `Completed account: ${accountEmail} | Total: +${collectedPoints} | Old: ${accountInitialPoints} → New: ${accountFinalPoints} | Duration: ${durationSeconds}s`, 'green')
                 } else {
                     accountStats.push({
-                        email: accountEmail,
-                        initialPoints: 0,
-                        finalPoints: 0,
-                        collectedPoints: 0,
-                        duration: parseFloat(durationSeconds),
-                        success: false,
-                        error: 'Flow failed'
+                        email: accountEmail, initialPoints: 0, finalPoints: 0, collectedPoints: 0,
+                        duration: parseFloat(durationSeconds), success: false, error: 'Flow failed'
                     })
                 }
             } catch (error) {
                 const durationSeconds = ((Date.now() - accountStartTime) / 1000).toFixed(1)
-                this.logger.error(
-                    'main',
-                    'ACCOUNT-ERROR',
-                    `${accountEmail}: ${error instanceof Error ? error.message : String(error)}`
-                )
-
+                this.logger.error('main', 'ACCOUNT-ERROR', `${accountEmail}: ${error instanceof Error ? error.message : String(error)}`)
                 accountStats.push({
-                    email: accountEmail,
-                    initialPoints: 0,
-                    finalPoints: 0,
-                    collectedPoints: 0,
-                    duration: parseFloat(durationSeconds),
-                    success: false,
-                    error: error instanceof Error ? error.message : String(error)
+                    email: accountEmail, initialPoints: 0, finalPoints: 0, collectedPoints: 0,
+                    duration: parseFloat(durationSeconds), success: false, error: error instanceof Error ? error.message : String(error)
                 })
+            }
+
+            processedCount++
+            if (processedCount % 2 === 0 && processedCount < accounts.length) {
+                let ipChanged = false
+                const oldIp = currentIpAddress
+
+                // LOOP PROTECTION: Kunci thread dan paksa user ganti IP sampai strings IP-nya beneran beda
+                while (!ipChanged) {
+                    this.logger.warn('main', 'IP-INTERCEPTOR', '=======================================================', 'yellow')
+                    this.logger.warn('main', 'IP-INTERCEPTOR', `🔥 BATCH [${processedCount / 2}] SELESAI! SAATNYA ROTASI IP HOTSPOT! 🔥`, 'yellow')
+                    this.logger.warn('main', 'IP-INTERCEPTOR', `Current IP registered: [ ${oldIp} ]`, 'yellow')
+                    this.logger.warn('main', 'IP-INTERCEPTOR', '1. Nyalakan "Mode Pesawat" di HP lu selama 5 detik.', 'yellow')
+                    this.logger.warn('main', 'IP-INTERCEPTOR', '2. Matikan "Mode Pesawat" & tunggu hotspot PC konek kembali.', 'yellow')
+                    this.logger.warn('main', 'IP-INTERCEPTOR', '=======================================================', 'yellow')
+                    
+                    const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+                    await new Promise<void>(resolve => rl.question('👉 Jika PC sudah dapet internet baru, pencet [ENTER] buat verifikasi...', () => resolve()))
+                    rl.close()
+
+                    this.logger.info('main', 'IP-INTERCEPTOR', 'Checking network configuration telemetry...')
+                    const checkNewIp = await this.getCurrentIP()
+
+                    if (checkNewIp !== oldIp && checkNewIp !== 'UNKNOWN_IP') {
+                        currentIpAddress = checkNewIp
+                        ipChanged = true
+                        this.logger.info('main', 'IP-INTERCEPTOR', `🚀 IP Baru Terdeteksi: [ ${currentIpAddress} ]! Meluncur ke batch berikutnya...`, 'green')
+                        await this.utils.wait(3000)
+                    } else {
+                        this.logger.error('main', 'IP-INTERCEPTOR', `❌ VERIFIKASI GAGAL! IP PC lu masih [ ${checkNewIp} ]. Tolong nyalakan mode pesawat HP dulu biar ganti IP!`, 'red')
+                        await this.utils.wait(3000)
+                    }
+                }
             }
         }
 
         if (this.config.clusters <= 1 && cluster.isPrimary) {
-            const totalCollectedPoints = accountStats.reduce((sum, s) => sum + s.collectedPoints, 0)
-            const totalInitialPoints = accountStats.reduce((sum, s) => sum + s.initialPoints, 0)
-            const totalFinalPoints = accountStats.reduce((sum, s) => sum + s.finalPoints, 0)
-            const totalDurationMinutes = ((Date.now() - runStartTime) / 1000 / 60).toFixed(1)
+            const totalCollected = accountStats.reduce((sum, s) => sum + s.collectedPoints, 0)
+            const totalInitial = accountStats.reduce((sum, s) => sum + s.initialPoints, 0)
+            const totalFinal = accountStats.reduce((sum, s) => sum + s.finalPoints, 0)
+            const totalDuration = ((Date.now() - runStartTime) / 1000 / 60).toFixed(1)
 
-            this.logger.info(
-                'main',
-                'RUN-END',
-                `Completed all accounts | Accounts processed: ${accountStats.length} | Total points collected: +${totalCollectedPoints} | Old total: ${totalInitialPoints} → New total: ${totalFinalPoints} | Total runtime: ${totalDurationMinutes}min`,
-                'green'
-            )
-
+            this.logger.info('main', 'RUN-END', `Completed all accounts | Accounts processed: ${accountStats.length} | Total points collected: +${totalCollected} | Old total: ${totalInitial} → New total: ${totalFinal} | Total runtime: ${totalDuration}min`, 'green')
             await flushAllWebhooks()
             process.exit(0)
         }
@@ -398,11 +381,7 @@ export class MicrosoftRewardsBot {
                 try {
                     this.accessToken = await this.login.getAppAccessToken(this.mainMobilePage, accountEmail)
                 } catch (error) {
-                    this.logger.error(
-                        'main',
-                        'FLOW',
-                        `Failed to get mobile access token: ${error instanceof Error ? error.message : String(error)}`
-                    )
+                    this.logger.error('main', 'FLOW', `Failed to get mobile access token: ${error instanceof Error ? error.message : String(error)}`)
                 }
 
                 this.cookies.mobile = await initialContext.cookies()
@@ -410,18 +389,9 @@ export class MicrosoftRewardsBot {
 
                 const data: DashboardData = await this.browser.func.getDashboardData()
                 const appData: AppDashboardData = await this.browser.func.getAppDashboardData()
-
-                // Set geo
-                this.userData.geoLocale =
-                    account.geoLocale === 'auto' ? data.userProfile.attributes.country : account.geoLocale.toLowerCase()
-                if (this.userData.geoLocale.length > 2) {
-                    this.logger.warn(
-                        'main',
-                        'GEO-LOCALE',
-                        `The provided geoLocale is longer than 2 (${this.userData.geoLocale} | auto=${account.geoLocale === 'auto'}), this is likely invalid and can cause errors!`
-                    )
-                }
-
+                
+                this.userData.geoLocale = account.geoLocale === 'auto' ? data.userProfile.attributes.country : account.geoLocale.toLowerCase()
+                
                 this.userData.initialPoints = data.userStatus.availablePoints
                 this.userData.currentPoints = data.userStatus.availablePoints
                 const initialPoints = this.userData.initialPoints ?? 0
@@ -431,52 +401,52 @@ export class MicrosoftRewardsBot {
 
                 this.pointsCanCollect = browserEarnable.mobileSearchPoints + (appEarnable?.totalEarnablePoints ?? 0)
 
-                this.logger.info(
-                    'main',
-                    'POINTS',
-                    `Earnable today | Mobile: ${this.pointsCanCollect} | Browser: ${
-                        browserEarnable.mobileSearchPoints
-                    } | App: ${appEarnable?.totalEarnablePoints ?? 0} | ${accountEmail} | locale: ${this.userData.geoLocale}`
-                )
+                this.logger.info('main', 'POINTS', `Earnable today | Mobile: ${this.pointsCanCollect} | Browser: ${browserEarnable.mobileSearchPoints} | App: ${appEarnable?.totalEarnablePoints ?? 0} | ${accountEmail} | locale: ${this.userData.geoLocale}`)
 
-                if (this.config.workers.doAppPromotions) await this.workers.doAppPromotions(appData)
-                if (this.config.workers.doDailySet) await this.workers.doDailySet(data, this.mainMobilePage)
-                if (this.config.workers.doSpecialPromotions) await this.workers.doSpecialPromotions(data)
-                if (this.config.workers.doMorePromotions) await this.workers.doMorePromotions(data, this.mainMobilePage)
-                if (this.config.workers.doDailyCheckIn) await this.activities.doDailyCheckIn()
-                if (this.config.workers.doReadToEarn) await this.activities.doReadToEarn()
-                if (this.config.workers.doPunchCards) await this.workers.doPunchCards(data, this.mainMobilePage)
+                if (this.config.workers.doAppPromotions && appData) {
+                    await this.workers.doAppPromotions(appData)
+                }
+
+                if (this.config.workers.doDailySet && data && this.mainMobilePage) {
+                    await this.workers.doDailySet(data, this.mainMobilePage)
+                }
+
+                if (this.config.workers.doSpecialPromotions && data && this.mainMobilePage) {
+                    await this.workers.doSpecialPromotions(data, this.mainMobilePage)
+                }
+
+                if (this.config.workers.doMorePromotions && data && this.mainMobilePage) {
+                    await this.workers.doMorePromotions(data, this.mainMobilePage)
+                }
+
+                if (this.config.workers.doDailyCheckIn) {
+                    await this.activities.doDailyCheckIn()
+                }
+
+                if (this.config.workers.doReadToEarn) {
+                    await this.activities.doReadToEarn()
+                }
+
+                if (this.config.workers.doPunchCards && data && this.mainMobilePage) {
+                    await this.workers.doPunchCards(data, this.mainMobilePage)
+                }
 
                 const searchPoints = await this.browser.func.getSearchPoints()
                 const missingSearchPoints = this.browser.func.missingSearchPoints(searchPoints, true)
 
                 this.cookies.mobile = await initialContext.cookies()
 
-                const { mobilePoints, desktopPoints } = await this.searchManager.doSearches(
-                    data,
-                    missingSearchPoints,
-                    mobileSession,
-                    account,
-                    accountEmail
-                )
+                const { mobilePoints, desktopPoints } = await this.searchManager.doSearches(data, missingSearchPoints, mobileSession, account, accountEmail)
 
                 mobileContextClosed = true
-
                 this.userData.gainedPoints = mobilePoints + desktopPoints
 
                 const finalPoints = await this.browser.func.getCurrentPoints()
                 const collectedPoints = finalPoints - initialPoints
 
-                this.logger.info(
-                    'main',
-                    'FLOW',
-                    `Collected: +${collectedPoints} | Mobile: +${mobilePoints} | Desktop: +${desktopPoints} | ${accountEmail}`
-                )
+                this.logger.info('main', 'FLOW', `Collected: +${collectedPoints} | Mobile: +${mobilePoints} | Desktop: +${desktopPoints} | ${accountEmail}`)
 
-                return {
-                    initialPoints,
-                    collectedPoints: collectedPoints || 0
-                }
+                return { initialPoints, collectedPoints: collectedPoints || 0 }
             })
         } finally {
             if (mobileSession && !mobileContextClosed) {
@@ -493,13 +463,10 @@ export class MicrosoftRewardsBot {
 export { executionContext }
 
 async function main(): Promise<void> {
-    // Check before doing anything
     checkNodeVersion()
     const rewardsBot = new MicrosoftRewardsBot()
 
-    process.on('beforeExit', () => {
-        void flushAllWebhooks()
-    })
+    process.on('beforeExit', () => { void flushAllWebhooks() })
     process.on('SIGINT', async () => {
         rewardsBot.logger.warn('main', 'PROCESS', 'SIGINT received, flushing and exiting...')
         await flushAllWebhooks()
