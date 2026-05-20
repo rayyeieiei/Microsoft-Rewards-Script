@@ -15,3 +15,8 @@ bun.lock
 logs/
 .stfolder/
 .env
+accounts.json
+config.dev.json
+sessions/
+cookies/
+*.log
