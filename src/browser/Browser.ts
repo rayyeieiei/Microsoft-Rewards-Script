@@ -7,6 +7,7 @@ import { loadSessionData, saveFingerprintData } from '../util/Load'
 import { UserAgentManager } from './UserAgent'
 
 import type { Account, AccountProxy } from '../interface/Account'
+import os from 'os'
 
 /* Test Stuff
 https://abrahamjuliot.github.io/creepjs/
@@ -43,8 +44,29 @@ class Browser {
         this.bot = bot
     }
 
+    // Fungsi otomatis nyari IP Wi-Fi yang aktif dari adapter laptop lu
+    private getWifiIpAddress(): string {
+        const interfaces = os.networkInterfaces();
+        for (const name of Object.keys(interfaces)) {
+            if (name.toLowerCase().includes('wi-fi') || name.toLowerCase().includes('wireless')) {
+                const iface = interfaces[name];
+                if (iface) {
+                    for (const config of iface) {
+                        if (config.family === 'IPv4' && !config.internal) {
+                            return config.address;
+                        }
+                    }
+                }
+            }
+        }
+        // Fallback IP jika hotspot tidak terdeteksi saat inisialisasi awal
+        return '10.125.209.179'; 
+        
+    }
+
     async createBrowser(account: Account): Promise<BrowserCreationResult> {
-        let browser: rebrowser.Browser
+        let browser: any; // Menggunakan variabel penampung utama yang bisa diakses di semua blok bawah
+        
         try {
             const proxyConfig = account.proxy.url
                 ? {
@@ -55,17 +77,22 @@ class Browser {
                               password: account.proxy.password
                           })
                   }
-                : undefined
+                : undefined;
 
-            browser = await rebrowser.chromium.launch({
-                headless: this.bot.config.headless,
-                ...(proxyConfig && { proxy: proxyConfig }),
-                args: [...Browser.BROWSER_ARGS]
-            })
+           browser = await rebrowser.chromium.launch({
+                headless: this.bot.config.headless === true, // Memastikan bertipe data boolean murni
+                channel: this.bot.config.headless ? undefined : 'chrome', // FIX: Jika false, paksa pakai Chrome biasa (bukan headless-shell) agar jendelanya nongol
+                args: [...Browser.BROWSER_ARGS],
+                proxy: proxyConfig, 
+                localAddress: this.getWifiIpAddress() 
+            } as any);
+
+            this.bot.logger.info(this.bot.isMobile, 'BROWSER', 'Browser launched successfully')
+            
         } catch (error) {
-            const errorMessage = error instanceof Error ? error.message : String(error)
-            this.bot.logger.error(this.bot.isMobile, 'BROWSER', `Launch failed: ${errorMessage}`)
-            throw error
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.bot.logger.error(this.bot.isMobile, 'BROWSER', `Launch failed: ${errorMessage}`);
+            throw error;
         }
 
         try {
@@ -74,9 +101,9 @@ class Browser {
                 account.email,
                 account.saveFingerprint,
                 this.bot.isMobile
-            )
+            );
 
-            const fingerprint = sessionData.fingerprint ?? (await this.generateFingerprint(this.bot.isMobile))
+            const fingerprint = sessionData.fingerprint ?? (await this.generateFingerprint(this.bot.isMobile));
 
             const context = await newInjectedContext(browser as any, {
                 fingerprint,
@@ -84,7 +111,7 @@ class Browser {
                     permissions: [],
                     ignoreHTTPSErrors: true
                 }
-            })
+            });
 
             await context.addInitScript(() => {
                 Object.defineProperty(navigator, 'credentials', {
@@ -92,31 +119,33 @@ class Browser {
                         create: () => Promise.reject(new Error('WebAuthn disabled')),
                         get: () => Promise.reject(new Error('WebAuthn disabled'))
                     }
-                })
-            })
+                });
+            });
 
-            context.setDefaultTimeout(this.bot.utils.stringToNumber(this.bot.config?.globalTimeout ?? 30000))
+            context.setDefaultTimeout(this.bot.utils.stringToNumber(this.bot.config?.globalTimeout ?? 30000));
 
-            await context.addCookies(sessionData.cookies)
+            await context.addCookies(sessionData.cookies);
 
             if (
                 (account.saveFingerprint.mobile && this.bot.isMobile) ||
                 (account.saveFingerprint.desktop && !this.bot.isMobile)
             ) {
-                await saveFingerprintData(this.bot.config.sessionPath, account.email, this.bot.isMobile, fingerprint)
+                await saveFingerprintData(this.bot.config.sessionPath, account.email, this.bot.isMobile, fingerprint);
             }
 
             this.bot.logger.info(
                 this.bot.isMobile,
                 'BROWSER',
                 `Created browser with User-Agent: "${fingerprint.fingerprint.navigator.userAgent}"`
-            )
-            this.bot.logger.debug(this.bot.isMobile, 'BROWSER-FINGERPRINT', JSON.stringify(fingerprint))
+            );
+            this.bot.logger.debug(this.bot.isMobile, 'BROWSER-FINGERPRINT', JSON.stringify(fingerprint));
 
-            return { context: context as unknown as BrowserContext, fingerprint }
+            return { context: context as unknown as BrowserContext, fingerprint };
         } catch (error) {
-            await browser.close().catch(() => {})
-            throw error
+            if (browser) {
+                await browser.close().catch(() => {});
+            }
+            throw error;
         }
     }
 

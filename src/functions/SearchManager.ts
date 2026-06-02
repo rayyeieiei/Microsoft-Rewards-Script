@@ -360,7 +360,7 @@ export class SearchManager {
         return { mobilePoints, desktopPoints }
     }
 
-    private async createDesktopSession(account: Account, accountEmail: string): Promise<BrowserSession> {
+private async createDesktopSession(account: Account, accountEmail: string): Promise<BrowserSession> {
         this.bot.logger.info('main', 'SEARCH-DESKTOP-LOGIN', 'Init desktop session')
         this.bot.logger.debug(
             'main',
@@ -372,6 +372,22 @@ export class SearchManager {
         this.bot.logger.debug('main', 'SEARCH-DESKTOP-LOGIN', 'Browser created, new page')
 
         this.bot.mainDesktopPage = await session.context.newPage()
+
+        // ==================== SUNTIKAN OPTIMASI HEMAT KUOTA ====================
+        this.bot.logger.info('main', 'SEARCH-DESKTOP-LOGIN', '🛡️ Activating Request Interceptor (Blocking images & media)...')
+        await this.bot.mainDesktopPage.route('**/*', (route) => {
+            const resourceType = route.request().resourceType();
+            if (
+                resourceType === 'image' || 
+                resourceType === 'media' || 
+                resourceType === 'font'
+            ) {
+                route.abort(); // Tembak mati request gambar/video biar hemat kuota 80%
+            } else {
+                route.continue(); // Izinkan text, css, dan js buat isi poin
+            }
+        });
+        // =======================================================================
 
         this.bot.logger.info('main', 'SEARCH-DESKTOP-LOGIN', `Browser ready | account=${accountEmail}`)
         this.bot.logger.info('main', 'SEARCH-DESKTOP-LOGIN', 'Login start')

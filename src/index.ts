@@ -273,6 +273,13 @@ export class MicrosoftRewardsBot {
             this.userData.userName = this.utils.getEmailUsername(accountEmail)
 
             try {
+                // ==========================================
+                // 🔥 SUNTIKAN KODE ANTI-DETECTION (RANDOM SLEEP) 🔥
+                // Bikin jeda acak 10 sampai 60 detik sebelum buka browser
+                const randomStartDelay = Math.floor(Math.random() * (60000 - 10000 + 1)) + 10000;
+                this.logger.info('main', 'STEALTH', `Menunggu ${(randomStartDelay / 1000).toFixed(0)} detik sebelum buka browser biar keliatan natural...`, 'cyan')
+                await this.utils.wait(randomStartDelay);
+
                 this.logger.info('main', 'ACCOUNT-START', `Starting account: ${accountEmail} | geoLocale: ${account.geoLocale}`)
                 this.axios = new AxiosClient(account.proxy)
 
@@ -318,7 +325,6 @@ export class MicrosoftRewardsBot {
                 let ipChanged = false
                 const oldIp = currentIpAddress
 
-                // LOOP PROTECTION: Kunci thread dan paksa user ganti IP sampai strings IP-nya beneran beda
                 while (!ipChanged) {
                     this.logger.warn('main', 'IP-INTERCEPTOR', '=======================================================', 'yellow')
                     this.logger.warn('main', 'IP-INTERCEPTOR', `🔥 BATCH [${processedCount / 2}] SELESAI! SAATNYA ROTASI IP HOTSPOT! 🔥`, 'yellow')
@@ -327,6 +333,13 @@ export class MicrosoftRewardsBot {
                     this.logger.warn('main', 'IP-INTERCEPTOR', '2. Matikan "Mode Pesawat" & tunggu hotspot PC konek kembali.', 'yellow')
                     this.logger.warn('main', 'IP-INTERCEPTOR', '=======================================================', 'yellow')
                     
+                    // ==========================================
+                    // 🔥 INJEKSI ALARM WINDOWS (Biar Kedengeran Pas Nonton TV) 🔥
+                    try {
+                        require('child_process').exec(`powershell -c (New-Object Media.SoundPlayer "C:\\Windows\\Media\\notify.wav").PlaySync();`);
+                    } catch (e) {}
+                    // ==========================================
+
                     const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
                     await new Promise<void>(resolve => rl.question('👉 Jika PC sudah dapet internet baru, pencet [ENTER] buat verifikasi...', () => resolve()))
                     rl.close()

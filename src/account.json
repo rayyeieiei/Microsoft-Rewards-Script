@@ -1,8 +1,21 @@
 [
-  {
-    "email": "email@outlook.com",
-    "password": "pass123456789",
-    "totpSecret": "",
-    "recoveryEmail": "recovery@gmail.com"
-  }
+    		  {
+        "email": "email@kamu.com",
+        "password": "passwordkamu",
+        "totpSecret": "",
+        "recoveryEmail": "emailrecovery@kamu.com",
+        "geoLocale": "auto",
+        "langCode": "en",
+        "proxy": {
+            "proxyAxios": false,
+            "url": "",
+            "port": 0,
+            "username": "",
+            "password": ""
+        },
+        "saveFingerprint": {
+            "mobile": true,
+            "desktop": true
+        }
+    }
 ]
