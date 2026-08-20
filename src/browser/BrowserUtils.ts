@@ -213,23 +213,48 @@ export default class BrowserUtils {
 
     async ghostClick(page: Page, selector: string, options?: ClickOptions): Promise<boolean> {
         try {
-            this.bot.logger.debug(
-                this.bot.isMobile,
-                'GHOST-CLICK',
-                `Trying to click selector: ${selector}, options: ${JSON.stringify(options)}`
-            )
+            const useGhost = this.bot.config.useGhostCursor ?? true
 
-            // Wait for selector to exist before clicking
-            await page.waitForSelector(selector, { timeout: 1000 }).catch(() => {})
+            if (useGhost) {
+                this.bot.logger.debug(
+                    this.bot.isMobile,
+                    'GHOST-CLICK',
+                    `[Human-Mimicry] Bezier curve cursor movement to: ${selector}`
+                )
 
-            const cursor = createCursor(page as any)
-            await cursor.click(selector, options)
+                await page.waitForSelector(selector, { timeout: 1500 }).catch(() => {})
 
-            return true
+                try {
+                    const cursor = createCursor(page as any)
+                    // Add hard 5-second timeout to prevent ghost cursor from hanging indefinitely on slow sockets
+                    await Promise.race([
+                        cursor.click(selector, options),
+                        new Promise((_, reject) => setTimeout(() => reject(new Error('Ghost cursor movement timeout (5s)')), 5000))
+                    ])
+                    return true
+                } catch (ghostError) {
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'GHOST-CLICK',
+                        `Ghost cursor click failed for ${selector}, falling back to standard click: ${ghostError instanceof Error ? ghostError.message : String(ghostError)}`
+                    )
+                    await page.click(selector, { timeout: 3000, force: true }).catch(() => {})
+                    return true
+                }
+            } else {
+                this.bot.logger.debug(
+                    this.bot.isMobile,
+                    'STANDARD-CLICK',
+                    `Standard Playwright click for: ${selector}`
+                )
+                await page.waitForSelector(selector, { timeout: 1500 }).catch(() => {})
+                await page.click(selector, { timeout: 3000 }).catch(() => {})
+                return true
+            }
         } catch (error) {
             this.bot.logger.warn(
                 this.bot.isMobile,
-                'GHOST-CLICK',
+                'GHOST-CLICK-ERROR',
                 `Failed for ${selector}: ${error instanceof Error ? error.message : String(error)}`
             )
             return false
