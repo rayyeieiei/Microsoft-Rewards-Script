@@ -4,6 +4,7 @@ import type { Counters, DashboardData } from '../../../interface/DashboardData'
 
 import { QueryCore } from '../../QueryEngine'
 import { Workers } from '../../Workers'
+import { Database } from '../../../util/Database'
 
 export class Search extends Workers {
     private bingHome = 'https://bing.com'
@@ -74,6 +75,22 @@ export class Search extends Workers {
                 const newMissingPoints = this.bot.browser.func.missingSearchPoints(searchCounters, isMobile)
                 const newMissingPointsTotal = newMissingPoints.totalPoints
 
+                const pcProg = searchCounters.pcSearch?.[0] ? `${searchCounters.pcSearch[0].pointProgress}/${searchCounters.pcSearch[0].pointProgressMax}` : '0/0'
+                const edgeProg = searchCounters.pcSearch?.[1] && searchCounters.pcSearch[1].pointProgressMax > 0 ? ` (+${searchCounters.pcSearch[1].pointProgress}/${searchCounters.pcSearch[1].pointProgressMax} Edge)` : ''
+                const desktopProgress = `${pcProg}${edgeProg}`
+                const mobileProgress = searchCounters.mobileSearch?.[0] ? `${searchCounters.mobileSearch[0].pointProgress}/${searchCounters.mobileSearch[0].pointProgressMax}` : '0/0'
+
+                const curPoints = Number(this.bot.userData.currentPoints ?? 0)
+                const colPoints = Math.max(0, curPoints - Number(this.bot.userData.initialPoints ?? 0))
+
+                const currentEmail = this.bot.activeAccount?.email || this.bot.userData.userName
+                this.bot.updateDashboardAccount(currentEmail, {
+                    collectedPoints: colPoints,
+                    desktopProgress,
+                    mobileProgress,
+                    status: `Searching (${isMobile ? 'Mobile' : 'Desktop'})`
+                })
+
                 const rawGained = missingPointsTotal - newMissingPointsTotal
                 const gainedPoints = Math.max(0, rawGained)
 
@@ -86,6 +103,11 @@ export class Search extends Workers {
                     )
                 } else {
                     stagnantLoop = 0
+                    void Database.getInstance().recordActivity(
+                        currentEmail,
+                        isMobile ? 'SEARCH_MOBILE' : 'SEARCH_DESKTOP',
+                        gainedPoints
+                    )
 
                     const newBalance = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
                     this.bot.userData.currentPoints = newBalance

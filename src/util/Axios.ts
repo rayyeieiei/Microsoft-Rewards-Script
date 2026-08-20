@@ -10,7 +10,7 @@ class AxiosClient {
     private instance: AxiosInstance
     private account: AccountProxy
 
-    constructor(account: AccountProxy) {
+    constructor(account: AccountProxy, localProxyPort?: number) {
         this.account = account
 
         this.instance = axios.create({
@@ -21,6 +21,10 @@ class AxiosClient {
             const agent = this.getAgentForProxy(this.account)
             this.instance.defaults.httpAgent = agent
             this.instance.defaults.httpsAgent = agent
+        } else if (localProxyPort) {
+            const localProxyUrl = `http://127.0.0.1:${localProxyPort}`
+            this.instance.defaults.httpAgent = new HttpProxyAgent(localProxyUrl)
+            this.instance.defaults.httpsAgent = new HttpsProxyAgent(localProxyUrl)
         }
 
         axiosRetry(this.instance, {

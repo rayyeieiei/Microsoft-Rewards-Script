@@ -49,6 +49,20 @@ export const ConfigSchema = z.object({
     baseURL: z.string(),
     sessionPath: z.string(),
     headless: z.boolean(),
+    useDynamicWifiProxy: z.boolean().optional(),
+    useLocalDashboard: z.boolean().optional(),
+    useAdbIpRotation: z.boolean().optional(),
+    useGhostCursor: z.boolean().optional(),
+    usePostgres: z.boolean().optional(),
+    postgresConfig: z.object({
+        host: z.string().optional(),
+        port: z.number().optional(),
+        user: z.string().optional(),
+        password: z.string().optional(),
+        database: z.string().optional(),
+        connectionString: z.string().optional(),
+        maxConnections: z.number().optional()
+    }).optional(),
     clusters: z.number().int().nonnegative(),
     errorDiagnostics: z.boolean(),
     workers: z.object({

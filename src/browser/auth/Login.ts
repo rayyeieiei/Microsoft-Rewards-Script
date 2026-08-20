@@ -111,16 +111,23 @@ export class Login {
             let previousState: LoginState = 'UNKNOWN'
             let sameStateCount = 0
 
-while (iteration < maxIterations) {
+            while (iteration < maxIterations) {
                 if (page.isClosed()) throw new Error('Page closed unexpectedly')
 
                 iteration++
                 this.bot.logger.debug(this.bot.isMobile, 'LOGIN', `State check iteration ${iteration}/${maxIterations}`)
 
                 // =========================================================================
-                // 🛠️ SAFE DEFENSIVE INTERCEPTOR (GLOBAL BYPASS TO PASSWORD SCREEN)
+                // 🛠️ SAFE DEFENSIVE INTERCEPTOR (GLOBAL BYPASS TO PASSWORD SCREEN / FIDO)
                 // =========================================================================
                 try {
+                    const currentUrl = page.url();
+                    if (currentUrl.includes('consumers/fido/create') || currentUrl.includes('fido/create')) {
+                        this.bot.logger.warn(this.bot.isMobile, 'LOGIN-BYPASS', '🛡️ Terdeteksi paksaan Register Passkey (FIDO)! Memaksa redirect ke halaman utama rewards...');
+                        await page.goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded' }).catch(() => {});
+                        await this.bot.utils.wait(2000);
+                    }
+
                     const usePasswordBtn = page.locator('#idA_PWD').first()
                     if (await usePasswordBtn.count() > 0 && await usePasswordBtn.isVisible()) {
                         this.bot.logger.info(this.bot.isMobile, 'LOGIN-INTERCEPTOR', 'Bypassing passwordless screen. Forcing password field...', 'yellow')
@@ -210,7 +217,7 @@ while (iteration < maxIterations) {
         const isLocked = await this.checkSelector(page, this.selectors.accountLocked)
         if (isLocked) return 'ACCOUNT_LOCKED'
 
-        if (url.hostname === 'rewards.bing.com' || url.hostname === 'account.microsoft.com') return 'LOGGED_IN'
+        if (url.hostname === 'rewards.bing.com' || url.hostname === 'account.microsoft.com' || url.hostname === 'www.bing.com') return 'LOGGED_IN'
 
         const stateChecks: Array<[string, LoginState]> = [
             [this.selectors.errorAlert, 'ERROR_ALERT'],
@@ -250,7 +257,7 @@ while (iteration < maxIterations) {
         return foundStates[0] as LoginState
     }
 
- private async handleState(state: LoginState, page: Page, account: Account): Promise<boolean> {
+    private async handleState(state: LoginState, page: Page, account: Account): Promise<boolean> {
         this.bot.logger.debug(this.bot.isMobile, 'HANDLE-STATE', `Processing state: ${state}`)
 
         switch (state) {
@@ -287,7 +294,6 @@ while (iteration < maxIterations) {
                     await skipBtn.click().catch(() => {})
                     await this.bot.utils.wait(2000)
                 } else {
-                    // Kalau lu pake headful mode (headless: false), kasih waktu 10 detik buat klik "Cancel/Skip" manual di layar
                     this.bot.logger.info(this.bot.isMobile, 'LOGIN-PASSKEY', 'No auto-skip button found. Please click "Cancel/Skip" manually on the browser screen!', 'yellow')
                     await this.bot.utils.wait(10000)
                 }
@@ -342,7 +348,9 @@ while (iteration < maxIterations) {
                 return true
             }
 
-            // FIX RPL: Satukan state 2FA_TOTP ke mari biar ikut nahan thread pas lu mau input manual
+            // =======================================================
+            // 🔄 LINTER SINKRONISASI TELEMETRI: SMART RE-CHECK BATCH
+            // =======================================================
             case '2FA_TOTP':
             case 'OTP_CODE_ENTRY': { 
                 this.bot.logger.info(this.bot.isMobile, 'LOGIN-OTP', 'OTP/2FA Code Entry screen detected. Checking fallbacks...');
@@ -355,17 +363,26 @@ while (iteration < maxIterations) {
                 } 
 
                 if (this.bot.config.headless === false) {
-                    this.bot.logger.warn(this.bot.isMobile, 'LOGIN-OTP', 'MANUAL OVERRIDE: Thread locked for 60s. Enter OTP pin directly on browser screen!', 'yellow')
-                    for (let i = 0; i < 60; i++) {
-                        await this.bot.utils.wait(1000)
-                        const currentUrl = page.url()
-                        if (currentUrl.includes('rewards.bing.com') || currentUrl.includes('account.microsoft.com')) {
-                            return true 
+                    this.bot.logger.warn(this.bot.isMobile, 'LOGIN-OTP', 'MANUAL OVERRIDE: Thread locked! Masukkan PIN/OTP langsung di layar browser...', 'yellow')
+                    
+                    let isLoginSuccess = false;
+                    // Loop interaktif memantau status transisi url per 3 detik (Maksimal 90 detik)
+                    for (let i = 0; i < 30; i++) {
+                        await this.bot.utils.wait(3000);
+                        const currentUrl = page.url();
+                        
+                        // Jika terdeteksi dialihkan ke dashboard, interupsi loop langsung diputus
+                        if (currentUrl.includes('rewards.bing.com') || currentUrl.includes('account.microsoft.com') || currentUrl.includes('www.bing.com')) {
+                            this.bot.logger.info(this.bot.isMobile, 'LOGIN-OTP', '🚀 Sukses Masuk! Bot mendeteksi sesi rewards aktif, melanjutkan task...', 'green');
+                            isLoginSuccess = true;
+                            break;
                         }
                     }
+
+                    if (isLoginSuccess) return true;
                 }
 
-                throw new Error('Forced OTP verification checkpoint active with no automated bypass options.')
+                throw new Error('Forced OTP verification checkpoint active with no automated bypass options atau waktu tunggu habis.')
             }
 
             case 'KMSI_PROMPT':

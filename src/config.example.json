@@ -2,6 +2,20 @@
     "baseURL": "https://rewards.bing.com",
     "sessionPath": "sessions",
     "headless": false,
+    "useDynamicWifiProxy": false,
+    "useLocalDashboard": false,
+    "useAdbIpRotation": true,
+    "useGhostCursor": true,
+    "usePostgres": false,
+    "postgresConfig": {
+        "host": "localhost",
+        "port": 5432,
+        "user": "postgres",
+        "password": "yourpassword",
+        "database": "rewards_db",
+        "connectionString": "",
+        "maxConnections": 10
+    },
     "clusters": 1,
     "errorDiagnostics": false,
     "workers": {

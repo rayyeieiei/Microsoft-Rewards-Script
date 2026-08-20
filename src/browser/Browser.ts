@@ -7,7 +7,6 @@ import { loadSessionData, saveFingerprintData } from '../util/Load'
 import { UserAgentManager } from './UserAgent'
 
 import type { Account, AccountProxy } from '../interface/Account'
-import os from 'os'
 
 /* Test Stuff
 https://abrahamjuliot.github.io/creepjs/
@@ -44,47 +43,31 @@ class Browser {
         this.bot = bot
     }
 
-    // Fungsi otomatis nyari IP Wi-Fi yang aktif dari adapter laptop lu
-    private getWifiIpAddress(): string {
-        const interfaces = os.networkInterfaces();
-        for (const name of Object.keys(interfaces)) {
-            if (name.toLowerCase().includes('wi-fi') || name.toLowerCase().includes('wireless')) {
-                const iface = interfaces[name];
-                if (iface) {
-                    for (const config of iface) {
-                        if (config.family === 'IPv4' && !config.internal) {
-                            return config.address;
-                        }
-                    }
-                }
-            }
-        }
-        // Fallback IP jika hotspot tidak terdeteksi saat inisialisasi awal
-        return '10.125.209.179'; 
-        
-    }
-
     async createBrowser(account: Account): Promise<BrowserCreationResult> {
         let browser: any; // Menggunakan variabel penampung utama yang bisa diakses di semua blok bawah
         
         try {
-            const proxyConfig = account.proxy.url
-                ? {
-                      server: this.formatProxyServer(account.proxy),
-                      ...(account.proxy.username &&
-                          account.proxy.password && {
-                              username: account.proxy.username,
-                              password: account.proxy.password
-                          })
-                  }
-                : undefined;
+            let proxyConfig: any = undefined;
+            if (account.proxy.url) {
+                proxyConfig = {
+                    server: this.formatProxyServer(account.proxy),
+                    ...(account.proxy.username &&
+                        account.proxy.password && {
+                            username: account.proxy.username,
+                            password: account.proxy.password
+                        })
+                };
+            } else if (this.bot.localProxyPort) {
+                proxyConfig = {
+                    server: `http://127.0.0.1:${this.bot.localProxyPort}`
+                };
+            }
 
            browser = await rebrowser.chromium.launch({
                 headless: this.bot.config.headless === true, // Memastikan bertipe data boolean murni
                 channel: this.bot.config.headless ? undefined : 'chrome', // FIX: Jika false, paksa pakai Chrome biasa (bukan headless-shell) agar jendelanya nongol
                 args: [...Browser.BROWSER_ARGS],
-                proxy: proxyConfig, 
-                localAddress: this.getWifiIpAddress() 
+                proxy: proxyConfig
             } as any);
 
             this.bot.logger.info(this.bot.isMobile, 'BROWSER', 'Browser launched successfully')
