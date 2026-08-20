@@ -3,6 +3,12 @@ export interface Config {
     baseURL: string
     sessionPath: string
     headless: boolean
+    useDynamicWifiProxy?: boolean
+    useLocalDashboard?: boolean
+    useAdbIpRotation?: boolean
+    useGhostCursor?: boolean
+    usePostgres?: boolean
+    postgresConfig?: PostgresConfig
     clusters: number
     errorDiagnostics: boolean
     workers: ConfigWorkers
@@ -80,4 +86,14 @@ export interface WebhookNtfyConfig {
     title?: string
     tags?: string[]
     priority?: 1 | 2 | 3 | 4 | 5 // 5 highest (important)
+}
+
+export interface PostgresConfig {
+    host?: string
+    port?: number
+    user?: string
+    password?: string
+    database?: string
+    connectionString?: string
+    maxConnections?: number
 }

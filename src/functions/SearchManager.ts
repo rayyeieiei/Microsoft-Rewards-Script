@@ -360,7 +360,7 @@ export class SearchManager {
         return { mobilePoints, desktopPoints }
     }
 
-private async createDesktopSession(account: Account, accountEmail: string): Promise<BrowserSession> {
+    private async createDesktopSession(account: Account, accountEmail: string): Promise<BrowserSession> {
         this.bot.logger.info('main', 'SEARCH-DESKTOP-LOGIN', 'Init desktop session')
         this.bot.logger.debug(
             'main',
@@ -404,6 +404,15 @@ private async createDesktopSession(account: Account, accountEmail: string): Prom
         this.bot.logger.debug('main', 'SEARCH-DESKTOP-LOGIN', 'Cookies stored')
         this.bot.logger.info('main', 'SEARCH-DESKTOP-LOGIN', 'Desktop session ready')
 
+        // =======================================================================
+        // 🧹 PELATUK KLAIM POIN NYANGKUT (DESKTOP MODE)
+        // Posisi: Persis setelah bot selesai verifikasi login di dashboard Rewards
+        // =======================================================================
+      if (this.bot.mainDesktopPage) {
+            await this.bot.workers.doClaimPendingPoints(this.bot.mainDesktopPage); // 👈 IDUPIN LAGI BRE!
+        }
+        // =======================================================================
+
         return session
     }
 
@@ -440,6 +449,10 @@ private async createDesktopSession(account: Account, accountEmail: string): Prom
                 this.bot.logger.debug('main', 'SEARCH-MOBILE-SEARCH', 'activities.doSearch (mobile)')
 
                 const pointsEarned = await this.bot.activities.doSearch(data, this.bot.mainMobilePage, true)
+
+                if (this.bot.mainMobilePage) {
+                    await this.bot.workers.doClaimPendingPoints(this.bot.mainMobilePage)
+                }
 
                 this.bot.logger.info(
                     'main',
@@ -583,6 +596,10 @@ private async createDesktopSession(account: Account, accountEmail: string): Prom
                 )
 
                 const pointsEarned = await this.bot.activities.doSearch(data, this.bot.mainDesktopPage, false)
+
+                if (this.bot.mainDesktopPage) {
+                    await this.bot.workers.doClaimPendingPoints(this.bot.mainDesktopPage)
+                }
 
                 this.bot.logger.info(
                     'main',

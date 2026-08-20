@@ -8,11 +8,11 @@ import { UrlReward } from './activities/api/UrlReward'
 import { Quiz } from './activities/api/Quiz'
 import { FindClippy } from './activities/api/FindClippy'
 import { DoubleSearchPoints } from './activities/api/DoubleSearchPoints'
+import { ClaimBonusPoints } from './activities/api/ClaimBonusPoints' // 👈 SUNTIKAN STAR BONUS 2100
 import { SearchOnBing } from './activities/browser/SearchOnBing'
 import { Search } from './activities/browser/Search'
 
-// FIX: Tambahkan PunchCard di baris import ini
-import type { BasePromotion, DashboardData, FindClippyPromotion, PurplePromotionalItem, PunchCard } from '../interface/DashboardData'
+import type { BasePromotion, DashboardData, FindClippyPromotion, PunchCard, PurplePromotionalItem } from '../interface/DashboardData'
 import type { Promotion } from '../interface/AppDashBoardData'
 
 export default class Activities {
@@ -22,13 +22,11 @@ export default class Activities {
     
     doSearchOnBing = async (promotion: BasePromotion, page: Page) => await new SearchOnBing(this.bot).doSearchOnBing(promotion, page)
 
-    // FIX: Tambahkan punchCard?: PunchCard agar sinkron dengan Workers.ts dan UrlReward.ts
     doUrlReward = async (promotion: BasePromotion, page: Page, punchCard?: PunchCard) => {
         await new UrlReward(this.bot).doUrlReward(promotion, page, punchCard)
     }
 
-    // SINKRONISASI: Menyiapkan quiz untuk masa depan jika ingin dibuat Hybrid juga
-    doQuiz = async (promotion: BasePromotion, page: Page) => {
+   doQuiz = async (promotion: BasePromotion) => {
         await new Quiz(this.bot).doQuiz(promotion) 
     }
 
@@ -41,4 +39,8 @@ export default class Activities {
     doReadToEarn = async () => await new ReadToEarn(this.bot).doReadToEarn()
 
     doDailyCheckIn = async () => await new DailyCheckIn(this.bot).doDailyCheckIn()
+
+    doClaimBonusPoints = async () => {
+        await new ClaimBonusPoints(this.bot).claimBonusPoints()
+    }
 }

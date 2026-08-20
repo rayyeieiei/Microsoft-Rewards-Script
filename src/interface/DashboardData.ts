@@ -27,15 +27,14 @@ export interface DashboardData {
     coupons: unknown[]
     couponBannerPromotion: null
     popUpPromotions: BingUfMachineTranslationPromo
-    pointClaimBannerPromotion: null
-    highValueSweepstakesPromotions: HighValueSweepstakesPromotion[]
+    pointClaimBannerPromotion: BasePromotion | null
     revIpCountryName: null
     shareAndWinPromotion: null
     referAndEarnPromotion: ReferAndEarnPromotion
     giveWithBingNoticePromotion: null
     levelUpHeroBannerPromotion: null
-    monthlyBonusHeroBannerPromotion: null
-    starBonusWeeklyBannerPromotion: null
+    monthlyBonusHeroBannerPromotion: BasePromotion | null 
+    starBonusWeeklyBannerPromotion: BasePromotion | null
     userGeneratedContentPromotion: null
     created: Date
     findClippyPromotion: FindClippyPromotion

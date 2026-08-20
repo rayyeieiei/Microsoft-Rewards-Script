@@ -7,6 +7,7 @@ export interface Account {
     langCode: 'en' | string
     proxy: AccountProxy
     saveFingerprint: ConfigSaveFingerprint
+    currentPoints?: number;
 }
 
 export interface AccountProxy {
