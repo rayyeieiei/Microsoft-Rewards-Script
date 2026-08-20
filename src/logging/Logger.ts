@@ -5,6 +5,8 @@ import { sendNtfy } from './Ntfy'
 import type { MicrosoftRewardsBot } from '../index'
 import { errorDiagnostic } from '../util/ErrorDiagnostic'
 import type { LogFilter } from '../interface/Config'
+import { logEmitter } from '../util/DashboardServer'
+import { Database } from '../util/Database'
 
 export type Platform = boolean | 'main'
 export type LogLevel = 'info' | 'warn' | 'error' | 'debug'
@@ -77,6 +79,11 @@ export class Logger {
 
         const levelTag = level.toUpperCase()
         const cleanMsg = `[${now}] [${userName}] [${levelTag}] ${platformText(isMobile)} [${title}] ${formatted}`
+        logEmitter.emit('log', cleanMsg)
+
+        if (level === 'error' || level === 'warn') {
+            void Database.getInstance().insertSystemLog(level, title, formatted)
+        }
 
         const config = this.bot.config
 
