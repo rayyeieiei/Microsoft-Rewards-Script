@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nexus.io - Rewards Commander</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="sidebar">
+        <h2>NEXUS.IO</h2>
+        <button id="nav-dash" class="nav-btn active">📊 Dashboard</button>
+        <button id="nav-set" class="nav-btn">⚙️ Settings</button>
+    </div>
+    
+    <div class="main-content">
+        <div id="tab-dashboard" class="tab-view">
+           <div class="header">
+            <h1>Farm Status Dashboard</h1>
+            <div style="display: flex; gap: 10px;">
+                <button id="refresh-btn" class="btn-glow" style="background: #1e293b; color: #00ffcc; box-shadow: none;">🔄 REFRESH</button>
+                <button id="start-btn" class="btn-glow">🚀 START PANEN POIN</button>
+            </div>
+        </div>
+
+            <div class="stats-grid">
+                <div class="card">
+                    <h3>Total Poin Terkumpul</h3>
+                    <p id="total-points" class="text-neon">+0 pts</p>
+                </div>
+                <div class="card">
+                    <h3>Estimasi Saldo (Rupiah)</h3>
+                    <p id="est-rupiah">Rp 0</p>
+                    <span class="subtitle">Berdasarkan Alfamart Rp100k</span>
+                </div>
+                <div class="card">
+                    <h3>Potensi Sebulan</h3>
+                    <p id="est-monthly">Rp 0 / bln</p>
+                    <span class="subtitle">Estimasi laju harian</span>
+                </div>
+                <div class="card">
+                    <h3>Progress Alfamart Rp100k</h3>
+                    <p id="progress-text">0%</p>
+                    <div class="progress-bar-bg">
+                        <div class="progress-bar-fill" id="progress-fill" style="width: 0%;"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="chart-container card">
+                <h3>Historial Pendapatan Poin (7 Hari Terakhir)</h3>
+                <canvas id="pointsChart"></canvas>
+            </div>
+
+            <div class="bottom-grid">
+                <div class="card table-container">
+                    <h3>Performa Akun</h3>
+                    <table class="account-table">
+                        <thead>
+                            <tr>
+                                <th>Email</th>
+                                <th>Panen Hari Ini</th>
+                                <th>Total Poin</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="account-list">
+                            </tbody>
+                    </table>
+                </div>
+                <div class="console-box">
+                    <div class="console-header">📜 Live Bot Logs Monitor</div>
+                    <div id="log-output" class="console-content">
+                        [SYSTEM] Menunggu komando dari terminal utama...
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="tab-settings" class="tab-view" style="display: none;">
+            <div class="header">
+                <h1>Bot Configuration</h1>
+                <button id="save-btn" class="btn-glow">💾 SAVE CONFIG</button>
+            </div>
+            <div class="settings-form">
+                <div class="form-group">
+                    <label>🔄 Thread Clusters (Browser Bersamaan)</label>
+                    <input type="number" id="cfg-clusters" min="1" max="10">
+                </div>
+                <div class="form-group">
+                    <label>🏢 Mode Jaringan</label>
+                    <select id="cfg-office">
+                        <option value="false">🏠 Home Mode (Auto IP Rotation)</option>
+                        <option value="true">🏢 Office Mode (Manual LAN Hotspot)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>🔗 Discord Webhook URL</label>
+                    <input type="text" id="cfg-discord-url">
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
