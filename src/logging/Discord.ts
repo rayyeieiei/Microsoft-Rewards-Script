@@ -138,6 +138,14 @@ function translateLog(content: string): { text: string; isImportant: boolean; sh
         return { text, isImportant: false, shouldSend: true }
     }
 
+    // 7b. SIDE QUEST / KARTU PROMOSI SELESAI
+    const sideQuestDoneMatch = content.match(/Completed \| offerId=(.*?) \| \+(\d+) points/)
+    if (sideQuestDoneMatch) {
+        const [, offerId, points] = sideQuestDoneMatch
+        text = `✨ **Side Quest / Kartu Promosi Tuntas (+${points} Poin)!**\n🎯 ID Misi: \`${offerId}\``
+        return { text, isImportant: false, shouldSend: true }
+    }
+
     // 8. STAR BONUS 2100 POIN
     if (content.includes('Star Bonus points claimed!')) {
         text = `🌟 **JACKPOT STAR BONUS!**\nTuyul berhasil menyedot koin akbar! Buruan cek saldo lu bre! 🚀`
