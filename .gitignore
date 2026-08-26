@@ -5,7 +5,7 @@ node_modules/
 dist/
 
 # Browser binaries & sessions
-browser/
+/browser/
 src/browser/sessions/
 src/sessions/
 

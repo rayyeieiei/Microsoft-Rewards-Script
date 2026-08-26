@@ -28,14 +28,24 @@ export class AirplaneMode {
             const ipSebelum = await this.checkIP();
             console.log(`🌍  [ADB-NETWORK] IP Lama kamu: [ ${ipSebelum} ]`);
 
-            console.log('\n✈️  [ADB-NETWORK] Menyalakan Airplane Mode (Membunuh sinyal IM3)...');
-            await execAsync('adb shell cmd connectivity airplane-mode enable');
+            console.log('\n✈️  [ADB-NETWORK] Menyalakan Airplane Mode (Membunuh sinyal data)...');
+            try {
+                await execAsync('adb shell cmd connectivity airplane-mode enable');
+            } catch {
+                await execAsync('adb shell settings put global airplane_mode_on 1').catch(() => {});
+                await execAsync('adb shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state true').catch(() => {});
+            }
             
             console.log(`⏳  [ADB-NETWORK] Nunggu ${delayBetweenMs / 1000} detik biar IP provider keriset...`);
             await this.wait(delayBetweenMs);
 
-            console.log('📶  [ADB-NETWORK] Mematikan Airplane Mode (Mencari sinyal 4G baru)...');
-            await execAsync('adb shell cmd connectivity airplane-mode disable');
+            console.log('📶  [ADB-NETWORK] Mematikan Airplane Mode (Mencari sinyal 4G/5G baru)...');
+            try {
+                await execAsync('adb shell cmd connectivity airplane-mode disable');
+            } catch {
+                await execAsync('adb shell settings put global airplane_mode_on 0').catch(() => {});
+                await execAsync('adb shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state false').catch(() => {});
+            }
 
             console.log(`⏳  [ADB-NETWORK] Nunggu 8 detik biar sinyal radio HP stabil...`);
             await this.wait(8000);
