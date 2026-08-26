@@ -27,19 +27,29 @@ export class UrlReward extends Workers {
                 await Promise.race<void>([
                     (async () => {
                         // 1. NAVIGASI DINAMIS
-                        let targetUrl = 'https://rewards.bing.com/earn'
+                        let targetUrl = 'https://rewards.bing.com/dashboard'
+                        const destUrl = (promotion.destinationUrl || '').trim()
+                        const offerIdLower = (promotion.offerId || '').toLowerCase()
+
                         if (punchCard && punchCard.parentPromotion?.destinationUrl) {
                             targetUrl = punchCard.parentPromotion.destinationUrl
                             this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Navigating to Punch Card: ${promotion.title}`)
-                        } else if (promotion.destinationUrl && promotion.destinationUrl.includes('rewards.bing.com')) {
-                            targetUrl = promotion.destinationUrl
-                            this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Navigating to Promo URL: ${promotion.title}`)
-                        } else if (promotion.offerId.includes('DailySet')) {
+                        } else if (offerIdLower.includes('dailyset')) {
+                            // WAJIB: Daily Set selalu dikerjakan di Dashboard Rewards agar Kuis & Poll terselesaikan!
+                            targetUrl = 'https://rewards.bing.com/dashboard'
+                            this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Navigating to Daily Set: "${promotion.title}"`)
+                        } else if (destUrl.includes('rewards.bing.com')) {
+                            targetUrl = destUrl
+                            this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Navigating to Rewards URL: "${promotion.title}"`)
+                        } else {
                             targetUrl = 'https://rewards.bing.com/dashboard'
                         }
 
                         await temp_page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
                         
+                        let clicked = false
+                        let isOnCooldown = false
+
                         // 2. UI PREPARATION (Scroll & Expand)
                         for (let i = 0; i < 2; i++) {
                             await temp_page.mouse.wheel(0, 400).catch(() => {})
@@ -84,9 +94,6 @@ export class UrlReward extends Workers {
                             `.punchcard button`,
                             `.punchcard a`
                         ]
-
-                        let clicked = false
-                        let isOnCooldown = false
 
                         for (const sel of selectors) {
                             const elements = temp_page.locator(sel)
