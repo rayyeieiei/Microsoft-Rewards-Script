@@ -61,8 +61,7 @@ export class Search extends Workers {
             const targetUrl = this.searchPageURL ? this.searchPageURL : this.bingHome
             this.bot.logger.debug(isMobile, 'SEARCH-BING', `Navigating to search page | url=${targetUrl}`)
 
-            await page.goto(targetUrl)
-            await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {})
+            await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
             await this.bot.browser.utils.tryDismissAllMessages(page)
 
             let stagnantLoop = 0
@@ -302,8 +301,7 @@ export class Search extends Workers {
             const cvid = randomBytes(16).toString('hex')
             const url = `${this.bingHome}/search?q=${encodeURIComponent(query)}&PC=U531&FORM=ANNTA1&cvid=${cvid}`
 
-            await searchPage.goto(url)
-            await searchPage.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {})
+            await searchPage.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
             await this.bot.browser.utils.tryDismissAllMessages(searchPage)
         }
 

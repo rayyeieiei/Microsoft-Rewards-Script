@@ -109,6 +109,46 @@ class Browser {
 
             await context.addCookies(sessionData.cookies);
 
+            // ==================== ULTRA DATA SAVER (HEMAT KUOTA 80%-90%) ====================
+            await (context as unknown as BrowserContext).route('**/*', (route) => {
+                const req = route.request()
+                const type = req.resourceType()
+                const url = req.url().toLowerCase()
+
+                // 1. Blokir resource tipe berat (Gambar, Video, Audio, Font)
+                if (type === 'image' || type === 'media' || type === 'font') {
+                    return route.abort()
+                }
+
+                // 2. Blokir domain iklan, tracker, dan telemetri yang nyedot kuota
+                if (
+                    url.includes('clarity.ms') ||
+                    url.includes('bat.bing.com') ||
+                    url.includes('adnxs.com') ||
+                    url.includes('doubleclick.net') ||
+                    url.includes('google-analytics.com') ||
+                    url.includes('googletagmanager.com') ||
+                    url.includes('scorecardresearch.com') ||
+                    url.includes('browser.events.data.microsoft.com') ||
+                    url.includes('telemetry.microsoft.com') ||
+                    url.includes('c.msn.com') ||
+                    url.includes('/fd/ls/') || // Flighting / telemetry logs Bing
+                    url.includes('/as/api/') || // Bing Ad services
+                    url.includes('/th?id=') ||  // Bing image thumbnails & wallpaper (Paling boros kuota!)
+                    url.includes('/sa/simg/') || // Search image sprites
+                    url.includes('msn.com/api/news') || // MSN newsfeed video/images payload
+                    url.includes('bing.com/overlay') || // Copilot heavy overlay
+                    url.includes('bing.com/videos') ||
+                    url.includes('bing.com/images') ||
+                    url.includes('bing.com/maps')
+                ) {
+                    return route.abort()
+                }
+
+                // Izinkan document HTML, scripts penting Rewards, XHR/Fetch API, dan CSS
+                return route.continue()
+            });
+
             if (
                 (account.saveFingerprint.mobile && this.bot.isMobile) ||
                 (account.saveFingerprint.desktop && !this.bot.isMobile)
