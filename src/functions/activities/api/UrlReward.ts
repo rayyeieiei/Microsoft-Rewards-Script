@@ -137,6 +137,10 @@ export class UrlReward extends Workers {
                                     }
 
                                     await el.scrollIntoViewIfNeeded().catch(() => {})
+
+                                    // Dengarkan jika ada tab baru / popup yang terbuka setelah kartu diklik
+                                    const newPagePromise = temp_page.context().waitForEvent('page', { timeout: 3500 }).catch(() => null);
+
                                     await el.evaluate((node: HTMLElement) => {
                                         node.click()
                                         node.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
@@ -145,30 +149,44 @@ export class UrlReward extends Workers {
                                     clicked = true
                                     this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Target Hit: ${promotion.title}`, 'green');
 
-                                    // 4. DETEKSI KUIS & POLL (RPL AUTO-SCANNER)
-                                    await this.bot.utils.wait(2000)
-                                    const hasQuizElements = await temp_page.evaluate(() => {
-                                        return document.querySelector('#rqStartQuiz, #rqStartQuizToken, .btOption, #btoption0, .rqOptions') !== null;
+                                    const popupPage = await newPagePromise;
+                                    const activeTab = popupPage || temp_page;
+
+                                    await activeTab.waitForLoadState('domcontentloaded').catch(() => {});
+                                    await this.bot.utils.wait(2000);
+
+                                    // 4. DETEKSI & SELESAIKAN KUIS / POLL INTERAKTIF
+                                    const hasQuizElements = await activeTab.evaluate(() => {
+                                        return document.querySelector('#rqStartQuiz, #rqStartQuizToken, .btOption, #btoption0, .rqOptions, .wk_Option, input[value*="Start"]') !== null;
                                     }).catch(() => false);
 
-                                    const isRealQuiz = promotion.pointProgressMax > 5 || hasQuizElements;
+                                    // Jika ada tombol Start Quiz, klik!
+                                    const startQuizBtn = activeTab.locator('#rqStartQuiz, #rqStartQuizToken, input[type="button"][value*="Start"]').first();
+                                    if (await startQuizBtn.isVisible().catch(() => false)) {
+                                        await startQuizBtn.click({ force: true }).catch(() => {});
+                                        await this.bot.utils.wait(2000);
+                                    }
 
-                                    if (isRealQuiz) {
-                                        if (promotion.pointProgressMax <= 5) {
-                                             this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Detected Poll (+5). Clicking option...`);
-                                             await temp_page.evaluate(() => {
-                                                 const option = document.querySelector('.btOption, #btoption0, .bt_option');
-                                                 if (option) (option as HTMLElement).click();
-                                             }).catch(() => {});
-                                             await this.bot.utils.wait(3000);
-                                        } else {
-                                             this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Detected Real Quiz (+${promotion.pointProgressMax}). Solving...`);
-                                             await this.bot.activities.doQuiz(promotion);
-                                        }
+                                    // Jika ada opsi jawaban / poll, klik salah satu opsi!
+                                    const quizOption = activeTab.locator('.btOption, #btoption0, .rqOptions, .wk_Option, [role="radio"]').first();
+                                    if (await quizOption.isVisible().catch(() => false)) {
+                                        await quizOption.click({ force: true }).catch(() => {});
+                                        await this.bot.utils.wait(2500);
+                                    }
+
+                                    const isDailySetOrQuiz = (promotion.offerId ?? '').toLowerCase().includes('dailyset') || (promotion.offerId ?? '').toLowerCase().includes('quiz') || hasQuizElements;
+
+                                    if (isDailySetOrQuiz && promotion.pointProgressMax > 0) {
+                                        this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Solving Quiz / Daily Set Activity (+${promotion.pointProgressMax})...`);
+                                        await this.bot.activities.doQuiz(promotion);
                                     } else {
                                         this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Standard link. Simulating safe scroll...`);
-                                        await temp_page.mouse.wheel(0, 300).catch(() => {});
+                                        await activeTab.mouse.wheel(0, 300).catch(() => {});
                                         await this.bot.utils.wait(3000);
+                                    }
+
+                                    if (popupPage && popupPage !== temp_page) {
+                                        await popupPage.close().catch(() => {});
                                     }
                                     break // Keluar dari loop pencarian iterasi
                                 }
