@@ -754,6 +754,15 @@ export class MicrosoftRewardsBot {
                                 : null
 
                         if (activePage) {
+                            if (this.config.workers.doDailySet) {
+                                await this.workers.doDailySet(postSearchData, activePage)
+                            }
+                            if (this.config.workers.doSpecialPromotions) {
+                                await this.workers.doSpecialPromotions(postSearchData, activePage)
+                            }
+                            if (this.config.workers.doMorePromotions) {
+                                await this.workers.doMorePromotions(postSearchData, activePage)
+                            }
                             if (this.config.workers.doPunchCards) {
                                 await this.workers.doPunchCards(postSearchData, activePage)
                             }
