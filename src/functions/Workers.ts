@@ -189,12 +189,15 @@ export class Workers {
         const rawPromotions = [
             ...(data.morePromotions ?? []),
             ...(data.morePromotionsWithoutPromotionalItems ?? []),
+            ...(data.promotionalItems ?? []),
+            ...(data.promotionalItem ? [data.promotionalItem] : []),
+            ...(data.componentImpressionPromotions ?? []),
             ...((data.welcomeTour as any)?.promotions ?? []),
             ...((data.userInterests as any)?.promotions ?? [])
         ] as unknown as BasePromotion[]
 
         const uniquePromos = [...new Map(
-            rawPromotions.filter(p => Boolean(p && p.offerId)).map(p => [p.offerId, p] as const)
+            rawPromotions.filter(p => Boolean(p && (p.offerId || p.title))).map(p => [p.offerId || p.title, p] as const)
         ).values()]
 
         const activitiesUncompleted = uniquePromos.filter(x => {

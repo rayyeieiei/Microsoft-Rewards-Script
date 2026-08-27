@@ -26,195 +26,198 @@ export class UrlReward extends Workers {
                 // FIX RPL: Tambahkan <void> setelah Promise.race biar TypeScript gak bingung
                 await Promise.race<void>([
                     (async () => {
-                        // 1. NAVIGASI DINAMIS
-                        let targetUrl = 'https://rewards.bing.com/dashboard'
                         const destUrl = (promotion.destinationUrl || '').trim()
-                        const offerIdLower = (promotion.offerId || '').toLowerCase()
 
-                        if (punchCard && punchCard.parentPromotion?.destinationUrl) {
-                            targetUrl = punchCard.parentPromotion.destinationUrl
-                            this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Navigating to Punch Card: ${promotion.title}`)
-                        } else if (offerIdLower.includes('dailyset')) {
-                            // WAJIB: Daily Set selalu dikerjakan di Dashboard Rewards agar Kuis & Poll terselesaikan!
-                            targetUrl = 'https://rewards.bing.com/dashboard'
-                            this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Navigating to Daily Set: "${promotion.title}"`)
-                        } else if (destUrl.includes('rewards.bing.com')) {
-                            targetUrl = destUrl
-                            this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Navigating to Rewards URL: "${promotion.title}"`)
-                        } else {
-                            targetUrl = 'https://rewards.bing.com/dashboard'
-                        }
+                        // JALUR 1: Jika memiliki direct destinationUrl (Search Query / MSN / External link), navigasi langsung ke URL tersebut!
+                        if (destUrl && !destUrl.toLowerCase().endsWith('rewards.bing.com/dashboard') && !destUrl.toLowerCase().endsWith('rewards.bing.com/')) {
+                            this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Navigating to Destination URL: "${promotion.title}"`)
+                            await temp_page.goto(destUrl, { waitUntil: 'domcontentloaded', timeout: 20000, referer: 'https://rewards.bing.com/' }).catch(() => {})
+                            await this.bot.utils.wait(2000)
 
-                        await temp_page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
-                        
-                        let clicked = false
-                        let isOnCooldown = false
-
-                        // 2. UI PREPARATION (Scroll & Expand)
-                        for (let i = 0; i < 2; i++) {
-                            await temp_page.mouse.wheel(0, 400).catch(() => {})
-                            await this.bot.utils.wait(1000)
-                        }
-
-                        await temp_page.evaluate(() => {
-                            const buttons = Array.from(document.querySelectorAll('button[aria-expanded="false"], .expansion-button, [data-bi-id*="expand"]'))
-                            buttons.forEach((btn: any) => (btn as HTMLElement).click())
-                        }).catch(() => {})
-
-                        await this.bot.utils.wait(1500)
-
-                        // 3. PREDATOR SELECTOR DENGAN SCANNER COOLDOWN & PUNCHCARD TARGETING
-                        const cleanWords = (promotion.title || '').replace(/[^\w\s]/gi, ' ').split(/\s+/).filter(Boolean)
-                        const firstKeywords = cleanWords.slice(0, 4).join(' ')
-                        const firstWord = cleanWords[0] || ''
-
-                        const selectors = [
-                            `[data-bi-id*="${promotion.offerId}"]`,
-                            `a[href*="${promotion.offerId}"]`,
-                            `[id*="${promotion.offerId}"]`,
-                            `[data-bi-id*="pcchild"]`,
-                            `button[id*="pcchild"]`,
-                            `a[href*="pcchild"]`,
-                            `[id*="pcchild"]`,
-                            `div[role="button"]:has-text("${firstKeywords}")`,
-                            `button:has-text("${firstKeywords}")`,
-                            `a:has-text("${firstKeywords}")`,
-                            `div[role="button"]:has-text("${firstWord}")`,
-                            `button:has-text("${firstWord}")`,
-                            `a:has-text("${firstWord}")`,
-                            `.p-card:has-text("${firstWord}") button`,
-                            `.p-card:has-text("${firstWord}") a`,
-                            `.punchcard:has-text("${firstWord}") button`,
-                            `.punchcard:has-text("${firstWord}") a`,
-                            `button:has-text("Claim")`,
-                            `button:has-text("Klaim")`,
-                            `button:has-text("Complete")`,
-                            `.p-card button`, 
-                            `.promo-tile button`,
-                            `.punchcard button`,
-                            `.punchcard a`
-                        ]
-
-                        for (const sel of selectors) {
-                            const elements = temp_page.locator(sel)
-                            const count = await elements.count().catch(() => 0)
-                            
-                            for (let i = 0; i < count; i++) {
-                                const el = elements.nth(i)
-                                if (await el.isVisible().catch(() => false)) {
-                                    
-                                    // MATA BATIN: SCAN STATUS TOMBOL (Trash, Cooldown, Completed)
-                                    const statusInfo = await el.evaluate((node: HTMLElement) => {
-                                        const txt = (node.innerText || '').toLowerCase();
-                                        const isTrash = txt.includes('feedback') || txt.includes('suggest') || txt.includes('terms') || node.closest('#footer') !== null;
-                                        
-                                        // Deteksi 24h Cooldown (Text & Class, BUKAN substring liar di outerHTML)
-                                        const isCooldown = txt.includes('come back') || 
-                                                           txt.includes('check back') || 
-                                                           txt.includes('locked') || 
-                                                           node.hasAttribute('disabled') || 
-                                                           node.classList.contains('locked') || 
-                                                           node.classList.contains('disabled');
-                                        
-                                        // Deteksi kalau task udah selesai (Checkmark icon / class / aria)
-                                        const hasCheckmark = node.querySelector('.mee-icon-CheckMark, [data-icon-name="CheckMark"], .c-icon-check, .complete-check, svg[aria-label*="Complete"]') !== null;
-                                        const isCompleted = hasCheckmark || 
-                                                            node.getAttribute('aria-checked') === 'true' || 
-                                                            node.classList.contains('completed') || 
-                                                            node.classList.contains('complete') ||
-                                                            txt.includes('completed') || 
-                                                            txt.includes('selesai');
-                                        
-                                        return { isTrash, isCooldown, isCompleted };
-                                    }).catch(() => ({ isTrash: false, isCooldown: false, isCompleted: false }));
-
-                                    if (statusInfo.isTrash) continue;
-                                    if (statusInfo.isCompleted) continue; 
-                                    
-                                    if (statusInfo.isCooldown) {
-                                        isOnCooldown = true;
-                                        continue; 
-                                    }
-
-                                    await el.scrollIntoViewIfNeeded().catch(() => {})
-
-                                    // Dengarkan jika ada tab baru / popup yang terbuka setelah kartu diklik
-                                    const newPagePromise = temp_page.context().waitForEvent('page', { timeout: 3500 }).catch(() => null);
-
-                                    await el.evaluate((node: HTMLElement) => {
-                                        node.click()
-                                        node.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
-                                    }).catch(() => {})
-                                    
-                                    clicked = true
-                                    this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Target Hit: ${promotion.title}`, 'green');
-
-                                    const popupPage = await newPagePromise;
-                                    const activeTab = popupPage || temp_page;
-
-                                    await activeTab.waitForLoadState('domcontentloaded').catch(() => {});
-                                    await this.bot.utils.wait(2000);
-
-                                    // 4. DETEKSI & SELESAIKAN KUIS / POLL / LINK INTERAKTIF
-                                    const hasQuizElements = await activeTab.evaluate(() => {
-                                        return document.querySelector('#rqStartQuiz, #rqStartQuizToken, .btOption, #btoption0, .rqOptions, .wk_Option, input[value*="Start"]') !== null;
-                                    }).catch(() => false);
-
-                                    // Jika ada tombol Start Quiz, klik!
-                                    const startQuizBtn = activeTab.locator('#rqStartQuiz, #rqStartQuizToken, input[type="button"][value*="Start"]').first();
-                                    if (await startQuizBtn.isVisible().catch(() => false)) {
-                                        await startQuizBtn.click({ force: true }).catch(() => {});
-                                        await this.bot.utils.wait(2000);
-                                    }
-
-                                    // Jika ada opsi jawaban / poll, klik salah satu opsi!
-                                    const quizOption = activeTab.locator('.btOption, #btoption0, .rqOptions, .wk_Option, [role="radio"]').first();
-                                    if (await quizOption.isVisible().catch(() => false)) {
-                                        await quizOption.click({ force: true }).catch(() => {});
-                                        await this.bot.utils.wait(2500);
-                                    }
-
-                                    // Simulasi interaksi scroll natural di halaman tujuan
-                                    this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Simulating interaction & safe scroll...`);
-                                    await activeTab.mouse.wheel(0, 400).catch(() => {});
-                                    await this.bot.utils.wait(2500);
-                                    await activeTab.mouse.wheel(0, -200).catch(() => {});
-                                    await this.bot.utils.wait(2000);
-
-                                    const isPureQuiz = (promotion.promotionType ?? '').toLowerCase() === 'quiz' || (hasQuizElements && (promotion.activityProgressMax ?? 0) > 0);
-
-                                    if (isPureQuiz && promotion.pointProgressMax > 0) {
-                                        this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Solving Quiz / Trivia API (+${promotion.pointProgressMax})...`);
-                                        await this.bot.activities.doQuiz(promotion);
-                                    }
-
-                                    // Tunggu sinkronisasi telemetri server sebelum menutup tab pop-up
-                                    await this.bot.utils.wait(3500);
-
-                                    if (popupPage && popupPage !== temp_page) {
-                                        await popupPage.close().catch(() => {});
-                                    }
-                                    break // Keluar dari loop pencarian iterasi
-                                }
+                            // 1. Deteksi dan klik tombol interaktif kuis / poll jika ada
+                            const startQuizBtn = temp_page.locator('#rqStartQuiz, #rqStartQuizToken, input[type="button"][value*="Start"]').first()
+                            if (await startQuizBtn.isVisible().catch(() => false)) {
+                                await startQuizBtn.click({ force: true }).catch(() => {})
+                                await this.bot.utils.wait(2000)
                             }
-                            if (clicked) break // Keluar dari loop selector
-                        }
 
-                        // JIKA TERNYATA SEMUA TOMBOL LAGI COOLDOWN
-                        if (isOnCooldown && !clicked) {
-                            this.bot.logger.warn(this.bot.isMobile, 'URL-REWARD', `Punch Card [${promotion.title}] is on 24h cooldown. Safely skipped.`, 'yellow')
-                        } 
-                        // JIKA GAGAL NEMU TOMBOL SAMA SEKALI
-                        else if (!clicked) {
-                            this.bot.logger.warn(this.bot.isMobile, 'URL-REWARD', `Selector failed, using direct visit for ${promotion.offerId}`)
-                            await temp_page.goto(promotion.destinationUrl, { waitUntil: 'domcontentloaded', referer: targetUrl }).catch(() => {})
-                            await this.bot.utils.wait(2000)
+                            const quizOption = temp_page.locator('.btOption, #btoption0, .rqOptions, .wk_Option, [role="radio"], button.optionBtn, .b_ans').first()
+                            if (await quizOption.isVisible().catch(() => false)) {
+                                await quizOption.click({ force: true }).catch(() => {})
+                                await this.bot.utils.wait(2500)
+                            }
+
+                            // 2. Simulasi interaksi scroll natural di halaman pencarian / artikel
+                            this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Simulating interaction & safe scroll...`)
                             await temp_page.mouse.wheel(0, 400).catch(() => {})
+                            await this.bot.utils.wait(2500)
+                            await temp_page.mouse.wheel(0, -200).catch(() => {})
                             await this.bot.utils.wait(2000)
+
+                            const hasQuizElements = await temp_page.evaluate(() => {
+                                return document.querySelector('#rqStartQuiz, #rqStartQuizToken, .btOption, #btoption0, .rqOptions, .wk_Option') !== null
+                            }).catch(() => false)
+
+                            if (hasQuizElements && (promotion.activityProgressMax ?? 0) > 0 && promotion.pointProgressMax > 0) {
+                                this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Solving Quiz / Trivia API (+${promotion.pointProgressMax})...`)
+                                await this.bot.activities.doQuiz(promotion)
+                            }
+
+                            // Tunggu sinkronisasi telemetri server Bing Rewards
+                            await this.bot.utils.wait(4000)
+                        } else {
+                            // JALUR 2: Buka Dashboard & Cari Tile Kartu
+                            let targetUrl = 'https://rewards.bing.com/dashboard'
+                            if (punchCard && punchCard.parentPromotion?.destinationUrl) {
+                                targetUrl = punchCard.parentPromotion.destinationUrl
+                                this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Navigating to Punch Card: ${promotion.title}`)
+                            } else {
+                                this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Navigating to Dashboard: "${promotion.title}"`)
+                            }
+
+                            await temp_page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
+                            
+                            let clicked = false
+                            let isOnCooldown = false
+
+                            for (let i = 0; i < 2; i++) {
+                                await temp_page.mouse.wheel(0, 400).catch(() => {})
+                                await this.bot.utils.wait(1000)
+                            }
+
+                            await temp_page.evaluate(() => {
+                                const buttons = Array.from(document.querySelectorAll('button[aria-expanded="false"], .expansion-button, [data-bi-id*="expand"]'))
+                                buttons.forEach((btn: any) => (btn as HTMLElement).click())
+                            }).catch(() => {})
+
+                            await this.bot.utils.wait(1500)
+
+                            const cleanWords = (promotion.title || '').replace(/[^\w\s]/gi, ' ').split(/\s+/).filter(Boolean)
+                            const firstKeywords = cleanWords.slice(0, 4).join(' ')
+                            const firstWord = cleanWords[0] || ''
+
+                            const selectors = [
+                                `[data-bi-id*="${promotion.offerId}"]`,
+                                `a[href*="${promotion.offerId}"]`,
+                                `[id*="${promotion.offerId}"]`,
+                                `[data-bi-id*="pcchild"]`,
+                                `button[id*="pcchild"]`,
+                                `a[href*="pcchild"]`,
+                                `[id*="pcchild"]`,
+                                `div[role="button"]:has-text("${firstKeywords}")`,
+                                `button:has-text("${firstKeywords}")`,
+                                `a:has-text("${firstKeywords}")`,
+                                `div[role="button"]:has-text("${firstWord}")`,
+                                `button:has-text("${firstWord}")`,
+                                `a:has-text("${firstWord}")`,
+                                `.p-card:has-text("${firstWord}") button`,
+                                `.p-card:has-text("${firstWord}") a`,
+                                `.punchcard:has-text("${firstWord}") button`,
+                                `.punchcard:has-text("${firstWord}") a`,
+                                `button:has-text("Claim")`,
+                                `button:has-text("Klaim")`,
+                                `button:has-text("Complete")`,
+                                `.p-card button`, 
+                                `.promo-tile button`,
+                                `.punchcard button`,
+                                `.punchcard a`
+                            ]
+
+                            for (const sel of selectors) {
+                                const elements = temp_page.locator(sel)
+                                const count = await elements.count().catch(() => 0)
+                                
+                                for (let i = 0; i < count; i++) {
+                                    const el = elements.nth(i)
+                                    if (await el.isVisible().catch(() => false)) {
+                                        
+                                        const statusInfo = await el.evaluate((node: HTMLElement) => {
+                                            const txt = (node.innerText || '').toLowerCase();
+                                            const isTrash = txt.includes('feedback') || txt.includes('suggest') || txt.includes('terms') || node.closest('#footer') !== null;
+                                            
+                                            const isCooldown = txt.includes('come back') || 
+                                                               txt.includes('check back') || 
+                                                               txt.includes('locked') || 
+                                                               node.hasAttribute('disabled') || 
+                                                               node.classList.contains('locked') || 
+                                                               node.classList.contains('disabled');
+                                            
+                                            const hasCheckmark = node.querySelector('.mee-icon-CheckMark, [data-icon-name="CheckMark"], .c-icon-check, .complete-check, svg[aria-label*="Complete"]') !== null;
+                                            const isCompleted = hasCheckmark || 
+                                                                node.getAttribute('aria-checked') === 'true' || 
+                                                                node.classList.contains('completed') || 
+                                                                node.classList.contains('complete') ||
+                                                                txt.includes('completed') || 
+                                                                txt.includes('selesai');
+                                            
+                                            return { isTrash, isCooldown, isCompleted };
+                                        }).catch(() => ({ isTrash: false, isCooldown: false, isCompleted: false }));
+
+                                        if (statusInfo.isTrash) continue;
+                                        if (statusInfo.isCompleted) continue; 
+                                        
+                                        if (statusInfo.isCooldown) {
+                                            isOnCooldown = true;
+                                            continue; 
+                                        }
+
+                                        await el.scrollIntoViewIfNeeded().catch(() => {})
+
+                                        const newPagePromise = temp_page.context().waitForEvent('page', { timeout: 3500 }).catch(() => null);
+
+                                        await el.click({ force: true, timeout: 5000 }).catch(async () => {
+                                            await el.evaluate((node: HTMLElement) => {
+                                                node.click()
+                                                node.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
+                                            }).catch(() => {})
+                                        })
+                                        
+                                        clicked = true
+                                        this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Target Hit: ${promotion.title}`, 'green');
+
+                                        const popupPage = await newPagePromise;
+                                        const activeTab = popupPage || temp_page;
+
+                                        await activeTab.waitForLoadState('domcontentloaded').catch(() => {});
+                                        await this.bot.utils.wait(2000);
+
+                                        const startQuizBtn = activeTab.locator('#rqStartQuiz, #rqStartQuizToken, input[type="button"][value*="Start"]').first();
+                                        if (await startQuizBtn.isVisible().catch(() => false)) {
+                                            await startQuizBtn.click({ force: true }).catch(() => {});
+                                            await this.bot.utils.wait(2000);
+                                        }
+
+                                        const quizOption = activeTab.locator('.btOption, #btoption0, .rqOptions, .wk_Option, [role="radio"]').first();
+                                        if (await quizOption.isVisible().catch(() => false)) {
+                                            await quizOption.click({ force: true }).catch(() => {});
+                                            await this.bot.utils.wait(2500);
+                                        }
+
+                                        this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Simulating interaction & safe scroll...`);
+                                        await activeTab.mouse.wheel(0, 400).catch(() => {});
+                                        await this.bot.utils.wait(2500);
+                                        await activeTab.mouse.wheel(0, -200).catch(() => {});
+                                        await this.bot.utils.wait(2000);
+
+                                        await this.bot.utils.wait(3500);
+
+                                        if (popupPage && popupPage !== temp_page) {
+                                            await popupPage.close().catch(() => {});
+                                        }
+                                        break
+                                    }
+                                }
+                                if (clicked) break
+                            }
+
+                            if (isOnCooldown && !clicked) {
+                                this.bot.logger.warn(this.bot.isMobile, 'URL-REWARD', `Punch Card [${promotion.title}] is on 24h cooldown. Safely skipped.`, 'yellow')
+                            } else if (!clicked && destUrl) {
+                                this.bot.logger.warn(this.bot.isMobile, 'URL-REWARD', `Selector failed, using direct visit for ${promotion.offerId}`)
+                                await temp_page.goto(destUrl, { waitUntil: 'domcontentloaded', referer: targetUrl }).catch(() => {})
+                                await this.bot.utils.wait(2000)
+                            }
                         }
-                        
-                        const syncTime = promotion.pointProgressMax >= 50 ? 12000 : 6000
-                        await this.bot.utils.wait(syncTime)
                     })(),
                     // FIX TIMEOUT VALUE: Set eksplisit tipe data <void> pada instansiasi Promise baru
                     new Promise<void>((_, reject) => setTimeout(() => reject(new Error('WATCHDOG_TIMEOUT')), 60000))
