@@ -185,42 +185,111 @@ export class Workers {
         }
     }
 
-    public async doMorePromotions(data: DashboardData, page: Page) {
+    public extractAllPromotions(data: DashboardData): BasePromotion[] {
+        const punchCardChildren = (data.punchCards ?? []).flatMap(pc => [
+            ...(pc.childPromotions ?? []),
+            ...(pc.parentPromotion ? [pc.parentPromotion] : [])
+        ]) as unknown as BasePromotion[]
+
         const rawPromotions = [
             ...(data.morePromotions ?? []),
             ...(data.morePromotionsWithoutPromotionalItems ?? []),
             ...(data.promotionalItems ?? []),
             ...(data.promotionalItem ? [data.promotionalItem] : []),
             ...(data.componentImpressionPromotions ?? []),
+            ...punchCardChildren,
             ...((data.welcomeTour as any)?.promotions ?? []),
             ...((data.userInterests as any)?.promotions ?? [])
         ] as unknown as BasePromotion[]
 
         const uniquePromos = [...new Map(
-            rawPromotions.filter(p => Boolean(p && (p.offerId || p.title))).map(p => [p.offerId || p.title, p] as const)
+            rawPromotions
+                .filter(p => Boolean(p && (p.offerId || p.title)))
+                .map(p => [p.offerId || p.title, p] as const)
         ).values()]
 
-        const activitiesUncompleted = uniquePromos.filter(x => {
-            const isComplete = x.complete
-            const hasPoints = (x.pointProgressMax ?? 0) > 0 && (x.pointProgressMax ?? 0) <= 500
-            const isLocked = (x.offerId ?? '').toLowerCase().includes('locked') 
+        return uniquePromos.filter(x => {
+            const isUncompleted = !x.complete || (x.pointProgressMax > 0 && (x.pointProgress ?? 0) < x.pointProgressMax)
+            const hasPoints = (x.pointProgressMax ?? 0) > 0 && (x.pointProgressMax ?? 0) <= 1000
             const isImpression = (x.offerId ?? '').toLowerCase().includes('impression') || (x.offerId ?? '').toLowerCase().includes('refer_and_earn') || !(x.title ?? '').trim()
 
-            return !isComplete && hasPoints && !isLocked && !isImpression
+            // Buka & kerjakan semua kartu termasuk kartu bonus terkunci (+15 poin weekly bonus)
+            return isUncompleted && hasPoints && !isImpression
         })
+    }
+
+    public async doMorePromotions(data: DashboardData, page: Page) {
+        let activitiesUncompleted = this.extractAllPromotions(data)
+
+        // Scrape kartu bonus langsung dari Live DOM Dashboard / Earn page (untuk menangkap kartu Keep earning visual)
+        try {
+            const currentUrl = page.url().toLowerCase()
+            if (!currentUrl.includes('rewards.bing.com')) {
+                await page.goto('https://rewards.bing.com/earn', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
+                await this.bot.utils.wait(2000)
+            }
+
+            const liveDomCards: BasePromotion[] = await page.evaluate(() => {
+                const results: any[] = []
+                const allElements = Array.from(document.querySelectorAll('.c-card, .p-card, [data-bi-area*="Keep earning"], [data-bi-area*="MorePromotions"], [data-bi-id], a[href*="bing.com/search"]'))
+                
+                for (const rawEl of allElements) {
+                    const el = rawEl as HTMLElement
+                    const txt = (el.innerText || el.textContent || '').trim()
+                    const titleEl = el.querySelector('h3, h4, .title, .c-heading, [class*="title"]')
+                    const title = (titleEl?.textContent || el.getAttribute('aria-label') || '').trim()
+                    const href = el.getAttribute('href') || el.querySelector('a')?.getAttribute('href') || ''
+                    const hasCheckmark = el.querySelector('.mee-icon-CheckMark, [data-icon-name="CheckMark"], .c-icon-check, .complete-check, svg[aria-label*="Complete"]') !== null ||
+                                         el.getAttribute('aria-checked') === 'true' ||
+                                         el.classList.contains('completed') ||
+                                         txt.toLowerCase().includes('completed') ||
+                                         txt.toLowerCase().includes('selesai')
+
+                    const pointsMatch = txt.match(/\+(\d+)/)
+                    const points = pointsMatch && pointsMatch[1] ? parseInt(pointsMatch[1], 10) : 15
+
+                    if (title && href && href.startsWith('http') && !hasCheckmark && points > 0) {
+                        results.push({
+                            title,
+                            destinationUrl: href,
+                            pointProgressMax: points,
+                            pointProgress: 0,
+                            complete: false,
+                            offerId: `dom_${title.replace(/[^\w]/g, '_').toLowerCase()}`,
+                            promotionType: 'urlreward'
+                        })
+                    }
+                }
+                return results
+            }).catch(() => [])
+
+            if (liveDomCards && liveDomCards.length > 0) {
+                const combined = [...activitiesUncompleted, ...liveDomCards]
+                activitiesUncompleted = [...new Map(combined.map(c => [c.title.toLowerCase().trim(), c])).values()]
+            }
+        } catch {}
 
         this.bot.logger.info(
             this.bot.isMobile,
             'TASK-DETECT',
-            `[TASK-DETECT] More Promotions / Side Quests found: ${uniquePromos.length} / uncompleted: ${activitiesUncompleted.length}`
+            `[TASK-DETECT] "Keep earning" & More Promotions found: ${activitiesUncompleted.length} uncompleted bonus cards`
         )
 
         if (!activitiesUncompleted.length) {
-            this.bot.logger.info(this.bot.isMobile, 'MORE-PROMOTIONS', 'All available items completed (Locked items skipped)')
+            this.bot.logger.info(this.bot.isMobile, 'KEEP-EARNING', 'All "Keep earning" & bonus items completed!')
             return
         }
 
-        this.bot.logger.info(this.bot.isMobile, 'MORE-PROMOTIONS', `Started solving ${activitiesUncompleted.length} available items (including Weekly Side Quests)`)
+        for (const card of activitiesUncompleted) {
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'KEEP-EARNING',
+                `[KEEP-EARNING] Found uncompleted bonus card: "${card.title}" (+${card.pointProgressMax} Pts)`,
+                'green'
+            )
+        }
+
+        this.bot.logger.info(this.bot.isMobile, 'KEEP-EARNING', `Started solving ${activitiesUncompleted.length} "Keep earning" bonus cards (including +15 Weekly Cards & Punchcards)...`)
         await this.solveActivities(activitiesUncompleted, page)
     }
 

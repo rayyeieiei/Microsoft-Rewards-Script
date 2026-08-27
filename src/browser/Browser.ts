@@ -107,7 +107,17 @@ class Browser {
 
             context.setDefaultTimeout(this.bot.utils.stringToNumber(this.bot.config?.globalTimeout ?? 30000));
 
-            await context.addCookies(sessionData.cookies);
+            // Filter cookie usang / corrupted yang memicu Geo-Mismatch Lock atau Blokir Telemetri
+            const cleanCookies = (sessionData.cookies || []).filter(c => {
+                const name = (c.name || '').toLowerCase()
+                const val = c.value || ''
+                if (name === 'ak_bmsc' || name === 'bm_sv' || name === 'ai_session') return false
+                if (name === 'usrloc' && val.includes('BLOCK=')) return false
+                if (name === '_rwbf' && (val.includes('c=MY') || val.includes('c=US'))) return false
+                return true
+            })
+
+            await context.addCookies(cleanCookies);
 
             // ==================== ULTRA DATA SAVER (HEMAT KUOTA 80%-90%) ====================
             await (context as unknown as BrowserContext).route('**/*', (route) => {

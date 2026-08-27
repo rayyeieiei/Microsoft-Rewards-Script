@@ -12,76 +12,70 @@ export class UrlReward extends Workers {
         this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Processing Activity: "${promotion.title}" (Points: +${promotion.pointProgressMax})`)
 
         try {
-            // Pastikan page berada di halaman Rewards Dashboard utama
-            const currentUrl = page.url().toLowerCase()
-            let targetDashboard = 'https://rewards.bing.com'
-            if (punchCard && punchCard.parentPromotion?.destinationUrl) {
-                targetDashboard = punchCard.parentPromotion.destinationUrl
-            }
+            let targetUrl = (promotion.destinationUrl || '').trim()
 
-            if (!currentUrl.includes('rewards.bing.com') || (punchCard && !currentUrl.includes(targetDashboard.toLowerCase()))) {
-                this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Navigating page to: ${targetDashboard}`)
-                await page.goto(targetDashboard, { waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => {})
-                await this.bot.utils.wait(2000)
-            }
+            // 1. Coba cari kartu di dashboard untuk mengambil URL terlengkap & trigger event klik
+            try {
+                const currentUrl = page.url().toLowerCase()
+                const isDailySet = (promotion.offerId || '').toLowerCase().includes('dailyset') ||
+                                   (promotion.offerId || '').toLowerCase().includes('child') ||
+                                   (promotion.name || '').toLowerCase().includes('dailyset')
 
-            // Scroll perlahan di dashboard untuk trigger lazy loading seluruh kartu
-            await page.mouse.wheel(0, 500).catch(() => {})
-            await this.bot.utils.wait(800)
-            await page.mouse.wheel(0, 500).catch(() => {})
-            await this.bot.utils.wait(800)
-            await page.mouse.wheel(0, -1000).catch(() => {})
-            await this.bot.utils.wait(1000)
+                let targetDashboard = isDailySet ? 'https://rewards.bing.com' : 'https://rewards.bing.com/earn'
+                if (punchCard && punchCard.parentPromotion?.destinationUrl) {
+                    targetDashboard = punchCard.parentPromotion.destinationUrl
+                }
 
-            // Buka section accordion yang tertutup jika ada
-            await page.evaluate(() => {
-                const buttons = Array.from(document.querySelectorAll('button[aria-expanded="false"], .expansion-button, [data-bi-id*="expand"]'))
-                buttons.forEach((btn: any) => (btn as HTMLElement).click())
-            }).catch(() => {})
+                if (isDailySet) {
+                    if (!currentUrl.endsWith('rewards.bing.com/') && !currentUrl.endsWith('rewards.bing.com') && !currentUrl.includes('/dashboard')) {
+                        await page.goto('https://rewards.bing.com', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
+                        await this.bot.utils.wait(1500)
+                    }
+                } else {
+                    if (!currentUrl.includes('rewards.bing.com')) {
+                        await page.goto(targetDashboard, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
+                        await this.bot.utils.wait(1500)
+                    } else if (!punchCard && !currentUrl.includes('/earn')) {
+                        const earnTab = page.locator('a[href*="/earn"], a:has-text("Earn")').first()
+                        if (await earnTab.isVisible().catch(() => false)) {
+                            await earnTab.click().catch(() => {})
+                            await this.bot.utils.wait(1500)
+                        }
+                    }
+                }
 
-            const cleanTitle = (promotion.title || '').replace(/[^\w\s]/gi, ' ').trim()
-            const firstKeywords = cleanTitle.split(/\s+/).slice(0, 4).join(' ')
-            const firstWord = cleanTitle.split(/\s+/)[0] || ''
+                const cleanTitle = (promotion.title || '').replace(/[^\w\s]/gi, ' ').trim()
+                const firstKeywords = cleanTitle.split(/\s+/).slice(0, 4).join(' ')
+                const firstWord = cleanTitle.split(/\s+/)[0] || ''
 
-            const selectors = [
-                `[data-bi-id*="${promotion.offerId}"]`,
-                `a[href*="${promotion.offerId}"]`,
-                `[id*="${promotion.offerId}"]`,
-                `a:has-text("${promotion.title}")`,
-                `div[role="button"]:has-text("${promotion.title}")`,
-                `button:has-text("${promotion.title}")`,
-                `a:has-text("${firstKeywords}")`,
-                `div[role="button"]:has-text("${firstKeywords}")`,
-                `button:has-text("${firstKeywords}")`,
-                `.c-card:has-text("${firstKeywords}")`,
-                `.p-card:has-text("${firstKeywords}")`,
-                `.promo-tile:has-text("${firstKeywords}")`,
-                `a:has-text("${firstWord}")`,
-                `div[role="button"]:has-text("${firstWord}")`,
-                `button:has-text("${firstWord}")`
-            ]
+                const selectors = [
+                    `[data-bi-id*="${promotion.offerId}"]`,
+                    `a[href*="${promotion.offerId}"]`,
+                    `[id*="${promotion.offerId}"]`,
+                    `section#dailyset a:has-text("${promotion.title}")`,
+                    `section#dailyset div[role="button"]:has-text("${promotion.title}")`,
+                    `section#dailyset button:has-text("${promotion.title}")`,
+                    `section#dailyset .c-card:has-text("${firstKeywords}")`,
+                    `section#dailyset .c-card:has-text("${firstWord}")`,
+                    `a:has-text("${promotion.title}")`,
+                    `div[role="button"]:has-text("${promotion.title}")`,
+                    `button:has-text("${promotion.title}")`,
+                    `a:has-text("${firstKeywords}")`,
+                    `div[role="button"]:has-text("${firstKeywords}")`,
+                    `button:has-text("${firstKeywords}")`,
+                    `.c-card:has-text("${firstKeywords}")`,
+                    `.p-card:has-text("${firstKeywords}")`,
+                    `.promo-tile:has-text("${firstKeywords}")`,
+                    `a:has-text("${firstWord}")`,
+                    `div[role="button"]:has-text("${firstWord}")`,
+                    `button:has-text("${firstWord}")`
+                ]
 
-            let clicked = false
-            let isOnCooldown = false
-
-            for (const sel of selectors) {
-                const elements = page.locator(sel)
-                const count = await elements.count().catch(() => 0)
-
-                for (let i = 0; i < count; i++) {
-                    const el = elements.nth(i)
+                for (const sel of selectors) {
+                    const el = page.locator(sel).first()
                     if (await el.isVisible().catch(() => false)) {
                         const statusInfo = await el.evaluate((node: HTMLElement) => {
                             const txt = (node.innerText || '').toLowerCase()
-                            const isTrash = txt.includes('feedback') || txt.includes('terms') || node.closest('#footer') !== null
-
-                            const isCooldown = txt.includes('come back') ||
-                                               txt.includes('check back') ||
-                                               txt.includes('locked') ||
-                                               node.hasAttribute('disabled') ||
-                                               node.classList.contains('locked') ||
-                                               node.classList.contains('disabled')
-
                             const hasCheckmark = node.querySelector('.mee-icon-CheckMark, [data-icon-name="CheckMark"], .c-icon-check, .complete-check, svg[aria-label*="Complete"]') !== null
                             const isCompleted = hasCheckmark ||
                                                 node.getAttribute('aria-checked') === 'true' ||
@@ -89,122 +83,80 @@ export class UrlReward extends Workers {
                                                 node.classList.contains('complete') ||
                                                 txt.includes('completed') ||
                                                 txt.includes('selesai')
+                            const href = node.getAttribute('href') || (node.querySelector('a') ? node.querySelector('a')?.getAttribute('href') : null)
+                            return { isCompleted, href }
+                        }).catch(() => ({ isCompleted: false, href: null }))
 
-                            return { isTrash, isCooldown, isCompleted }
-                        }).catch(() => ({ isTrash: false, isCooldown: false, isCompleted: false }))
-
-                        if (statusInfo.isTrash) continue
                         if (statusInfo.isCompleted) {
                             this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Card "${promotion.title}" is already completed!`)
                             return
                         }
 
-                        if (statusInfo.isCooldown) {
-                            isOnCooldown = true
-                            continue
+                        if (statusInfo.href && statusInfo.href.startsWith('http')) {
+                            targetUrl = statusInfo.href
                         }
 
-                        await el.scrollIntoViewIfNeeded().catch(() => {})
-
-                        this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Clicking Dashboard Tile: "${promotion.title}"`, 'green')
-
-                        // Dengarkan tab baru yang terbuka saat kartu diklik
-                        const newPagePromise = page.context().waitForEvent('page', { timeout: 8000 }).catch(() => null)
-
-                        await el.click({ force: true, timeout: 5000 }).catch(async () => {
-                            await el.evaluate((node: HTMLElement) => {
-                                node.click()
-                                node.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
-                            }).catch(() => {})
-                        })
-
-                        clicked = true
-                        const popupPage = await newPagePromise
-                        const activeTab = popupPage || page
-
-                        await activeTab.waitForLoadState('domcontentloaded').catch(() => {})
-                        await this.bot.utils.wait(2000)
-
-                        // Selesaikan kuis / poll / trivia interaktif di dalam tab
-                        for (let q = 0; q < 8; q++) {
-                            const startQuizBtn = activeTab.locator('#rqStartQuiz, #rqStartQuizToken, input[type="button"][value*="Start"]').first()
-                            if (await startQuizBtn.isVisible().catch(() => false)) {
-                                await startQuizBtn.click({ force: true }).catch(() => {})
-                                await this.bot.utils.wait(2000)
-                            }
-
-                            const quizOptions = activeTab.locator('.btOption, #btoption0, #btoption1, .rqOptions, .wk_Option, [role="radio"], button.optionBtn, .b_ans, .bt_poll, input[type="radio"]')
-                            const optCount = await quizOptions.count().catch(() => 0)
-                            if (optCount > 0) {
-                                const randIdx = Math.floor(Math.random() * Math.min(optCount, 4))
-                                await quizOptions.nth(randIdx).click({ force: true }).catch(() => {})
-                                await this.bot.utils.wait(2500)
-                            } else {
-                                break
-                            }
-                        }
-
-                        // Simulasi interaksi scroll natural
-                        this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Simulating interaction & safe scroll...`)
-                        await activeTab.mouse.wheel(0, 400).catch(() => {})
-                        await this.bot.utils.wait(2500)
-                        await activeTab.mouse.wheel(0, -200).catch(() => {})
-                        await this.bot.utils.wait(2000)
-
-                        // Waktu tunggu sinkronisasi server
-                        await this.bot.utils.wait(4000)
-
-                        if (popupPage && popupPage !== page) {
-                            await popupPage.close().catch(() => {})
-                        }
+                        // Trigger click di dashboard
+                        await el.evaluate((node: HTMLElement) => {
+                            node.click()
+                            node.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
+                        }).catch(() => {})
+                        
+                        this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Dashboard Tile Triggered: "${promotion.title}"`, 'green')
                         break
                     }
                 }
-                if (clicked) break
+            } catch {}
+
+            // 2. Kunjungi halaman pencarian / artikel tujuan di tab baru untuk trigger telemetri pencarian
+            if (!targetUrl || targetUrl === '' || targetUrl.toLowerCase().endsWith('rewards.bing.com/dashboard')) {
+                targetUrl = promotion.destinationUrl || `https://www.bing.com/search?q=${encodeURIComponent(promotion.title)}`
             }
 
-            // JIKA TILE TIDAK DITEMUKAN DI DOM: FALLBACK DIRECT VISIT
-            if (isOnCooldown && !clicked) {
-                this.bot.logger.warn(this.bot.isMobile, 'URL-REWARD', `Quest [${promotion.title}] is on cooldown. Safely skipped.`, 'yellow')
-            } else if (!clicked) {
-                const destUrl = (promotion.destinationUrl || '').trim()
-                if (destUrl && !destUrl.toLowerCase().endsWith('rewards.bing.com/dashboard')) {
-                    this.bot.logger.warn(this.bot.isMobile, 'URL-REWARD', `Tile not found on dashboard, fallback visiting: "${promotion.title}"`)
-                    const fallbackTab = await page.context().newPage()
-                    try {
-                        await fallbackTab.goto(destUrl, { waitUntil: 'domcontentloaded', timeout: 20000, referer: 'https://rewards.bing.com/' }).catch(() => {})
+            this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Opening Activity URL: "${promotion.title}"`)
+            const tab = await page.context().newPage()
+
+            try {
+                await tab.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 25000, referer: 'https://rewards.bing.com/' }).catch(() => {})
+                await this.bot.utils.wait(2000)
+
+                // Selesaikan kuis / poll / trivia interaktif jika ada di halaman
+                for (let q = 0; q < 8; q++) {
+                    const startQuizBtn = tab.locator('#rqStartQuiz, #rqStartQuizToken, input[type="button"][value*="Start"], button:has-text("Start"), div[role="button"]:has-text("Start")').first()
+                    if (await startQuizBtn.isVisible().catch(() => false)) {
+                        await startQuizBtn.click({ force: true }).catch(() => {})
                         await this.bot.utils.wait(2000)
+                    }
 
-                        for (let q = 0; q < 8; q++) {
-                            const startQuizBtn = fallbackTab.locator('#rqStartQuiz, #rqStartQuizToken, input[type="button"][value*="Start"]').first()
-                            if (await startQuizBtn.isVisible().catch(() => false)) {
-                                await startQuizBtn.click({ force: true }).catch(() => {})
-                                await this.bot.utils.wait(2000)
-                            }
-
-                            const quizOptions = fallbackTab.locator('.btOption, #btoption0, #btoption1, .rqOptions, .wk_Option, [role="radio"], button.optionBtn, .b_ans, .bt_poll, input[type="radio"]')
-                            const optCount = await quizOptions.count().catch(() => 0)
-                            if (optCount > 0) {
-                                const randIdx = Math.floor(Math.random() * Math.min(optCount, 4))
-                                await quizOptions.nth(randIdx).click({ force: true }).catch(() => {})
-                                await this.bot.utils.wait(2500)
-                            } else {
-                                break
-                            }
-                        }
-
-                        await fallbackTab.mouse.wheel(0, 400).catch(() => {})
+                    const quizOptions = tab.locator('.btOption, #btoption0, #btoption1, .rqOptions, .wk_Option, [role="radio"], button.optionBtn, .b_ans, .bt_poll, input[type="radio"], div[class*="option"], div[id*="choice"], .rqOption, .b_cards')
+                    const optCount = await quizOptions.count().catch(() => 0)
+                    if (optCount > 0) {
+                        const randIdx = Math.floor(Math.random() * Math.min(optCount, 4))
+                        await quizOptions.nth(randIdx).click({ force: true }).catch(() => {})
                         await this.bot.utils.wait(2500)
-                        await fallbackTab.mouse.wheel(0, -200).catch(() => {})
-                        await this.bot.utils.wait(2000)
-                        await this.bot.utils.wait(4000)
-                    } finally {
-                        await fallbackTab.close().catch(() => {})
+                    } else {
+                        break
                     }
                 }
+
+                // Simulasi interaksi ghost cursor & scroll natural
+                this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Simulating interaction & safe scroll...`)
+                await tab.mouse.move(100 + Math.floor(Math.random() * 200), 200 + Math.floor(Math.random() * 200)).catch(() => {})
+                await this.bot.utils.wait(1000)
+                await tab.mouse.wheel(0, 350).catch(() => {})
+                await this.bot.utils.wait(2500)
+                await tab.mouse.wheel(0, -150).catch(() => {})
+                await this.bot.utils.wait(1500)
+
+                // Jeda tunggu aman (safe dwell time 6-8 detik) agar telemetri (/fd/ls/ & bat.bing.com) tervalidasi penuh
+                const dwellTime = this.bot.utils.randomDelay(6000, 8000)
+                await this.bot.utils.wait(dwellTime)
+
+            } finally {
+                await tab.close().catch(() => {})
             }
 
-            // Secondary API reinforcement: Kirim juga reportactivity jika hash & requestToken tersedia
+            // 3. Secondary API reinforcement jika token/hash tersedia
             if (promotion.hash && this.bot.requestToken) {
                 try {
                     this.cookieHeader = this.bot.browser.func.buildCookieHeader(this.bot.isMobile ? this.bot.cookies.mobile : this.bot.cookies.desktop, ['bing.com', 'live.com', 'microsoftonline.com'])
@@ -213,20 +165,32 @@ export class UrlReward extends Workers {
                 } catch {}
             }
 
+            // Sync fresh cookies & check updated balance
+            await this.bot.utils.wait(2500)
+            const freshCookies = await page.context().cookies()
+            if (this.bot.isMobile) {
+                this.bot.cookies.mobile = freshCookies
+            } else {
+                this.bot.cookies.desktop = freshCookies
+            }
+
             const newBalance = await this.bot.browser.func.getCurrentPoints()
-            this.updatePoints(newBalance, promotion.offerId)
+            this.updatePoints(newBalance, promotion.offerId, promotion.title)
 
         } catch (err: any) {
             this.bot.logger.error(this.bot.isMobile, 'URL-REWARD', `Process failed | offerId=${promotion.offerId}`)
         }
     }
 
-    private updatePoints(newBalance: number, offerId: string) {
+    private updatePoints(newBalance: number, offerId: string, title?: string) {
         this.gainedPoints = newBalance - this.oldBalance
+        const displayTitle = title ? `"${title}"` : `offerId=${offerId}`
         if (this.gainedPoints > 0) {
             this.bot.userData.currentPoints = newBalance
             this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + this.gainedPoints
-            this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Completed | offerId=${offerId} | +${this.gainedPoints} points`, 'green')
+            this.bot.logger.info(this.bot.isMobile, 'KEEP-EARNING', `Completed: ${displayTitle} | offerId=${offerId} | +${this.gainedPoints} points`, 'green')
+        } else {
+            this.bot.logger.info(this.bot.isMobile, 'KEEP-EARNING', `Completed: ${displayTitle} | offerId=${offerId}`, 'green')
         }
     }
 }
