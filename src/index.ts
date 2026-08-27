@@ -161,6 +161,26 @@ export class MicrosoftRewardsBot {
         this.exitedWorkers = []
     }
 
+    public resetAccountState() {
+        this.userData = {
+            userName: '',
+            geoLocale: 'US',
+            langCode: 'en',
+            initialPoints: 0,
+            currentPoints: 0,
+            gainedPoints: 0,
+            timezoneOffset: new Date().getTimezoneOffset().toString()
+        }
+        this.rewardsVersion = 'legacy'
+        this.accessToken = ''
+        this.requestToken = ''
+        this.cookies = { mobile: [], desktop: [] }
+        this.fingerprint = undefined as any
+        this.activeAccount = null
+        this.mainMobilePage = undefined as any
+        this.mainDesktopPage = undefined as any
+    }
+
     public updateDashboardAccount(email: string, update: any) {
         void Database.getInstance().upsertAccountSummary({ email, ...update })
         if (cluster.isWorker && process.send) {
@@ -474,6 +494,7 @@ export class MicrosoftRewardsBot {
                 this.logger.warn('main', 'C2-CONTROL', 'Execution stopped/paused by user request.')
                 break
             }
+            this.resetAccountState()
             const accountStartTime = Date.now()
             const accountEmail = account.email
             this.userData.userName = this.utils.getEmailUsername(accountEmail)
@@ -494,7 +515,7 @@ export class MicrosoftRewardsBot {
                 this.updateDashboardAccount(accountEmail, { status: 'Stealth Delay' })
                 await this.utils.wait(randomStartDelay);
 
-                this.logger.info('main', 'ACCOUNT-START', `Starting account: ${accountEmail} | geoLocale: ${account.geoLocale}`)
+                this.logger.info('main', 'ACCOUNT-START', `[ACCOUNT-START] Starting workflow for: ${accountEmail} | geoLocale: ${account.geoLocale}`)
                 this.updateDashboardAccount(accountEmail, { status: 'Starting Browser' })
                 this.axios = new AxiosClient(account.proxy, this.localProxyPort)
 
@@ -517,7 +538,7 @@ export class MicrosoftRewardsBot {
                         collectedPoints: collectedPoints, duration: parseFloat(durationSeconds), success: true
                     })
 
-                    this.logger.info('main', 'ACCOUNT-END', `Completed account: ${accountEmail} | Total: +${collectedPoints} | Old: ${accountInitialPoints} → New: ${accountFinalPoints} | Duration: ${durationSeconds}s`, 'green')
+                    this.logger.info('main', 'ACCOUNT-FINISH', `[ACCOUNT-FINISH] Completed workflow for: ${accountEmail} | Total: +${collectedPoints} | Old: ${accountInitialPoints} → New: ${accountFinalPoints} | Duration: ${durationSeconds}s`, 'green')
                     this.updateDashboardAccount(accountEmail, {
                         status: 'Completed',
                         collectedPoints: collectedPoints
@@ -544,6 +565,8 @@ export class MicrosoftRewardsBot {
                     status: 'Failed',
                     error: errMsg
                 })
+            } finally {
+                this.resetAccountState()
             }
 
             processedCount++

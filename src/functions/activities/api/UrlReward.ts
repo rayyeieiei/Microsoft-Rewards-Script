@@ -155,7 +155,7 @@ export class UrlReward extends Workers {
                                     await activeTab.waitForLoadState('domcontentloaded').catch(() => {});
                                     await this.bot.utils.wait(2000);
 
-                                    // 4. DETEKSI & SELESAIKAN KUIS / POLL INTERAKTIF
+                                    // 4. DETEKSI & SELESAIKAN KUIS / POLL / LINK INTERAKTIF
                                     const hasQuizElements = await activeTab.evaluate(() => {
                                         return document.querySelector('#rqStartQuiz, #rqStartQuizToken, .btOption, #btoption0, .rqOptions, .wk_Option, input[value*="Start"]') !== null;
                                     }).catch(() => false);
@@ -174,16 +174,22 @@ export class UrlReward extends Workers {
                                         await this.bot.utils.wait(2500);
                                     }
 
-                                    const isDailySetOrQuiz = (promotion.offerId ?? '').toLowerCase().includes('dailyset') || (promotion.offerId ?? '').toLowerCase().includes('quiz') || hasQuizElements;
+                                    // Simulasi interaksi scroll natural di halaman tujuan
+                                    this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Simulating interaction & safe scroll...`);
+                                    await activeTab.mouse.wheel(0, 400).catch(() => {});
+                                    await this.bot.utils.wait(2500);
+                                    await activeTab.mouse.wheel(0, -200).catch(() => {});
+                                    await this.bot.utils.wait(2000);
 
-                                    if (isDailySetOrQuiz && promotion.pointProgressMax > 0) {
-                                        this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Solving Quiz / Daily Set Activity (+${promotion.pointProgressMax})...`);
+                                    const isPureQuiz = (promotion.promotionType ?? '').toLowerCase() === 'quiz' || (hasQuizElements && (promotion.activityProgressMax ?? 0) > 0);
+
+                                    if (isPureQuiz && promotion.pointProgressMax > 0) {
+                                        this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Solving Quiz / Trivia API (+${promotion.pointProgressMax})...`);
                                         await this.bot.activities.doQuiz(promotion);
-                                    } else {
-                                        this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Standard link. Simulating safe scroll...`);
-                                        await activeTab.mouse.wheel(0, 300).catch(() => {});
-                                        await this.bot.utils.wait(3000);
                                     }
+
+                                    // Tunggu sinkronisasi telemetri server sebelum menutup tab pop-up
+                                    await this.bot.utils.wait(3500);
 
                                     if (popupPage && popupPage !== temp_page) {
                                         await popupPage.close().catch(() => {});

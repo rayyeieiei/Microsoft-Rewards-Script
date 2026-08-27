@@ -154,22 +154,30 @@ export class Workers {
         const combined = [...dailySetMapItems, ...fallbackPromos].filter(Boolean)
         const uniqueDailySet = [...new Map(combined.map(p => [p.offerId, p])).values()]
 
-        // Filter tanggal hari ini & abaikan preview misi hari esok yang masih dikunci
+        // Filter tanggal hari ini (Lokal & UTC) & abaikan preview misi hari esok serta misi kadaluarsa kemarin
         const now = new Date()
-        const todayStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`
+        const todayLocal = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`
+        const todayUtc = `${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, '0')}${String(now.getUTCDate()).padStart(2, '0')}`
+        const validDates = new Set([todayLocal, todayUtc])
 
         const activitiesUncompleted = uniqueDailySet.filter(x => {
             if (!x || x.complete || x.pointProgressMax <= 0) return false
             const offerIdLower = (x.offerId ?? '').toLowerCase()
             if (offerIdLower.includes('locked')) return false
             
-            // Lewati preview misi besok (contoh: Global_DailySet_20260825_Child1)
+            // Lewati jika tanggal DailySet bukan hari ini (kemarin kadaluarsa, besok terkunci)
             const dateMatch = (x.offerId ?? '').match(/DailySet_(\d{8})/i)
-            if (dateMatch && dateMatch[1] && dateMatch[1] > todayStr) {
+            if (dateMatch && dateMatch[1] && !validDates.has(dateMatch[1])) {
                 return false
             }
             return true
         })
+
+        this.bot.logger.info(
+            this.bot.isMobile,
+            'TASK-DETECT',
+            `[TASK-DETECT] Daily Set items found: ${uniqueDailySet.length} / uncompleted: ${activitiesUncompleted.length}`
+        )
 
         if (activitiesUncompleted.length) {
             this.bot.logger.info(this.bot.isMobile, 'DAILY-SET', `Started solving ${activitiesUncompleted.length} "Daily Set" items (All Valid Variants Checked)`)
@@ -180,7 +188,9 @@ export class Workers {
     public async doMorePromotions(data: DashboardData, page: Page) {
         const rawPromotions = [
             ...(data.morePromotions ?? []),
-            ...(data.morePromotionsWithoutPromotionalItems ?? [])
+            ...(data.morePromotionsWithoutPromotionalItems ?? []),
+            ...((data.welcomeTour as any)?.promotions ?? []),
+            ...((data.userInterests as any)?.promotions ?? [])
         ] as unknown as BasePromotion[]
 
         const uniquePromos = [...new Map(
@@ -195,6 +205,12 @@ export class Workers {
 
             return !isComplete && hasPoints && !isLocked && !isImpression
         })
+
+        this.bot.logger.info(
+            this.bot.isMobile,
+            'TASK-DETECT',
+            `[TASK-DETECT] More Promotions / Side Quests found: ${uniquePromos.length} / uncompleted: ${activitiesUncompleted.length}`
+        )
 
         if (!activitiesUncompleted.length) {
             this.bot.logger.info(this.bot.isMobile, 'MORE-PROMOTIONS', 'All available items completed (Locked items skipped)')
@@ -318,14 +334,14 @@ export class Workers {
 
                 this.bot.logger.debug(this.bot.isMobile, 'ACTIVITY', `Processing | title="${activity.title}" | type=${type} | tokenMissing=${isTokenMissing}`)
 
-                if (type === 'quiz' || type.includes('trivia') || type.includes('poll') || type.includes('survey') || offerId.includes('quiz')) {
+                if ((type === 'quiz' || type.includes('trivia') || type.includes('poll') || type.includes('survey')) && !offerId.includes('dailyset')) {
                     await this.bot.activities.doQuiz(activity)
                 } else if (type === 'findclippy') {
                     await this.bot.activities.doFindClippy(activity as unknown as FindClippyPromotion)
                 } else if (name.includes('exploreonbing')) {
                     await this.bot.activities.doSearchOnBing(activity, page)
                 } else {
-                    // Default fallback: Selesaikan via Hybrid UrlReward solver (mencakup side quests 15 poin, explore cards, promo links, punchcard items)
+                    // Default fallback: Selesaikan via Hybrid UrlReward solver (mencakup Daily Set URL, side quests 15 poin, explore cards, promo links, punchcard items)
                     await this.bot.activities.doUrlReward(activity, page, punchCard) 
                 }
                 
