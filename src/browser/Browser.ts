@@ -120,22 +120,15 @@ class Browser {
                     return route.abort()
                 }
 
-                // 2. Blokir domain iklan, tracker, dan telemetri yang nyedot kuota
+                // 2. Blokir domain iklan dan tracker pihak ketiga yang tidak berhubungan dengan Rewards
                 if (
                     url.includes('clarity.ms') ||
-                    url.includes('bat.bing.com') ||
                     url.includes('adnxs.com') ||
                     url.includes('doubleclick.net') ||
                     url.includes('google-analytics.com') ||
                     url.includes('googletagmanager.com') ||
                     url.includes('scorecardresearch.com') ||
-                    url.includes('browser.events.data.microsoft.com') ||
-                    url.includes('telemetry.microsoft.com') ||
-                    url.includes('c.msn.com') ||
-                    url.includes('/fd/ls/') || // Flighting / telemetry logs Bing
                     url.includes('/as/api/') || // Bing Ad services
-                    url.includes('/th?id=') ||  // Bing image thumbnails & wallpaper (Paling boros kuota!)
-                    url.includes('/sa/simg/') || // Search image sprites
                     url.includes('msn.com/api/news') || // MSN newsfeed video/images payload
                     url.includes('bing.com/overlay') || // Copilot heavy overlay
                     url.includes('bing.com/videos') ||
@@ -145,7 +138,7 @@ class Browser {
                     return route.abort()
                 }
 
-                // Izinkan document HTML, scripts penting Rewards, XHR/Fetch API, dan CSS
+                // Izinkan document HTML, scripts penting Rewards, telemetri event Microsoft, XHR/Fetch API, dan CSS
                 return route.continue()
             });
 

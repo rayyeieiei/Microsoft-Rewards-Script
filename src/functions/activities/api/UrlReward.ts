@@ -63,8 +63,17 @@ export class UrlReward extends Workers {
                                 await this.bot.activities.doQuiz(promotion)
                             }
 
+                            // Secondary API reinforcement: Kirim juga reportactivity jika hash & requestToken tersedia
+                            if (promotion.hash && this.bot.requestToken) {
+                                try {
+                                    this.cookieHeader = this.bot.browser.func.buildCookieHeader(this.bot.isMobile ? this.bot.cookies.mobile : this.bot.cookies.desktop, ['bing.com', 'live.com', 'microsoftonline.com'])
+                                    const formData = new URLSearchParams({ id: promotion.offerId, hash: promotion.hash, timeZone: this.bot.userData.timezoneOffset || '60', activityAmount: '1', __RequestVerificationToken: this.bot.requestToken })
+                                    await this.bot.axios.request({ url: 'https://rewards.bing.com/api/reportactivity?X-Requested-With=XMLHttpRequest', method: 'POST', headers: { ...(this.bot.fingerprint?.headers ?? {}), Cookie: this.cookieHeader, Referer: 'https://rewards.bing.com/' }, data: formData }).catch(() => {})
+                                } catch {}
+                            }
+
                             // Tunggu sinkronisasi telemetri server Bing Rewards
-                            await this.bot.utils.wait(4000)
+                            await this.bot.utils.wait(3500)
                         } else {
                             // JALUR 2: Buka Dashboard & Cari Tile Kartu
                             let targetUrl = 'https://rewards.bing.com/dashboard'
