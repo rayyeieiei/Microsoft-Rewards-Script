@@ -6,15 +6,16 @@ import { QueryCore } from '../../QueryEngine'
 import { Workers } from '../../Workers'
 import { Database } from '../../../util/Database'
 
+import type { QueryEngine } from '../../../interface/Config'
+
 export class Search extends Workers {
     private bingHome = 'https://bing.com'
-    private searchPageURL = ''
-    private searchCount = 0
 
     public async doSearch(data: DashboardData, page: Page, isMobile: boolean): Promise<number> {
         const startBalance = Number(this.bot.userData.currentPoints ?? 0)
+        let searchCount = 0
 
-        this.bot.logger.info(isMobile, 'SEARCH-BING', `Starting Bing searches | currentPoints=${startBalance}`)
+        this.bot.logger.info(isMobile, 'SEARCH-BING', `Starting Bing searches (${isMobile ? 'Mobile' : 'Desktop'}) | currentPoints=${startBalance}`)
 
         let totalGainedPoints = 0
 
@@ -32,17 +33,22 @@ export class Search extends Workers {
             this.bot.logger.info(
                 isMobile,
                 'SEARCH-BING',
-                `Search points remaining | Edge=${missingPoints.edgePoints} | Desktop=${missingPoints.desktopPoints} | Mobile=${missingPoints.mobilePoints}`
+                `Search points remaining (${isMobile ? 'Mobile' : 'Desktop'}) | Edge=${missingPoints.edgePoints} | Desktop=${missingPoints.desktopPoints} | Mobile=${missingPoints.mobilePoints}`
             )
 
             const queryCore = new QueryCore(this.bot)
             const locale = (this.bot.userData.geoLocale ?? 'US').toUpperCase()
             const langCode = (this.bot.userData.langCode ?? 'en').toLowerCase()
 
+            // Partisi sumber pencarian agar Mobile & Desktop tidak pernah bertabrakan kata kunci
+            const sources: QueryEngine[] = isMobile
+                ? ['google', 'reddit', 'local', 'wikipedia']
+                : ['wikipedia', 'local', 'google', 'reddit']
+
             this.bot.logger.debug(
                 isMobile,
                 'SEARCH-BING',
-                `Resolving search queries via QueryCore | locale=${locale} | lang=${langCode} | related=true`
+                `Resolving search queries via QueryCore | locale=${locale} | lang=${langCode} | sources=${sources.join(',')}`
             )
 
             let queries = await queryCore.queryManager({
@@ -50,7 +56,7 @@ export class Search extends Workers {
                 related: true,
                 langCode,
                 geoLocale: locale,
-                sourceOrder: ['google', 'wikipedia', 'reddit', 'local']
+                sourceOrder: sources
             })
 
             queries = [...new Set(queries.map(q => q.trim()).filter(Boolean))]
@@ -58,10 +64,9 @@ export class Search extends Workers {
             this.bot.logger.info(isMobile, 'SEARCH-BING', `Search query pool ready | count=${queries.length}`)
 
             // Go to bing
-            const targetUrl = this.searchPageURL ? this.searchPageURL : this.bingHome
-            this.bot.logger.debug(isMobile, 'SEARCH-BING', `Navigating to search page | url=${targetUrl}`)
+            this.bot.logger.debug(isMobile, 'SEARCH-BING', `Navigating to search page | url=${this.bingHome}`)
 
-            await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
+            await page.goto(this.bingHome, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
             await this.bot.browser.utils.tryDismissAllMessages(page)
 
             let stagnantLoop = 0
@@ -69,8 +74,9 @@ export class Search extends Workers {
 
             for (let i = 0; i < queries.length; i++) {
                 const query = queries[i] as string
+                searchCount++
 
-                searchCounters = await this.bingSearch(page, query, isMobile)
+                searchCounters = await this.bingSearch(page, query, isMobile, searchCount)
                 const newMissingPoints = this.bot.browser.func.missingSearchPoints(searchCounters, isMobile)
                 const newMissingPointsTotal = newMissingPoints.totalPoints
 
@@ -108,10 +114,8 @@ export class Search extends Workers {
                         gainedPoints
                     )
 
-                    const newBalance = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
-                    this.bot.userData.currentPoints = newBalance
+                    this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
                     this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
-
                     totalGainedPoints += gainedPoints
 
                     this.bot.logger.info(
@@ -128,7 +132,7 @@ export class Search extends Workers {
                     this.bot.logger.info(
                         isMobile,
                         'SEARCH-BING',
-                        'All required search points earned, stopping main search loop'
+                        `All required ${isMobile ? 'Mobile' : 'Desktop'} search points earned, stopping search loop`
                     )
                     break
                 }
@@ -137,7 +141,7 @@ export class Search extends Workers {
                     this.bot.logger.warn(
                         isMobile,
                         'SEARCH-BING',
-                        `Search did not gain points for ${stagnantLoopMax} iterations, aborting main search loop`
+                        `Search did not gain points for ${stagnantLoopMax} iterations, aborting search loop`
                     )
                     stagnantLoop = 0
                     break
@@ -201,10 +205,11 @@ export class Search extends Workers {
                         this.bot.logger.info(
                             isMobile,
                             'SEARCH-BING-EXTRA',
-                            `Extra search | remaining=${missingPointsTotal} | query="${query}"`
+                            `Extra search (${isMobile ? 'Mobile' : 'Desktop'}) | remaining=${missingPointsTotal} | query="${query}"`
                         )
 
-                        searchCounters = await this.bingSearch(page, query, isMobile)
+                        searchCount++
+                        searchCounters = await this.bingSearch(page, query, isMobile, searchCount)
                         const newMissingPoints = this.bot.browser.func.missingSearchPoints(searchCounters, isMobile)
                         const newMissingPointsTotal = newMissingPoints.totalPoints
 
@@ -221,10 +226,8 @@ export class Search extends Workers {
                         } else {
                             stagnantLoop = 0
 
-                            const newBalance = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
-                            this.bot.userData.currentPoints = newBalance
+                            this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
                             this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
-
                             totalGainedPoints += gainedPoints
 
                             this.bot.logger.info(
@@ -283,17 +286,15 @@ export class Search extends Workers {
         }
     }
 
-    private async bingSearch(searchPage: Page, query: string, isMobile: boolean) {
+    private async bingSearch(searchPage: Page, query: string, isMobile: boolean, currentSearchCount: number) {
         const maxAttempts = 5
         const refreshThreshold = 10 // Page gets sluggish after x searches?
 
-        this.searchCount++
-
-        if (this.searchCount % refreshThreshold === 0) {
+        if (currentSearchCount % refreshThreshold === 0) {
             this.bot.logger.info(
                 isMobile,
                 'SEARCH-BING',
-                `Returning to home page to clear accumulated page context | count=${this.searchCount} | threshold=${refreshThreshold}`
+                `Returning to home page to clear accumulated page context | count=${currentSearchCount} | threshold=${refreshThreshold}`
             )
 
             this.bot.logger.debug(isMobile, 'SEARCH-BING', `Returning home to refresh state | url=${this.bingHome}`)
@@ -308,7 +309,7 @@ export class Search extends Workers {
         this.bot.logger.debug(
             isMobile,
             'SEARCH-BING',
-            `Starting bingSearch | query="${query}" | maxAttempts=${maxAttempts} | searchCount=${this.searchCount} | refreshEvery=${refreshThreshold} | scrollRandomResults=${this.bot.config.searchSettings.scrollRandomResults} | clickRandomResults=${this.bot.config.searchSettings.clickRandomResults}`
+            `Starting bingSearch | query="${query}" | maxAttempts=${maxAttempts} | searchCount=${currentSearchCount} | refreshEvery=${refreshThreshold} | scrollRandomResults=${this.bot.config.searchSettings.scrollRandomResults} | clickRandomResults=${this.bot.config.searchSettings.clickRandomResults}`
         )
 
         for (let i = 0; i < maxAttempts; i++) {

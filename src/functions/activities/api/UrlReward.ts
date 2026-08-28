@@ -139,17 +139,20 @@ export class UrlReward extends Workers {
                     }
                 }
 
-                // Simulasi interaksi ghost cursor & scroll natural
+                // Simulasi interaksi scroll natural & human-like movement
                 this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Simulating interaction & safe scroll...`)
-                await tab.mouse.move(100 + Math.floor(Math.random() * 200), 200 + Math.floor(Math.random() * 200)).catch(() => {})
-                await this.bot.utils.wait(1000)
-                await tab.mouse.wheel(0, 350).catch(() => {})
-                await this.bot.utils.wait(2500)
-                await tab.mouse.wheel(0, -150).catch(() => {})
-                await this.bot.utils.wait(1500)
+                await tab.evaluate(() => {
+                    window.scrollBy({ top: 350, behavior: 'smooth' })
+                }).catch(() => {})
+                await this.bot.utils.wait(1800)
 
-                // Jeda tunggu aman (safe dwell time 6-8 detik) agar telemetri (/fd/ls/ & bat.bing.com) tervalidasi penuh
-                const dwellTime = this.bot.utils.randomDelay(6000, 8000)
+                await tab.evaluate(() => {
+                    window.scrollBy({ top: -150, behavior: 'smooth' })
+                }).catch(() => {})
+                await this.bot.utils.wait(1200)
+
+                // Jeda tunggu aman telemetri (/fd/ls/ & bat.bing.com)
+                const dwellTime = this.bot.utils.randomDelay(3500, 5000)
                 await this.bot.utils.wait(dwellTime)
 
             } finally {
@@ -161,17 +164,23 @@ export class UrlReward extends Workers {
                 try {
                     this.cookieHeader = this.bot.browser.func.buildCookieHeader(this.bot.isMobile ? this.bot.cookies.mobile : this.bot.cookies.desktop, ['bing.com', 'live.com', 'microsoftonline.com'])
                     const formData = new URLSearchParams({ id: promotion.offerId, hash: promotion.hash, timeZone: this.bot.userData.timezoneOffset || '60', activityAmount: '1', __RequestVerificationToken: this.bot.requestToken })
-                    await this.bot.axios.request({ url: 'https://rewards.bing.com/api/reportactivity?X-Requested-With=XMLHttpRequest', method: 'POST', headers: { ...(this.bot.fingerprint?.headers ?? {}), Cookie: this.cookieHeader, Referer: 'https://rewards.bing.com/' }, data: formData }).catch(() => {})
+                    await this.bot.axios.request({ url: 'https://rewards.bing.com/api/reportactivity?X-Requested-With=XMLHttpRequest', method: 'POST', timeout: 5000, headers: { ...(this.bot.fingerprint?.headers ?? {}), Cookie: this.cookieHeader, Referer: 'https://rewards.bing.com/' }, data: formData }).catch(() => {})
                 } catch {}
             }
 
             // Sync fresh cookies & check updated balance
-            await this.bot.utils.wait(2500)
-            const freshCookies = await page.context().cookies()
-            if (this.bot.isMobile) {
-                this.bot.cookies.mobile = freshCookies
-            } else {
-                this.bot.cookies.desktop = freshCookies
+            await this.bot.utils.wait(1500)
+            const freshCookies = await Promise.race([
+                page.context().cookies(),
+                new Promise<any[]>(resolve => setTimeout(() => resolve([]), 3000))
+            ]).catch(() => [])
+
+            if (freshCookies && freshCookies.length > 0) {
+                if (this.bot.isMobile) {
+                    this.bot.cookies.mobile = freshCookies
+                } else {
+                    this.bot.cookies.desktop = freshCookies
+                }
             }
 
             const newBalance = await this.bot.browser.func.getCurrentPoints()

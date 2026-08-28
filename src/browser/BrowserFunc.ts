@@ -22,13 +22,14 @@ export default class BrowserFunc {
      * @returns {DashboardData} Object of user bing rewards dashboard data
      */
     async getDashboardData(): Promise<DashboardData> {
+        const activeCookies = (this.bot.isMobile ? this.bot.cookies.mobile : this.bot.cookies.desktop) || this.bot.cookies.mobile || []
         try {
             const request: AxiosRequestConfig = {
                 url: 'https://rewards.bing.com/api/getuserinfo?type=1',
                 method: 'GET',
                 headers: {
                     ...(this.bot.fingerprint?.headers ?? {}),
-                    Cookie: this.buildCookieHeader(this.bot.cookies.mobile, [
+                    Cookie: this.buildCookieHeader(activeCookies, [
                         'bing.com',
                         'live.com',
                         'microsoftonline.com'
@@ -45,6 +46,24 @@ export default class BrowserFunc {
             }
             throw new Error('Dashboard data missing from API response')
         } catch (error) {
+            // Coba ambil langsung dari konteks browser aktif (In-Page Fetch Playwright)
+            const activePage = this.bot.mainMobilePage || this.bot.mainDesktopPage
+            if (activePage && !activePage.isClosed()) {
+                try {
+                    const inPageData = await activePage.evaluate(async () => {
+                        try {
+                            const res = await fetch('https://rewards.bing.com/api/getuserinfo?type=1')
+                            const json = await res.json()
+                            return json?.dashboard || null
+                        } catch { return null }
+                    }).catch(() => null)
+
+                    if (inPageData) {
+                        return inPageData as DashboardData
+                    }
+                } catch {}
+            }
+
             this.bot.logger.warn(this.bot.isMobile, 'GET-DASHBOARD-DATA', 'API failed, trying HTML fallback')
 
             // Try using script from dashboard page
@@ -54,7 +73,7 @@ export default class BrowserFunc {
                     method: 'GET',
                     headers: {
                         ...(this.bot.fingerprint?.headers ?? {}),
-                        Cookie: this.buildCookieHeader(this.bot.cookies.mobile),
+                        Cookie: this.buildCookieHeader(activeCookies),
                         Referer: 'https://rewards.bing.com/',
                         Origin: 'https://rewards.bing.com'
                     }
@@ -63,16 +82,12 @@ export default class BrowserFunc {
                 const response = await this.bot.axios.request(request)
                 const match = response.data.match(/var\s+dashboard\s*=\s*({.*?});/s)
 
-                if (!match?.[1]) {
-                    throw new Error('Dashboard script not found in HTML')
+                if (match?.[1]) {
+                    return JSON.parse(match[1]) as DashboardData
                 }
+            } catch {}
 
-                return JSON.parse(match[1]) as DashboardData
-            } catch (fallbackError) {
-                // If both fail
-                this.bot.logger.error(this.bot.isMobile, 'GET-DASHBOARD-DATA', 'Failed to get dashboard data')
-                throw fallbackError
-            }
+            throw new Error('Failed to retrieve dashboard data from all endpoints')
         }
     }
 
@@ -279,16 +294,25 @@ export default class BrowserFunc {
      */
     async getCurrentPoints(): Promise<number> {
         try {
-            const data = await this.getDashboardData()
+            const activePage = this.bot.mainMobilePage || this.bot.mainDesktopPage
+            if (activePage && !activePage.isClosed()) {
+                const livePoints = await activePage.evaluate(async () => {
+                    try {
+                        const res = await fetch('https://rewards.bing.com/api/getuserinfo?type=1')
+                        const json = await res.json()
+                        return json?.dashboard?.userStatus?.availablePoints
+                    } catch { return null }
+                }).catch(() => null)
 
-            return data.userStatus.availablePoints
+                if (typeof livePoints === 'number' && livePoints > 0) {
+                    return livePoints
+                }
+            }
+
+            const data = await this.getDashboardData()
+            return data?.userStatus?.availablePoints ?? Number(this.bot.userData.currentPoints ?? 0)
         } catch (error) {
-            this.bot.logger.error(
-                this.bot.isMobile,
-                'GET-CURRENT-POINTS',
-                `An error occurred: ${error instanceof Error ? error.message : String(error)}`
-            )
-            throw error
+            return Number(this.bot.userData.currentPoints ?? 0)
         }
     }
 

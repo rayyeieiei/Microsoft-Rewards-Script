@@ -174,16 +174,31 @@ export class SearchManager {
             }
 
             if (shouldDoDesktop) {
+                if (shouldDoMobile) {
+                    // Stealth Stagger: Beri jeda 3.5 detik agar Mobile & Desktop tidak submit di milidetik yang sama
+                    this.bot.logger.debug('main', 'SEARCH-MANAGER', 'Staggering desktop start by 3.5s for stealth anti-detection...')
+                    await this.bot.utils.wait(3500)
+                }
+
                 this.bot.logger.info('main', 'SEARCH-MANAGER', 'Desktop login start')
                 this.bot.logger.debug(
                     'main',
                     'SEARCH-MANAGER',
                     `Desktop login | account=${accountEmail} | proxy=${account.proxy ?? 'none'}`
                 )
-                desktopSession = await executionContext.run({ isMobile: false, accountEmail }, async () =>
-                    this.createDesktopSession(account, accountEmail)
-                )
-                this.bot.logger.info('main', 'SEARCH-MANAGER', 'Desktop login done')
+                try {
+                    desktopSession = await executionContext.run({ isMobile: false, accountEmail }, async () =>
+                        this.createDesktopSession(account, accountEmail)
+                    )
+                    this.bot.logger.info('main', 'SEARCH-MANAGER', 'Desktop login done')
+                } catch (error) {
+                    this.bot.logger.error(
+                        'main',
+                        'SEARCH-MANAGER',
+                        `Desktop login failed in parallel mode: ${error instanceof Error ? error.message : String(error)}`
+                    )
+                    desktopSession = null
+                }
             } else {
                 const reason = !this.bot.config.workers.doDesktopSearch ? 'disabled' : 'no-points'
                 this.bot.logger.info('main', 'SEARCH-MANAGER', `Skip desktop login (${reason})`)

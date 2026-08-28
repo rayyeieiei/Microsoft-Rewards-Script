@@ -212,9 +212,12 @@ export class Workers {
             const isUncompleted = !x.complete || (x.pointProgressMax > 0 && (x.pointProgress ?? 0) < x.pointProgressMax)
             const hasPoints = (x.pointProgressMax ?? 0) > 0 && (x.pointProgressMax ?? 0) <= 1000
             const isImpression = (x.offerId ?? '').toLowerCase().includes('impression') || (x.offerId ?? '').toLowerCase().includes('refer_and_earn') || !(x.title ?? '').trim()
+            const isWelcomeTour = (x.offerId ?? '').toLowerCase().includes('fre_offer') ||
+                                  (x.offerId ?? '').toLowerCase().includes('welcometour') ||
+                                  (x.title ?? '').toLowerCase().includes('take the tour')
 
-            // Buka & kerjakan semua kartu termasuk kartu bonus terkunci (+15 poin weekly bonus)
-            return isUncompleted && hasPoints && !isImpression
+            // Buka & kerjakan semua kartu harian/mingguan (Multi-day Starter Card 'Take the tour' dialihkan ke PunchCards)
+            return isUncompleted && hasPoints && !isImpression && !isWelcomeTour
         })
     }
 
