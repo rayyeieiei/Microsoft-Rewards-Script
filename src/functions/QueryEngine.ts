@@ -417,6 +417,7 @@ export class QueryCore {
             const request: AxiosRequestConfig = {
                 url: `https://www.reddit.com/r/${safe}.json?limit=50`,
                 method: 'GET',
+                timeout: 2500,
                 headers: {
                     ...(this.bot.fingerprint?.headers ?? {})
                 }

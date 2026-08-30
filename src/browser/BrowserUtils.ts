@@ -226,18 +226,12 @@ export default class BrowserUtils {
 
                 try {
                     const cursor = createCursor(page as any)
-                    // Add hard 5-second timeout to prevent ghost cursor from hanging indefinitely on slow sockets
                     await Promise.race([
                         cursor.click(selector, options),
-                        new Promise((_, reject) => setTimeout(() => reject(new Error('Ghost cursor movement timeout (5s)')), 5000))
+                        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2500))
                     ])
                     return true
-                } catch (ghostError) {
-                    this.bot.logger.warn(
-                        this.bot.isMobile,
-                        'GHOST-CLICK',
-                        `Ghost cursor click failed for ${selector}, falling back to standard click: ${ghostError instanceof Error ? ghostError.message : String(ghostError)}`
-                    )
+                } catch {
                     await page.click(selector, { timeout: 3000, force: true }).catch(() => {})
                     return true
                 }

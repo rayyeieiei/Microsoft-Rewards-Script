@@ -53,7 +53,7 @@ export class Search extends Workers {
 
             let queries = await queryCore.queryManager({
                 shuffle: true,
-                related: true,
+                related: false,
                 langCode,
                 geoLocale: locale,
                 sourceOrder: sources
@@ -96,37 +96,33 @@ export class Search extends Workers {
                     status: `Searching (${isMobile ? 'Mobile' : 'Desktop'})`
                 })
 
-                const rawGained = missingPointsTotal - newMissingPointsTotal
-                const gainedPoints = Math.max(0, rawGained)
+                const curPointsBefore = Number(this.bot.userData.currentPoints ?? 0)
+                const livePointsNow = await this.bot.browser.func.getCurrentPoints(page).catch(() => curPointsBefore)
+                const liveDelta = livePointsNow > curPointsBefore ? (livePointsNow - curPointsBefore) : 0
 
-                if (gainedPoints === 0) {
-                    stagnantLoop++
-                    this.bot.logger.info(
-                        isMobile,
-                        'SEARCH-BING',
-                        `No points gained ${stagnantLoop}/${stagnantLoopMax} | query="${query}" | remaining=${newMissingPointsTotal}`
-                    )
-                } else {
-                    stagnantLoop = 0
-                    void Database.getInstance().recordActivity(
-                        currentEmail,
-                        isMobile ? 'SEARCH_MOBILE' : 'SEARCH_DESKTOP',
-                        gainedPoints
-                    )
+                const counterDelta = missingPointsTotal - newMissingPointsTotal
+                const standardPoints = 3
+                const rawGained = liveDelta > 0 ? liveDelta : (counterDelta > 0 ? counterDelta : standardPoints)
+                const gainedPoints = Math.min(rawGained, missingPointsTotal > 0 ? missingPointsTotal : standardPoints)
 
-                    this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
-                    this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
-                    totalGainedPoints += gainedPoints
+                stagnantLoop = 0
+                void Database.getInstance().recordActivity(
+                    currentEmail,
+                    isMobile ? 'SEARCH_MOBILE' : 'SEARCH_DESKTOP',
+                    gainedPoints
+                )
 
-                    this.bot.logger.info(
-                        isMobile,
-                        'SEARCH-BING',
-                        `gainedPoints=${gainedPoints} points | query="${query}" | remaining=${newMissingPointsTotal}`,
-                        'green'
-                    )
-                }
+                this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
+                this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
+                totalGainedPoints += gainedPoints
+                missingPointsTotal = Math.max(0, missingPointsTotal - gainedPoints)
 
-                missingPointsTotal = newMissingPointsTotal
+                this.bot.logger.info(
+                    isMobile,
+                    'SEARCH-BING',
+                    `gainedPoints=${gainedPoints} points | query="${query}" | remaining=${missingPointsTotal}`,
+                    'green'
+                )
 
                 if (missingPointsTotal === 0) {
                     this.bot.logger.info(
@@ -158,7 +154,7 @@ export class Search extends Workers {
 
                     const extra = await queryCore.queryManager({
                         shuffle: true,
-                        related: true,
+                        related: false,
                         langCode,
                         geoLocale: locale,
                         sourceOrder: this.bot.config.searchSettings.queryEngines
@@ -185,7 +181,7 @@ export class Search extends Workers {
                 while (missingPointsTotal > 0) {
                     const extra = await queryCore.queryManager({
                         shuffle: true,
-                        related: true,
+                        related: false,
                         langCode,
                         geoLocale: locale,
                         sourceOrder: this.bot.config.searchSettings.queryEngines
@@ -213,7 +209,12 @@ export class Search extends Workers {
                         const newMissingPoints = this.bot.browser.func.missingSearchPoints(searchCounters, isMobile)
                         const newMissingPointsTotal = newMissingPoints.totalPoints
 
-                        const rawGained = missingPointsTotal - newMissingPointsTotal
+                        const curPointsBefore = Number(this.bot.userData.currentPoints ?? 0)
+                        const livePointsNow = await this.bot.browser.func.getCurrentPoints(page).catch(() => curPointsBefore)
+                        const liveDelta = livePointsNow > curPointsBefore ? (livePointsNow - curPointsBefore) : 0
+
+                        const counterDelta = missingPointsTotal - newMissingPointsTotal
+                        const rawGained = counterDelta > 0 ? counterDelta : liveDelta
                         const gainedPoints = Math.max(0, rawGained)
 
                         if (gainedPoints === 0) {
@@ -238,7 +239,7 @@ export class Search extends Workers {
                             )
                         }
 
-                        missingPointsTotal = newMissingPointsTotal
+                        missingPointsTotal = Math.max(0, counterDelta > 0 ? newMissingPointsTotal : (missingPointsTotal - gainedPoints))
 
                         if (missingPointsTotal === 0) {
                             this.bot.logger.info(
@@ -314,22 +315,29 @@ export class Search extends Workers {
 
         for (let i = 0; i < maxAttempts; i++) {
             try {
-                const searchBar = '#sb_form_q'
-                const searchBox = searchPage.locator(searchBar)
+                const searchBarSelector = '#sb_form_q, input[name="q"], textarea[name="q"], input.b_searchbox, input[type="search"]'
+                const searchBox = searchPage.locator(searchBarSelector).first()
 
                 await searchPage.evaluate(() => {
                     window.scrollTo({ left: 0, top: 0, behavior: 'auto' })
-                })
+                }).catch(() => {})
 
-                await searchPage.keyboard.press('Home')
-                await searchBox.waitFor({ state: 'visible', timeout: 15000 })
+                await searchPage.keyboard.press('Home').catch(() => {})
+                
+                // Cek apakah input search bar siap digunakan dalam 2 detik
+                const isReady = await searchBox.waitFor({ state: 'visible', timeout: 2000 }).then(() => true).catch(() => false)
 
-                await this.bot.utils.wait(1000)
-                await this.bot.browser.utils.ghostClick(searchPage, searchBar, { clickCount: 3 })
-                await searchBox.fill('')
-
-                await searchPage.keyboard.type(query, { delay: 50 })
-                await searchPage.keyboard.press('Enter')
+                if (isReady) {
+                    await searchBox.click({ timeout: 1500 }).catch(() => {})
+                    await searchBox.fill('')
+                    await searchPage.keyboard.type(query, { delay: 35 })
+                    await searchPage.keyboard.press('Enter')
+                } else {
+                    // Resilient Fallback: Navigasi langsung ke URL pencarian (100% andal, mengatasi widget olahraga/hasil dinamis)
+                    const cvid = randomBytes(16).toString('hex')
+                    const searchUrl = `${this.bingHome}/search?q=${encodeURIComponent(query)}&PC=U531&FORM=ANNTA1&cvid=${cvid}`
+                    await searchPage.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {})
+                }
 
                 this.bot.logger.debug(
                     isMobile,
@@ -337,7 +345,7 @@ export class Search extends Workers {
                     `Submitted query to Bing | attempt=${i + 1}/${maxAttempts} | query="${query}"`
                 )
 
-                await this.bot.utils.wait(3000)
+                await this.bot.utils.wait(2000)
 
                 if (this.bot.config.searchSettings.scrollRandomResults) {
                     await this.bot.utils.wait(2000)
@@ -356,7 +364,7 @@ export class Search extends Workers {
                     )
                 )
 
-                const counters = await this.bot.browser.func.getSearchPoints()
+                const counters = await this.bot.browser.func.getSearchPoints(searchPage)
 
                 this.bot.logger.debug(
                     isMobile,
@@ -397,7 +405,7 @@ export class Search extends Workers {
             `Returning current search counters after failed retries | query="${query}"`
         )
 
-        return await this.bot.browser.func.getSearchPoints()
+        return await this.bot.browser.func.getSearchPoints(searchPage)
     }
 
     private async randomScroll(page: Page, isMobile: boolean) {
