@@ -681,13 +681,23 @@ export class MicrosoftRewardsBot {
                     this.logger.error('main', 'FLOW', `Failed to get mobile access token: ${error instanceof Error ? error.message : String(error)}`)
                 }
 
+                // Pastikan browser sudah mendarat di Dashboard Rewards & sinkronisasi cookies aktif
+                await this.mainMobilePage.goto(this.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
+                await this.login.verifyBingSession(this.mainMobilePage)
+                await this.utils.wait(2000)
+
                 this.cookies.mobile = await initialContext.cookies()
                 this.fingerprint = mobileSession.fingerprint
 
+                let appData: AppDashboardData | null = null
+                try {
+                    appData = await this.browser.func.getAppDashboardData()
+                } catch {}
+
+                const detectedCountry = (appData?.response?.profile?.attributes?.country || 'ID').toUpperCase()
+                this.userData.geoLocale = account.geoLocale === 'auto' ? detectedCountry : account.geoLocale.toLowerCase()
+
                 const data: DashboardData = await this.browser.func.getDashboardData()
-                const appData: AppDashboardData = await this.browser.func.getAppDashboardData()
-                
-                this.userData.geoLocale = account.geoLocale === 'auto' ? data.userProfile.attributes.country : account.geoLocale.toLowerCase()
                 
                 this.userData.initialPoints = data.userStatus.availablePoints
                 this.userData.currentPoints = data.userStatus.availablePoints

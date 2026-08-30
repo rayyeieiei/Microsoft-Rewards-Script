@@ -214,6 +214,10 @@ export class Login {
 
         if (url.hostname === 'chromewebdata') return 'CHROMEWEBDATA_ERROR'
 
+        if (url.hostname === 'account.live.com' && url.pathname.includes('/interrupt/passkey')) {
+            return 'PASSKEY_ERROR'
+        }
+
         const isLocked = await this.checkSelector(page, this.selectors.accountLocked)
         if (isLocked) return 'ACCOUNT_LOCKED'
 
@@ -229,6 +233,7 @@ export class Login {
             [this.selectors.kmsiVideo, 'KMSI_PROMPT'],
             [this.selectors.passKeyVideo, 'PASSKEY_VIDEO'],
             [this.selectors.passKeyError, 'PASSKEY_ERROR'],
+            ['*:has-text("We couldn\'t create a passkey"), *:has-text("Set up a passkey")', 'PASSKEY_ERROR'],
             [this.selectors.passwordIcon, 'SIGN_IN_ANOTHER_WAY'],
             [this.selectors.emailIcon, 'SIGN_IN_ANOTHER_WAY_EMAIL'],
             [this.selectors.emailIconOld, 'SIGN_IN_ANOTHER_WAY_EMAIL'],
@@ -288,15 +293,31 @@ export class Login {
 
             case 'PASSKEY_VIDEO':
             case 'PASSKEY_ERROR': {
-                this.bot.logger.warn(this.bot.isMobile, 'LOGIN-PASSKEY', 'Passkey enrollment interrupt detected! Attempting to skip...', 'yellow')
-                const skipBtn = page.locator("#iCancel, #iSkip, button:has-text('Skip for now'), button:has-text('Not now'), button:has-text('Cancel')").first()
+                this.bot.logger.warn(this.bot.isMobile, 'LOGIN-PASSKEY', 'Passkey enrollment interrupt detected! Attempting to bypass...', 'yellow')
+                
+                // Cek apakah ada tombol skip/cancel/next di halaman
+                const skipBtn = page.locator("#iCancel, #iSkip, #idBtn_Back, #idSIButton9, button:has-text('Skip for now'), button:has-text('Not now'), button:has-text('Cancel'), button:has-text('Next'), a#iCancel").first()
                 if (await skipBtn.count() > 0 && await skipBtn.isVisible()) {
                     await skipBtn.click().catch(() => {})
                     await this.bot.utils.wait(2000)
-                } else {
-                    this.bot.logger.info(this.bot.isMobile, 'LOGIN-PASSKEY', 'No auto-skip button found. Please click "Cancel/Skip" manually on the browser screen!', 'yellow')
-                    await this.bot.utils.wait(10000)
+                    return true
                 }
+
+                // Cek jika URL memiliki return_url (ru) param, langsung arahkan ke ru
+                try {
+                    const currentUrl = new URL(page.url())
+                    const ru = currentUrl.searchParams.get('ru')
+                    if (ru) {
+                        this.bot.logger.info(this.bot.isMobile, 'LOGIN-PASSKEY', `Auto-redirecting past passkey interrupt to return URL: ${ru}`)
+                        await page.goto(ru, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
+                        await this.bot.utils.wait(2000)
+                        return true
+                    }
+                } catch {}
+
+                this.bot.logger.info(this.bot.isMobile, 'LOGIN-PASSKEY', 'Attempting direct navigation to Rewards home...')
+                await page.goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
+                await this.bot.utils.wait(2000)
                 return true
             }
 
