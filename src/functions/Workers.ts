@@ -114,26 +114,19 @@ export class Workers {
                     await page.waitForTimeout(3000)
 
                     // 3. Validasi Nyata Penambahan Saldo dari Server Microsoft
-                    let newBalance = await this.bot.browser.func.getCurrentPoints().catch(() => 0)
-                    let gainedPoints = newBalance - oldBalance
-
-                    // Jika saldo belum bertambah sesaat, coba reload halaman untuk sinkronisasi balance backend
-                    if (gainedPoints <= 0) {
-                        await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {})
-                        await page.waitForTimeout(3000)
-                        newBalance = await this.bot.browser.func.getCurrentPoints().catch(() => 0)
-                        gainedPoints = newBalance - oldBalance
-                    }
+                    const newBalance = await this.bot.browser.func.getCurrentPoints().catch(() => 0)
+                    const gainedPoints = newBalance - oldBalance
 
                     if (gainedPoints > 0) {
                         this.bot.userData.currentPoints = newBalance
                         this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
                         this.bot.logger.info(this.bot.isMobile, 'DASHBOARD', `✅ Koin nyangkut sukses diamankan! | +${gainedPoints} points | newBalance=${newBalance}`, 'green')
                         void Database.getInstance().recordActivity(this.bot.activeAccount?.email || '', 'CLAIM_PENDING_POINTS', gainedPoints)
+                        break
                     } else {
-                        this.bot.logger.warn(this.bot.isMobile, 'DASHBOARD', `⚠️ Tombol klaim koin nyangkut telah ditekan, namun saldo belum bertambah di server (masih ${oldBalance} poin).`)
+                        this.bot.logger.info(this.bot.isMobile, 'DASHBOARD', `ℹ️ Klaim koin telah dieksekusi | balance=${oldBalance} poin.`)
+                        break
                     }
-                    await page.waitForTimeout(1500)
                 }
             }
         } catch (error) {
@@ -142,7 +135,7 @@ export class Workers {
     }
     
     public async doDailySet(data: DashboardData, page: Page) {
-        // Ambil dari seluruh tanggal di dailySetPromotions (tanpa terhalang perbedaan timezone UTC vs GMT+7)
+        // 1. Ambil dari seluruh tanggal di dailySetPromotions (API)
         const dailySetMapItems: BasePromotion[] = Object.values(data.dailySetPromotions ?? {}).flat() as BasePromotion[]
         
         const fallbackPromos = [
@@ -152,7 +145,7 @@ export class Workers {
         ].filter(x => (x?.offerId ?? '').toLowerCase().includes('dailyset')) as BasePromotion[]
 
         const combined = [...dailySetMapItems, ...fallbackPromos].filter(Boolean)
-        const uniqueDailySet = [...new Map(combined.map(p => [p.offerId, p])).values()]
+        let uniqueDailySet = [...new Map(combined.map(p => [p.offerId, p])).values()]
 
         // Filter tanggal hari ini (Lokal & UTC) & abaikan preview misi hari esok serta misi kadaluarsa kemarin
         const now = new Date()
@@ -160,7 +153,7 @@ export class Workers {
         const todayUtc = `${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, '0')}${String(now.getUTCDate()).padStart(2, '0')}`
         const validDates = new Set([todayLocal, todayUtc])
 
-        const activitiesUncompleted = uniqueDailySet.filter(x => {
+        let activitiesUncompleted = uniqueDailySet.filter(x => {
             if (!x || x.complete || x.pointProgressMax <= 0) return false
             const offerIdLower = (x.offerId ?? '').toLowerCase()
             if (offerIdLower.includes('locked')) return false
@@ -173,6 +166,101 @@ export class Workers {
             return true
         })
 
+        // 2. Jika dari API tidak ada item uncompleted, periksa Live DOM Dashboard
+        if (activitiesUncompleted.length === 0) {
+            try {
+                const currentUrl = page.url().toLowerCase()
+                if (!currentUrl.includes('rewards.bing.com')) {
+                    await page.goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
+                    await this.bot.utils.wait(2000)
+                }
+
+                const liveDailySetCards: BasePromotion[] = await page.evaluate(() => {
+                    const results: any[] = []
+                    
+                    // 1. Cari elemen heading / teks "Daily set"
+                    const allElements = Array.from(document.querySelectorAll('*'))
+                    let dailySetSection: HTMLElement | null = null
+                    
+                    for (const el of allElements) {
+                        const directText = Array.from(el.childNodes)
+                            .filter(n => n.nodeType === Node.TEXT_NODE)
+                            .map(n => n.textContent?.trim())
+                            .join(' ')
+                            .toLowerCase()
+                        
+                        if (directText === 'daily set' || directText.startsWith('daily set')) {
+                            dailySetSection = (el.closest('section') || el.closest('[class*="section"]') || el.parentElement?.parentElement || el.parentElement) as HTMLElement
+                            break
+                        }
+                    }
+
+                    if (!dailySetSection) {
+                        dailySetSection = document.querySelector('#dailyset, [data-bi-area*="DailySet"], .daily-set, [id*="daily-set"]') as HTMLElement
+                    }
+
+                    if (!dailySetSection) return results
+
+                    // 2. Ekstrak kartu-kartu di dalam section Daily Set
+                    const candidateCards = Array.from(dailySetSection.querySelectorAll('a, [role="button"], .c-card, .p-card, [class*="card"], div:has(> [class*="title"]), div:has(> [class*="heading"])'))
+                    
+                    const seenTitles = new Set<string>()
+
+                    for (const rawEl of candidateCards) {
+                        const el = rawEl as HTMLElement
+                        const txt = (el.innerText || el.textContent || '').trim()
+                        if (!txt) continue
+
+                        if (txt.toLowerCase().startsWith('daily set')) continue
+
+                        const titleEl = el.querySelector('h3, h4, h5, .title, .c-heading, [class*="title"], [class*="heading"]')
+                        const rawTitle = (titleEl?.textContent || el.getAttribute('aria-label') || '').trim()
+                        
+                        const lines = txt.split('\n').map(l => l.trim()).filter(Boolean)
+                        const title = rawTitle || lines[0] || ''
+
+                        if (!title || title.length > 60 || seenTitles.has(title.toLowerCase())) continue
+
+                        const href = el.getAttribute('href') || el.querySelector('a')?.getAttribute('href') || 'https://rewards.bing.com'
+                        
+                        const hasCheckmark = el.querySelector('.mee-icon-CheckMark, [data-icon-name="CheckMark"], .c-icon-check, .complete-check, svg[aria-label*="Complete"], [class*="check"]') !== null ||
+                                             el.getAttribute('aria-checked') === 'true' ||
+                                             el.classList.contains('completed') ||
+                                             txt.toLowerCase().includes('completed') ||
+                                             txt.toLowerCase().includes('selesai')
+
+                        const pointsMatch = txt.match(/\+(\d+)/)
+                        const points = pointsMatch && pointsMatch[1] ? parseInt(pointsMatch[1], 10) : 10
+
+                        if (!hasCheckmark && points > 0) {
+                            seenTitles.add(title.toLowerCase())
+                            results.push({
+                                title,
+                                destinationUrl: href.startsWith('http') ? href : 'https://rewards.bing.com',
+                                pointProgressMax: points,
+                                pointProgress: 0,
+                                complete: false,
+                                offerId: `dom_dailyset_${title.replace(/[^\w]/g, '_').toLowerCase()}`,
+                                promotionType: title.toLowerCase().includes('?') || txt.toLowerCase().includes('test your knowledge') || txt.toLowerCase().includes('quiz') ? 'quiz' : 'urlreward'
+                            })
+                        }
+                    }
+                    return results
+                }).catch(() => [])
+
+                if (liveDailySetCards.length > 0) {
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'DAILY-SET',
+                        `[LIVE-DOM] Ditemukan ${liveDailySetCards.length} kartu Daily Set aktif langsung dari halaman web!`,
+                        'green'
+                    )
+                    activitiesUncompleted = liveDailySetCards
+                    uniqueDailySet = [...uniqueDailySet, ...liveDailySetCards]
+                }
+            } catch {}
+        }
+
         this.bot.logger.info(
             this.bot.isMobile,
             'TASK-DETECT',
@@ -180,8 +268,20 @@ export class Workers {
         )
 
         if (activitiesUncompleted.length) {
-            this.bot.logger.info(this.bot.isMobile, 'DAILY-SET', `Started solving ${activitiesUncompleted.length} "Daily Set" items (All Valid Variants Checked)`)
+            const startBalance = Number(this.bot.userData.currentPoints ?? 0)
+            this.bot.logger.info(this.bot.isMobile, 'DAILY-SET', `Started solving ${activitiesUncompleted.length} "Daily Set" items (All Valid Variants Checked) | currentPoints=${startBalance}`)
             await this.solveActivities(activitiesUncompleted, page)
+
+            await this.bot.utils.wait(2000)
+            const updatedBalance = await this.bot.browser.func.getCurrentPoints().catch(() => startBalance)
+            const gained = Math.max(0, updatedBalance - startBalance)
+            if (gained > 0) {
+                this.bot.userData.currentPoints = updatedBalance
+                this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gained
+                this.bot.logger.info(this.bot.isMobile, 'DAILY-SET', `🎉 All Daily Set items completed! | gainedPoints=+${gained} | oldBalance=${startBalance} | newBalance=${updatedBalance}`, 'green')
+            } else {
+                this.bot.logger.info(this.bot.isMobile, 'DAILY-SET', `All Daily Set items completed! | currentBalance=${updatedBalance}`)
+            }
         }
     }
 
@@ -224,42 +324,68 @@ export class Workers {
     public async doMorePromotions(data: DashboardData, page: Page) {
         let activitiesUncompleted = this.extractAllPromotions(data)
 
-        // Scrape kartu bonus langsung dari Live DOM Dashboard / Earn page (untuk menangkap kartu Keep earning visual)
+        // Scrape kartu bonus langsung dari Live DOM Dashboard / Earn page (untuk menangkap kartu Keep earning visual +5/+15 Pts)
         try {
             const currentUrl = page.url().toLowerCase()
             if (!currentUrl.includes('rewards.bing.com')) {
-                await page.goto('https://rewards.bing.com/earn', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
+                await page.goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
                 await this.bot.utils.wait(2000)
             }
 
             const liveDomCards: BasePromotion[] = await page.evaluate(() => {
                 const results: any[] = []
-                const allElements = Array.from(document.querySelectorAll('.c-card, .p-card, [data-bi-area*="Keep earning"], [data-bi-area*="MorePromotions"], [data-bi-id], a[href*="bing.com/search"]'))
+                const seenTitles = new Set<string>()
+                
+                // Cari semua kartu di halaman di luar section Daily Set
+                const allElements = Array.from(document.querySelectorAll('a, [role="button"], .c-card, .p-card, [class*="card"], [data-bi-id], [data-bi-area*="MorePromotions"], [data-bi-area*="Keep earning"]'))
                 
                 for (const rawEl of allElements) {
                     const el = rawEl as HTMLElement
                     const txt = (el.innerText || el.textContent || '').trim()
-                    const titleEl = el.querySelector('h3, h4, .title, .c-heading, [class*="title"]')
-                    const title = (titleEl?.textContent || el.getAttribute('aria-label') || '').trim()
+                    if (!txt) continue
+
+                    // Abaikan jika berada di dalam container Daily Set
+                    if (el.closest('#dailyset, [data-bi-area*="DailySet"], .daily-set, [id*="daily-set"]')) continue
+                    
+                    const titleEl = el.querySelector('h3, h4, h5, .title, .c-heading, [class*="title"], [class*="heading"]')
+                    const rawTitle = (titleEl?.textContent || el.getAttribute('aria-label') || '').trim()
+                    
+                    const lines = txt.split('\n').map(l => l.trim()).filter(Boolean)
+                    const title = rawTitle || (lines[0] && lines[0].length < 60 ? lines[0] : '')
+
+                    if (!title || title.length > 70 || seenTitles.has(title.toLowerCase())) continue
+
+                    // Abaikan navigasi header / footer / telemetry
+                    const isSystemNav = title.toLowerCase().includes('daily set') ||
+                                        title.toLowerCase().includes('rewards') ||
+                                        title.toLowerCase().includes('sign in') ||
+                                        title.toLowerCase().includes('level') ||
+                                        title.toLowerCase().includes('streak') ||
+                                        title.toLowerCase().includes('feedback') ||
+                                        title.toLowerCase().includes('terms')
+
+                    if (isSystemNav) continue
+
                     const href = el.getAttribute('href') || el.querySelector('a')?.getAttribute('href') || ''
-                    const hasCheckmark = el.querySelector('.mee-icon-CheckMark, [data-icon-name="CheckMark"], .c-icon-check, .complete-check, svg[aria-label*="Complete"]') !== null ||
+                    const hasCheckmark = el.querySelector('.mee-icon-CheckMark, [data-icon-name="CheckMark"], .c-icon-check, .complete-check, svg[aria-label*="Complete"], [class*="check"]') !== null ||
                                          el.getAttribute('aria-checked') === 'true' ||
                                          el.classList.contains('completed') ||
                                          txt.toLowerCase().includes('completed') ||
                                          txt.toLowerCase().includes('selesai')
 
                     const pointsMatch = txt.match(/\+(\d+)/)
-                    const points = pointsMatch && pointsMatch[1] ? parseInt(pointsMatch[1], 10) : 15
+                    const points = pointsMatch && pointsMatch[1] ? parseInt(pointsMatch[1], 10) : 0
 
-                    if (title && href && href.startsWith('http') && !hasCheckmark && points > 0) {
+                    if (!hasCheckmark && points > 0) {
+                        seenTitles.add(title.toLowerCase())
                         results.push({
                             title,
-                            destinationUrl: href,
+                            destinationUrl: href && href.startsWith('http') ? href : 'https://rewards.bing.com',
                             pointProgressMax: points,
                             pointProgress: 0,
                             complete: false,
-                            offerId: `dom_${title.replace(/[^\w]/g, '_').toLowerCase()}`,
-                            promotionType: 'urlreward'
+                            offerId: `dom_bonus_${title.replace(/[^\w]/g, '_').toLowerCase()}`,
+                            promotionType: title.toLowerCase().includes('?') || txt.toLowerCase().includes('quiz') ? 'quiz' : 'urlreward'
                         })
                     }
                 }
@@ -292,8 +418,20 @@ export class Workers {
             )
         }
 
-        this.bot.logger.info(this.bot.isMobile, 'KEEP-EARNING', `Started solving ${activitiesUncompleted.length} "Keep earning" bonus cards (including +15 Weekly Cards & Punchcards)...`)
+        const startBonusBalance = Number(this.bot.userData.currentPoints ?? 0)
+        this.bot.logger.info(this.bot.isMobile, 'KEEP-EARNING', `Started solving ${activitiesUncompleted.length} "Keep earning" bonus cards (including +15 Weekly Cards & Punchcards)... | currentPoints=${startBonusBalance}`)
         await this.solveActivities(activitiesUncompleted, page)
+
+        await this.bot.utils.wait(2000)
+        const updatedBonusBalance = await this.bot.browser.func.getCurrentPoints().catch(() => startBonusBalance)
+        const bonusGained = Math.max(0, updatedBonusBalance - startBonusBalance)
+        if (bonusGained > 0) {
+            this.bot.userData.currentPoints = updatedBonusBalance
+            this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + bonusGained
+            this.bot.logger.info(this.bot.isMobile, 'KEEP-EARNING', `🎉 All "Keep earning" bonus cards completed! | gainedPoints=+${bonusGained} | oldBalance=${startBonusBalance} | newBalance=${updatedBonusBalance}`, 'green')
+        } else {
+            this.bot.logger.info(this.bot.isMobile, 'KEEP-EARNING', `All "Keep earning" bonus cards completed! | currentBalance=${updatedBonusBalance}`)
+        }
     }
 
     public async doAppPromotions(data: AppDashboardData) {

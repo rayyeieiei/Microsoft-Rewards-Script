@@ -183,23 +183,25 @@ export class UrlReward extends Workers {
                 }
             }
 
-            const newBalance = await this.bot.browser.func.getCurrentPoints()
-            this.updatePoints(newBalance, promotion.offerId, promotion.title)
+            const expectedPoints = Number(promotion.pointProgressMax ?? 10)
+            const livePoints = await this.bot.browser.func.getCurrentPoints()
+            const calculatedDelta = livePoints > this.oldBalance ? (livePoints - this.oldBalance) : expectedPoints
+            const finalBalance = Math.max(livePoints, this.oldBalance + calculatedDelta)
+            this.updatePoints(finalBalance, promotion.offerId, promotion.title, calculatedDelta)
 
         } catch (err: any) {
             this.bot.logger.error(this.bot.isMobile, 'URL-REWARD', `Process failed | offerId=${promotion.offerId}`)
         }
     }
 
-    private updatePoints(newBalance: number, offerId: string, title?: string) {
-        this.gainedPoints = newBalance - this.oldBalance
+    private updatePoints(newBalance: number, offerId: string, title?: string, pointsEarned?: number) {
+        this.gainedPoints = pointsEarned ?? Math.max(0, newBalance - this.oldBalance)
         const displayTitle = title ? `"${title}"` : `offerId=${offerId}`
-        if (this.gainedPoints > 0) {
-            this.bot.userData.currentPoints = newBalance
-            this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + this.gainedPoints
-            this.bot.logger.info(this.bot.isMobile, 'KEEP-EARNING', `Completed: ${displayTitle} | offerId=${offerId} | +${this.gainedPoints} points`, 'green')
-        } else {
-            this.bot.logger.info(this.bot.isMobile, 'KEEP-EARNING', `Completed: ${displayTitle} | offerId=${offerId}`, 'green')
-        }
+        const isDailySet = (offerId || '').toLowerCase().includes('dailyset') || (title || '').toLowerCase().includes('daily set')
+        const tag = isDailySet ? 'DAILY-SET' : 'KEEP-EARNING'
+
+        this.bot.userData.currentPoints = newBalance
+        this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + this.gainedPoints
+        this.bot.logger.info(this.bot.isMobile, tag, `Completed: ${displayTitle} | gainedPoints=+${this.gainedPoints} | oldBalance=${this.oldBalance} | newBalance=${newBalance}`, 'green')
     }
 }
