@@ -743,6 +743,10 @@ export class MicrosoftRewardsBot {
                     await this.workers.doMorePromotions(data, this.mainMobilePage)
                 }
 
+                if (data) {
+                    await this.workers.doClaimBonusPoints(data)
+                }
+
                 if (this.config.workers.doDailyCheckIn) {
                     this.updateDashboardAccount(accountEmail, { status: 'Daily Check-in' })
                     await this.activities.doDailyCheckIn()
