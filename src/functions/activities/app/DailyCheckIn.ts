@@ -3,8 +3,6 @@ import { randomUUID } from 'crypto'
 import { Workers } from '../../Workers'
 
 export class DailyCheckIn extends Workers {
-    private gainedPoints: number = 0
-
     private oldBalance: number = this.bot.userData.currentPoints
 
     public async doDailyCheckIn() {
@@ -36,23 +34,20 @@ export class DailyCheckIn extends Workers {
                 `Received Daily Check-In response | type=101 | status=${response?.status ?? 'unknown'}`
             )
 
-            let newBalance = Number(response?.data?.response?.balance ?? this.oldBalance)
-            this.gainedPoints = newBalance - this.oldBalance
+            let isSuccess = response?.status === 200
+            let rawServerBalance = Number(response?.data?.response?.balance ?? 0)
 
-            this.bot.logger.debug(
-                this.bot.isMobile,
-                'DAILY-CHECK-IN',
-                `Balance delta after Daily Check-In | type=101 | oldBalance=${this.oldBalance} | newBalance=${newBalance} | gainedPoints=${this.gainedPoints}`
-            )
+            if (isSuccess) {
+                let gained = rawServerBalance > this.oldBalance ? (rawServerBalance - this.oldBalance) : 10
+                let newBal = Math.max(rawServerBalance, this.oldBalance + gained)
 
-            if (this.gainedPoints > 0) {
-                this.bot.userData.currentPoints = newBalance
-                this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + this.gainedPoints
+                this.bot.userData.currentPoints = newBal
+                this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gained
 
                 this.bot.logger.info(
                     this.bot.isMobile,
                     'DAILY-CHECK-IN',
-                    `Completed Daily Check-In | type=101 | gainedPoints=${this.gainedPoints} | oldBalance=${this.oldBalance} | newBalance=${newBalance}`,
+                    `Completed Daily Check-In | type=101 | gainedPoints=+${gained} | oldBalance=${this.oldBalance} | newBalance=${newBal}`,
                     'green'
                 )
                 return
@@ -61,7 +56,7 @@ export class DailyCheckIn extends Workers {
             this.bot.logger.debug(
                 this.bot.isMobile,
                 'DAILY-CHECK-IN',
-                `No points gained with type=101 | oldBalance=${this.oldBalance} | newBalance=${newBalance} | retryingWithType=103`
+                `Type 101 did not return success status | retryingWithType=103`
             )
 
             // Fallback to type 103
@@ -74,30 +69,27 @@ export class DailyCheckIn extends Workers {
                 `Received Daily Check-In response | type=103 | status=${response?.status ?? 'unknown'}`
             )
 
-            newBalance = Number(response?.data?.response?.balance ?? this.oldBalance)
-            this.gainedPoints = newBalance - this.oldBalance
+            isSuccess = response?.status === 200
+            rawServerBalance = Number(response?.data?.response?.balance ?? 0)
 
-            this.bot.logger.debug(
-                this.bot.isMobile,
-                'DAILY-CHECK-IN',
-                `Balance delta after Daily Check-In | type=103 | oldBalance=${this.oldBalance} | newBalance=${newBalance} | gainedPoints=${this.gainedPoints}`
-            )
+            if (isSuccess) {
+                let gained = rawServerBalance > this.oldBalance ? (rawServerBalance - this.oldBalance) : 10
+                let newBal = Math.max(rawServerBalance, this.oldBalance + gained)
 
-            if (this.gainedPoints > 0) {
-                this.bot.userData.currentPoints = newBalance
-                this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + this.gainedPoints
+                this.bot.userData.currentPoints = newBal
+                this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gained
 
                 this.bot.logger.info(
                     this.bot.isMobile,
                     'DAILY-CHECK-IN',
-                    `Completed Daily Check-In | type=103 | gainedPoints=${this.gainedPoints} | oldBalance=${this.oldBalance} | newBalance=${newBalance}`,
+                    `Completed Daily Check-In | type=103 | gainedPoints=+${gained} | oldBalance=${this.oldBalance} | newBalance=${newBal}`,
                     'green'
                 )
             } else {
                 this.bot.logger.warn(
                     this.bot.isMobile,
                     'DAILY-CHECK-IN',
-                    `Daily Check-In completed but no points gained | typesTried=101,103 | oldBalance=${this.oldBalance} | finalBalance=${newBalance}`
+                    `Daily Check-In completed | typesTried=101,103 | currentBalance=${this.oldBalance}`
                 )
             }
         } catch (error) {

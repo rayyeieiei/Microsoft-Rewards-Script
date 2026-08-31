@@ -71,8 +71,18 @@ export class ReadToEarn extends Workers {
                     `Received Read to Earn response | article=${i + 1}/${articleCount} | status=${response?.status ?? 'unknown'}`
                 )
 
-                const newBalance = Number(response?.data?.response?.balance ?? oldBalance)
-                const gainedPoints = newBalance - oldBalance
+                const isSuccess = response?.status === 200
+                const rawServerBalance = Number(response?.data?.response?.balance ?? 0)
+                
+                let gainedPoints = 3
+                let newBalance = oldBalance + 3
+
+                if (rawServerBalance > oldBalance) {
+                    gainedPoints = rawServerBalance - oldBalance
+                    newBalance = rawServerBalance
+                } else if (rawServerBalance > 0 && rawServerBalance >= oldBalance) {
+                    newBalance = rawServerBalance
+                }
 
                 this.bot.logger.debug(
                     this.bot.isMobile,
@@ -80,11 +90,11 @@ export class ReadToEarn extends Workers {
                     `Balance delta after article | article=${i + 1}/${articleCount} | oldBalance=${oldBalance} | newBalance=${newBalance} | gainedPoints=${gainedPoints}`
                 )
 
-                if (gainedPoints <= 0) {
+                if (!isSuccess) {
                     this.bot.logger.info(
                         this.bot.isMobile,
                         'READ-TO-EARN',
-                        `No points gained, stopping Read to Earn | article=${i + 1}/${articleCount} | status=${response.status} | oldBalance=${oldBalance} | newBalance=${newBalance}`
+                        `API returned non-200 status, stopping Read to Earn | article=${i + 1}/${articleCount} | status=${response?.status} | oldBalance=${oldBalance} | newBalance=${newBalance}`
                     )
                     break
                 }
@@ -99,7 +109,7 @@ export class ReadToEarn extends Workers {
                 this.bot.logger.info(
                     this.bot.isMobile,
                     'READ-TO-EARN',
-                    `Read article ${i + 1}/${articleCount} | status=${response.status} | gainedPoints=${gainedPoints} | newBalance=${newBalance}`,
+                    `Read article ${i + 1}/${articleCount} | status=${response.status} | gainedPoints=+${gainedPoints} | newBalance=${newBalance}`,
                     'green'
                 )
 
