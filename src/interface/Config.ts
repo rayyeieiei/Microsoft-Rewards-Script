@@ -27,10 +27,22 @@ export interface Config {
 
 export type QueryEngine = 'google' | 'wikipedia' | 'reddit' | 'local'
 
+export interface OrganicSearchSettings {
+    enabled: boolean
+    ctrRate?: number
+    dwellTimeMin?: number | string
+    dwellTimeMax?: number | string
+    maxScrollDepth?: number
+    enableTopicalChaining?: boolean
+    maxChainDepth?: number
+    openInNewTab?: boolean
+}
+
 export interface ConfigSearchSettings {
     scrollRandomResults: boolean
     clickRandomResults: boolean
     parallelSearching: boolean
+    organicSearch?: OrganicSearchSettings
     queryEngines: QueryEngine[]
     searchResultVisitTime: number | string
     searchDelay: ConfigDelay

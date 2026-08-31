@@ -86,6 +86,18 @@ export const ConfigSchema = z.object({
         scrollRandomResults: z.boolean(),
         clickRandomResults: z.boolean(),
         parallelSearching: z.boolean(),
+        organicSearch: z
+            .object({
+                enabled: z.boolean(),
+                ctrRate: z.number().optional(),
+                dwellTimeMin: NumberOrString.optional(),
+                dwellTimeMax: NumberOrString.optional(),
+                maxScrollDepth: z.number().optional(),
+                enableTopicalChaining: z.boolean().optional(),
+                maxChainDepth: z.number().optional(),
+                openInNewTab: z.boolean().optional()
+            })
+            .optional(),
         queryEngines: z.array(QueryEngineSchema),
         searchResultVisitTime: NumberOrString,
         searchDelay: DelaySchema,

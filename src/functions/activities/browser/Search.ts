@@ -5,11 +5,15 @@ import type { Counters, DashboardData } from '../../../interface/DashboardData'
 import { QueryCore } from '../../QueryEngine'
 import { Workers } from '../../Workers'
 import { Database } from '../../../util/Database'
+import { OrganicEngine } from './OrganicEngine'
+import { TopicalChainer } from './TopicalChainer'
 
 import type { QueryEngine } from '../../../interface/Config'
 
 export class Search extends Workers {
     private bingHome = 'https://bing.com'
+    private organicEngine: OrganicEngine = new OrganicEngine(this.bot)
+    private topicalChainer: TopicalChainer = new TopicalChainer(this.bot)
 
     public async doSearch(data: DashboardData, page: Page, isMobile: boolean): Promise<number> {
         const startBalance = Number(this.bot.userData.currentPoints ?? 0)
@@ -62,6 +66,21 @@ export class Search extends Workers {
             queries = [...new Set(queries.map(q => q.trim()).filter(Boolean))]
 
             this.bot.logger.info(isMobile, 'SEARCH-BING', `Search query pool ready | count=${queries.length}`)
+
+            const organicConfig = this.bot.config.searchSettings.organicSearch
+            const isOrganicEnabled = Boolean(organicConfig?.enabled)
+
+            if (isOrganicEnabled) {
+                const ctrPercent = (Number(organicConfig?.ctrRate ?? 0.35) * 100).toFixed(0)
+                this.bot.logger.info(
+                    isMobile,
+                    'ORGANIC-SEARCH',
+                    `[Star Bonus] Organic Search Engine active | ctrRate=${ctrPercent}% | topicalChaining=${Boolean(organicConfig?.enableTopicalChaining)}`,
+                    'green'
+                )
+            }
+
+            this.topicalChainer.resetChain()
 
             // Go to bing
             this.bot.logger.debug(isMobile, 'SEARCH-BING', `Navigating to search page | url=${this.bingHome}`)
@@ -131,6 +150,14 @@ export class Search extends Workers {
                         `All required ${isMobile ? 'Mobile' : 'Desktop'} search points earned, stopping search loop`
                     )
                     break
+                }
+
+                // Topical Chaining: Ekstrak related search keywords dari SERP Bing dan masukkan ke antrean kueri
+                if (isOrganicEnabled && organicConfig?.enableTopicalChaining && queries.length < 150) {
+                    const relatedTopics = await this.topicalChainer.extractRelatedSearches(page)
+                    if (relatedTopics.length > 0) {
+                        queries.splice(i + 1, 0, ...relatedTopics)
+                    }
                 }
 
                 if (stagnantLoop > stagnantLoopMax) {
@@ -347,14 +374,18 @@ export class Search extends Workers {
 
                 await this.bot.utils.wait(2000)
 
-                if (this.bot.config.searchSettings.scrollRandomResults) {
-                    await this.bot.utils.wait(2000)
-                    await this.randomScroll(searchPage, isMobile)
-                }
+                if (this.bot.config.searchSettings.organicSearch?.enabled) {
+                    await this.organicEngine.simulateOrganicCTR(searchPage, isMobile)
+                } else {
+                    if (this.bot.config.searchSettings.scrollRandomResults) {
+                        await this.bot.utils.wait(2000)
+                        await this.randomScroll(searchPage, isMobile)
+                    }
 
-                if (this.bot.config.searchSettings.clickRandomResults) {
-                    await this.bot.utils.wait(2000)
-                    await this.clickRandomLink(searchPage, isMobile)
+                    if (this.bot.config.searchSettings.clickRandomResults) {
+                        await this.bot.utils.wait(2000)
+                        await this.clickRandomLink(searchPage, isMobile)
+                    }
                 }
 
                 await this.bot.utils.wait(
