@@ -179,6 +179,7 @@ export class MicrosoftRewardsBot {
         this.activeAccount = null
         this.mainMobilePage = undefined as any
         this.mainDesktopPage = undefined as any
+        this.workers?.completedOffersInSession?.clear()
     }
 
     public updateDashboardAccount(email: string, update: any) {

@@ -89,6 +89,8 @@ export class UrlReward extends Workers {
 
                         if (statusInfo.isCompleted) {
                             this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Card "${promotion.title}" is already completed!`)
+                            if (promotion.offerId) this.bot.workers.completedOffersInSession.add(promotion.offerId)
+                            if (promotion.title) this.bot.workers.completedOffersInSession.add(promotion.title.toLowerCase().trim())
                             return
                         }
 
@@ -202,6 +204,8 @@ export class UrlReward extends Workers {
 
         this.bot.userData.currentPoints = newBalance
         this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + this.gainedPoints
+        if (offerId) this.bot.workers.completedOffersInSession.add(offerId)
+        if (title) this.bot.workers.completedOffersInSession.add(title.toLowerCase().trim())
         this.bot.logger.info(this.bot.isMobile, tag, `Completed: ${displayTitle} | gainedPoints=+${this.gainedPoints} | oldBalance=${this.oldBalance} | newBalance=${newBalance}`, 'green')
     }
 }

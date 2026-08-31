@@ -11,125 +11,82 @@ import { Database } from '../util/Database'
 
 export class Workers {
     public bot: MicrosoftRewardsBot
+    public completedOffersInSession: Set<string> = new Set<string>()
 
     constructor(bot: MicrosoftRewardsBot) {
         this.bot = bot
     }
 
     public async doClaimPendingPoints(page: Page) {
+        if (!page || page.isClosed()) return
         try {
-            const selectors = [
-                '//div[contains(., "Ready to claim")]//a[contains(., "Claim") or contains(., "Klaim")]',
-                '//div[contains(., "Ready to claim")]//button',
-                '//div[contains(., "Ready to claim")]',
-                'a:has-text("Claim")',
-                'a:has-text("Klaim")',
-                'button:has-text("Claim")',
-                'button:has-text("Klaim")',
-                '#claimPendingPoints',
-                '.claim-button',
-                '[data-bi-id*="claim" i]',
-                '[id*="claimReward" i]',
-                '.rewards-claim-button',
-                '.point-claim-button',
-                'div[role="button"]:has-text("Claim")',
-                'div[role="button"]:has-text("Klaim")',
-                '[aria-label*="Claim reward" i]',
-                '[aria-label*="Klaim" i]',
-                '.p-card button:has-text("Claim")',
-                '.p-card button:has-text("Klaim")'
-            ]
+            const claimResult = await page.evaluate(() => {
+                const candidates = Array.from(document.querySelectorAll('a, button, div[role="button"], span, .p-card, .c-card, [id*="claim"], [class*="claim"]'))
+                
+                for (const rawEl of candidates) {
+                    const el = rawEl as HTMLElement
+                    const rawText = (el.innerText || el.textContent || '').trim()
+                    if (!rawText || rawText.length > 50) continue
+                    const txt = rawText.toLowerCase()
+                    
+                    if (el.closest('#b_results, #ans_nws, .news, .b_algo, #news, .feed-card, [data-bi-id*="news"], article, nav, header, footer')) continue
+                    
+                    const isClaim = txt.includes('claim') || txt.includes('klaim') || txt.includes('ready to claim')
+                    if (!isClaim) continue
+                    
+                    const explicitPlus = rawText.match(/\+(\d+)/)?.[1]
+                    const explicitPts = rawText.match(/\b(\d+)\s*(pts|poin|points)\b/i)?.[1]
+                    const anyDigit = rawText.match(/\b(\d+)\b/)?.[1]
+                    const detectedNumStr = explicitPlus || explicitPts || anyDigit || ''
+                    const detectedNum = detectedNumStr ? parseInt(detectedNumStr, 10) : null
+                    
+                    if (detectedNum === 0 || txt.includes('0 claim') || txt.includes('claim 0') || txt.includes('ready to claim 0')) continue
+                    if (txt.includes('feedback') || txt.includes('terms') || txt.includes('suggest') || txt.includes('code')) continue
+                    
+                    const rect = el.getBoundingClientRect()
+                    if (rect.width === 0 || rect.height === 0) continue
+                    
+                    const style = window.getComputedStyle(el)
+                    if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') continue
+                    
+                    const clickTarget = (el.querySelector('a, button, [role="button"]') || el) as HTMLElement
+                    clickTarget.click()
+                    clickTarget.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }))
+                    clickTarget.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }))
+                    clickTarget.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
+                    
+                    return { clicked: true, label: rawText.replace(/\s+/g, ' ').slice(0, 30), pts: detectedNum }
+                }
+                return { clicked: false, label: '', pts: null }
+            }).catch(() => ({ clicked: false, label: '', pts: null }))
 
-            for (const sel of selectors) {
-                const elements = page.locator(sel)
-                const count = await elements.count().catch(() => 0)
-                for (let i = 0; i < count; i++) {
-                    const el = elements.nth(i)
-                    const isVis = await el.isVisible().catch(() => false)
-                    if (!isVis) continue
-
-                    const info = await el.evaluate((node: HTMLElement) => {
-                        const rawText = (node.innerText || '').trim()
-                        const parentText = (node.parentElement?.innerText || '').trim()
-                        const txt = rawText.toLowerCase()
-                        
-                        // Abaikan artikel berita MSN / Bing News / Search results / Footer / Feedback / Navigasi atas
-                        const isNewsOrSearchResult = node.closest('#b_results, #ans_nws, .news, .b_algo, #news, .feed-card, [data-bi-id*="news"], article, .b_algo, nav, header') !== null
-                        const isTooLong = rawText.length > 50 // Tombol klaim asli teksnya pendek (< 50 char), bukan kalimat berita
-                        
-                        // Ekstrak angka poin (contoh: "Ready to claim 121 Claim >", "Claim +10", "100 Poin", "50 pts")
-                        const explicitPlus = rawText.match(/\+(\d+)/)?.[1] || parentText.match(/\+(\d+)/)?.[1]
-                        const explicitPts = rawText.match(/\b(\d+)\s*(pts|poin|points)\b/i)?.[1] || parentText.match(/\b(\d+)\s*(pts|poin|points)\b/i)?.[1]
-                        const anyDigit = rawText.match(/\b(\d+)\b/)?.[1] || parentText.match(/\b(\d+)\b/)?.[1]
-                        
-                        const detectedNumStr = explicitPlus || explicitPts || anyDigit || ''
-                        const detectedNum = detectedNumStr ? parseInt(detectedNumStr, 10) : null
-                        
-                        // Jika terdeteksi 0 poin (contoh: "Ready to claim 0 Claim" / "0 points"), berarti belum ada koin yang bisa diklaim
-                        const isZeroPoints = detectedNum === 0 || txt.includes('0 claim') || txt.includes('claim 0') || txt.includes('ready to claim 0')
-                        
-                        const isTrash = isNewsOrSearchResult || isTooLong || isZeroPoints || txt.includes('feedback') || txt.includes('terms') || txt.includes('suggest') || txt.includes('code') || node.closest('#footer') !== null
-                        const isClaim = txt.includes('claim') || txt.includes('klaim') || (node.outerHTML || '').toLowerCase().includes('claim')
-                        
-                        const label = rawText.replace(/\s+/g, ' ').slice(0, 30)
-
-                        return { isTrash, isClaim, ptsNum: detectedNum && detectedNum > 0 ? detectedNum : null, label }
-                    }).catch(() => ({ isTrash: true, isClaim: false, ptsNum: null, label: '' }))
-
-                    if (info.isTrash || !info.isClaim) continue
-
-                    const ptsLabel = info.ptsNum ? ` (+${info.ptsNum} Poin)` : ''
-                    this.bot.logger.info(this.bot.isMobile, 'DASHBOARD', `🎉 Nemu koin nyangkut di ${this.bot.isMobile ? 'Mobile' : 'Desktop'}${ptsLabel}! Mengeksekusi klaim siluman: "${info.label || 'Claim'}"...`, 'green')
-
-                    const oldBalance = await this.bot.browser.func.getCurrentPoints().catch(() => 0)
-
-                    // 1. Eksekusi Klik pada Link/Tombol Aksi di Dalam Card
-                    const innerAction = el.locator('a, button, [role="button"], span:has-text("Claim"), span:has-text("Klaim")').first()
-                    const hasInnerAction = (await innerAction.count().catch(() => 0)) > 0
-                    const targetToClick = hasInnerAction ? innerAction : el
-
-                    await targetToClick.scrollIntoViewIfNeeded().catch(() => {})
-                    await targetToClick.click({ force: true, timeout: 5000 }).catch(async () => {
-                        await targetToClick.evaluate((node: HTMLElement) => {
-                            node.click()
-                            node.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }))
-                            node.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }))
-                            node.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
-                        }).catch(() => {})
-                    })
-
-                    await page.waitForTimeout(2500)
-
-                    // 2. Cek jika membuka Drawer / Flyout / Modal Popup ("Claim All", "Got it", "OK", "Claim")
-                    const subClaimButtons = page.locator('.flyout button:has-text("Claim"), .drawer button:has-text("Claim"), [role="dialog"] button:has-text("Claim"), .flyout a:has-text("Claim"), .drawer a:has-text("Claim"), button:has-text("Claim all"), button:has-text("Klaim semua"), button:has-text("Got it"), button:has-text("OK"), button:has-text("Terima")')
-                    const subCount = await subClaimButtons.count().catch(() => 0)
-                    for (let s = 0; s < subCount; s++) {
-                        const sBtn = subClaimButtons.nth(s)
-                        if (await sBtn.isVisible().catch(() => false)) {
-                            await sBtn.click({ force: true }).catch(() => {})
-                            await page.waitForTimeout(1500)
+            if (claimResult.clicked) {
+                const ptsLabel = claimResult.pts ? ` (+${claimResult.pts} Poin)` : ''
+                this.bot.logger.info(this.bot.isMobile, 'DASHBOARD', `🎉 Nemu koin nyangkut di ${this.bot.isMobile ? 'Mobile' : 'Desktop'}${ptsLabel}! Mengeksekusi klaim: "${claimResult.label || 'Claim'}"...`, 'green')
+                await this.bot.utils.wait(2500)
+                
+                await page.evaluate(() => {
+                    const btns = Array.from(document.querySelectorAll('.flyout button, .drawer button, [role="dialog"] button, button'))
+                    for (const btn of btns) {
+                        const t = (btn.textContent || '').toLowerCase().trim()
+                        if (['claim all', 'klaim semua', 'got it', 'ok', 'terima'].includes(t)) {
+                            (btn as HTMLElement).click()
+                            break
                         }
                     }
-
-                    await page.waitForTimeout(3000)
-
-                    // 3. Validasi Nyata Penambahan Saldo dari Server Microsoft
-                    const newBalance = await this.bot.browser.func.getCurrentPoints().catch(() => 0)
-                    const gainedPoints = newBalance - oldBalance
-
-                    if (gainedPoints > 0) {
-                        this.bot.userData.currentPoints = newBalance
-                        this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
-                        this.bot.logger.info(this.bot.isMobile, 'DASHBOARD', `✅ Koin nyangkut sukses diamankan! | +${gainedPoints} points | newBalance=${newBalance}`, 'green')
-                        void Database.getInstance().recordActivity(this.bot.activeAccount?.email || '', 'CLAIM_PENDING_POINTS', gainedPoints)
-                        break
-                    } else {
-                        this.bot.logger.info(this.bot.isMobile, 'DASHBOARD', `ℹ️ Klaim koin telah dieksekusi | balance=${oldBalance} poin.`)
-                        break
-                    }
+                }).catch(() => {})
+                
+                const oldBalance = Number(this.bot.userData.currentPoints ?? 0)
+                const newBalance = await this.bot.browser.func.getCurrentPoints(page).catch(() => oldBalance)
+                const gainedPoints = Math.max(0, newBalance - oldBalance)
+                if (gainedPoints > 0) {
+                    this.bot.userData.currentPoints = newBalance
+                    this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
+                    this.bot.logger.info(this.bot.isMobile, 'DASHBOARD', `✅ Koin nyangkut sukses diamankan! | +${gainedPoints} points | newBalance=${newBalance}`, 'green')
+                    void Database.getInstance().recordActivity(this.bot.activeAccount?.email || '', 'CLAIM_PENDING_POINTS', gainedPoints)
                 }
             }
-        } catch (error) {
+        } catch {
             this.bot.logger.debug(this.bot.isMobile, 'DASHBOARD', 'Tidak ada koin nyangkut yang perlu diklaim.')
         }
     }
@@ -500,13 +457,13 @@ export class Workers {
     public async doPunchCards(data: DashboardData, page: Page) {
         const punchCards: PunchCard[] = [...(data.punchCards ?? [])]
 
-        // Also check if any standalone promotion in promotionalItems/morePromotions is a PunchCard
+        // Periksa juga apakah ada kartu di promotionalItems/morePromotions yang merupakan PunchCard
         const standaloneCards = [
             ...(data.promotionalItems ?? []),
             ...(data.morePromotions ?? []),
             ...(data.morePromotionsWithoutPromotionalItems ?? [])
         ].filter(x => 
-            x && !x.complete && 
+            x && 
             ((x.promotionType ?? '').toLowerCase() === 'punchcard' || (x.offerId ?? '').toLowerCase().includes('punchcard') || (x.destinationUrl ?? '').toLowerCase().includes('punchcard')) &&
             (x.pointProgressMax ?? 0) > 0
         )
@@ -514,25 +471,151 @@ export class Workers {
         for (const promo of standaloneCards) {
             if (!punchCards.some(pc => pc.parentPromotion?.offerId === promo.offerId)) {
                 punchCards.push({
+                    name: promo.name || promo.offerId,
                     parentPromotion: promo,
                     childPromotions: []
                 } as any)
             }
         }
 
-        const activePunchCards = punchCards.filter(x => !x.parentPromotion?.complete && (x.parentPromotion?.pointProgressMax ?? 0) > 0)
+        if (punchCards.length === 0) {
+            return
+        }
 
-        for (const card of activePunchCards) {
-            const activitiesUncompleted = (card.childPromotions ?? []).filter(x => !x.complete && x.promotionType)
-            if (activitiesUncompleted.length) {
-                this.bot.logger.info(this.bot.isMobile, 'PUNCHCARD', `Solving ${activitiesUncompleted.length} items for: ${card.parentPromotion.title}`)
-                await this.solveActivities(activitiesUncompleted, page, card) 
-            } else if (card.parentPromotion && !card.parentPromotion.complete && card.parentPromotion.destinationUrl) {
-                // Multi-Day Streak / 50-100 Poin Punch Card: All child items completed, executing final claim step!
-                this.bot.logger.info(this.bot.isMobile, 'PUNCHCARD', `Attempting final reward claim (+${card.parentPromotion.pointProgressMax}) for: ${card.parentPromotion.title}`)
+        this.bot.logger.info(this.bot.isMobile, 'PUNCHCARD', `[TASK-DETECT] Found ${punchCards.length} Punch Card(s) in account status`)
+
+        for (const card of punchCards) {
+            const title = card.parentPromotion?.title || card.name || 'Punch Card'
+            const offerId = card.parentPromotion?.offerId || ''
+            
+            // 1. Cek apakah sudah sukses diselesaikan di fase Daily Set atau Keep Earning pada sesi ini
+            const isAlreadySolvedInSession = this.completedOffersInSession.has(offerId) || this.completedOffersInSession.has(title.toLowerCase().trim())
+            
+            const progress = this.getPunchCardProgressDetails(card)
+
+            if (isAlreadySolvedInSession || progress.isCompleted) {
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'PUNCHCARD',
+                    `"${title}" | Progress: ${progress.progressStr} | Points: ${progress.pointsStr} | Status: Already Completed 🎉`,
+                    'green'
+                )
+                continue
+            }
+
+            if (progress.isCompletedToday) {
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'PUNCHCARD',
+                    `"${title}" | Progress: ${progress.progressStr} | Points: ${progress.pointsStr} | Status: Completed for Today ✅`,
+                    'green'
+                )
+                continue
+            }
+
+            const uncompletedChildren = (card.childPromotions ?? []).filter(x => {
+                if (!x) return false
+                if (x.complete) return false
+                if (this.completedOffersInSession.has(x.offerId) || this.completedOffersInSession.has((x.title || '').toLowerCase().trim())) return false
+                if (x.pointProgressMax > 0 && x.pointProgress >= x.pointProgressMax) return false
+                return true
+            })
+
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'PUNCHCARD',
+                `"${title}" | Progress: ${progress.progressStr} | Points: ${progress.pointsStr} | Status: ${uncompletedChildren.length} active sub-task(s)`,
+                'cyan'
+            )
+
+            if (uncompletedChildren.length > 0) {
+                this.bot.logger.info(this.bot.isMobile, 'PUNCHCARD', `Solving ${uncompletedChildren.length} active sub-item(s) for: "${title}"`)
+                await this.solveActivities(uncompletedChildren, page, card)
+                this.completedOffersInSession.add(offerId)
+                this.completedOffersInSession.add(title.toLowerCase().trim())
+            } else if (card.parentPromotion?.destinationUrl) {
+                // Multi-Day Streak / Final Claim Step
+                this.bot.logger.info(this.bot.isMobile, 'PUNCHCARD', `Attempting final reward claim (+${card.parentPromotion.pointProgressMax} Pts) for: "${title}"`)
                 const claimActivity = card.parentPromotion as unknown as BasePromotion
                 await this.bot.activities.doUrlReward(claimActivity, page, card)
+                this.completedOffersInSession.add(offerId)
+                this.completedOffersInSession.add(title.toLowerCase().trim())
             }
+        }
+    }
+
+    public getPunchCardProgressDetails(card: PunchCard): {
+        isCompleted: boolean
+        isCompletedToday: boolean
+        progressStr: string
+        currentStep: number
+        maxStep: number
+        pointsStr: string
+        percent: number
+    } {
+        const parent = card.parentPromotion
+        const children = card.childPromotions ?? []
+        const attr = (parent?.attributes ?? {}) as Record<string, any>
+
+        // 1. Hitung progres langkah / hari dari atribut
+        const actProg = Number(parent?.activityProgress ?? 0)
+        const actProgMax = Number(parent?.activityProgressMax ?? 0)
+
+        const rawDays = attr['days'] || attr['max'] || attr['totaldays'] || ''
+        const rawDaysEarned = attr['daysearned'] || attr['progress'] || attr['completeddays'] || ''
+
+        const daysMax = rawDays ? parseInt(String(rawDays), 10) : 0
+        const daysEarned = rawDaysEarned ? parseInt(String(rawDaysEarned), 10) : 0
+
+        const completedChildrenCount = children.filter(c => c.complete || (c.pointProgressMax > 0 && c.pointProgress >= c.pointProgressMax)).length
+        const totalChildrenCount = children.length
+
+        let currentStep = 0
+        let maxStep = 0
+
+        if (daysMax > 0) {
+            maxStep = daysMax
+            currentStep = daysEarned
+        } else if (actProgMax > 0) {
+            maxStep = actProgMax
+            currentStep = actProg
+        } else if (totalChildrenCount > 0) {
+            maxStep = totalChildrenCount
+            currentStep = completedChildrenCount
+        } else {
+            maxStep = 1
+            currentStep = parent?.complete ? 1 : 0
+        }
+
+        // 2. Hitung poin
+        const ptProg = Number(parent?.pointProgress ?? 0)
+        const ptProgMax = Number(parent?.pointProgressMax ?? 0)
+        const pointsStr = `${ptProg}/${ptProgMax} Pts`
+
+        // 3. Status ketuntasan
+        const isParentComplete = Boolean(parent?.complete)
+        const isAllChildrenComplete = totalChildrenCount > 0 && completedChildrenCount >= totalChildrenCount
+        const isMaxStepReached = maxStep > 0 && currentStep >= maxStep
+        const isPointsMaxReached = ptProgMax > 0 && ptProg >= ptProgMax
+
+        const isCompleted = isParentComplete || isMaxStepReached || (isPointsMaxReached && isAllChildrenComplete)
+
+        // Periksa apakah hari ini sudah dikerjakan
+        const uncompletedChildren = children.filter(c => !c.complete && (!c.pointProgressMax || c.pointProgress < c.pointProgressMax))
+        const isCompletedToday = isCompleted || (totalChildrenCount > 0 && uncompletedChildren.length === 0)
+
+        const percent = maxStep > 0 ? Math.min(100, Math.round((currentStep / maxStep) * 100)) : (isCompleted ? 100 : 0)
+        const dayLabel = daysMax > 0 ? `(Day ${currentStep} of ${maxStep})` : `(Step ${currentStep} of ${maxStep})`
+        const progressStr = `${currentStep}/${maxStep} Completed ${dayLabel} [${percent}%]`
+
+        return {
+            isCompleted,
+            isCompletedToday,
+            progressStr,
+            currentStep,
+            maxStep,
+            pointsStr,
+            percent
         }
     }
 
@@ -558,6 +641,9 @@ export class Workers {
                     await this.bot.activities.doUrlReward(activity, page, punchCard) 
                 }
                 
+                if (activity.offerId) this.completedOffersInSession.add(activity.offerId)
+                if (activity.title) this.completedOffersInSession.add(activity.title.toLowerCase().trim())
+
                 await this.bot.utils.wait(this.bot.utils.randomDelay(4000, 8000))
 
             } catch (error) {
