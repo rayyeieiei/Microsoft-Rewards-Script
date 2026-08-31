@@ -20,8 +20,63 @@ export class Workers {
     public async doClaimPendingPoints(page: Page) {
         if (!page || page.isClosed()) return
         try {
+            const currentUrl = page.url().toLowerCase()
+            if (!currentUrl.includes('rewards.bing.com')) {
+                this.bot.logger.debug(this.bot.isMobile, 'DASHBOARD', 'Navigating to Rewards dashboard to check pending claims...')
+                await page.goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
+                await this.bot.utils.wait(2500)
+            }
+
             const claimResult = await page.evaluate(() => {
-                const candidates = Array.from(document.querySelectorAll('a, button, div[role="button"], span, .p-card, .c-card, [id*="claim"], [class*="claim"]'))
+                // 1. Prioritaskan Card "Ready to claim" (seperti di screenshot dashboard modern)
+                const allElements = Array.from(document.querySelectorAll('*'))
+                
+                for (const el of allElements) {
+                    const txt = (el.textContent || '').trim().toLowerCase()
+                    if (txt.includes('ready to claim') || txt.includes('siap diklaim')) {
+                        // Cari target container terkecil
+                        const innerCards = el.querySelectorAll('div, section, .card, .p-card, .c-card')
+                        let targetContainer = el as HTMLElement
+                        for (const child of Array.from(innerCards)) {
+                            const childTxt = (child.textContent || '').trim().toLowerCase()
+                            if ((childTxt.includes('ready to claim') || childTxt.includes('siap diklaim')) && childTxt.length < (targetContainer.textContent || '').length) {
+                                targetContainer = child as HTMLElement
+                            }
+                        }
+                        
+                        const containerText = (targetContainer.innerText || targetContainer.textContent || '').trim()
+                        const numMatches = containerText.match(/(\d+)/g)
+                        let pts = 0
+                        if (numMatches && numMatches.length > 0) {
+                            for (const n of numMatches) {
+                                const val = parseInt(n, 10)
+                                if (val > 0 && val < 50000) {
+                                    pts = val
+                                    break
+                                }
+                            }
+                        }
+                        
+                        // Cari tombol atau link claim di dalam kartu
+                        const allBtns = Array.from(targetContainer.querySelectorAll('a, button, div[role="button"], [class*="claim"], [id*="claim"]'))
+                        const activeBtn = (allBtns.find(b => {
+                            const bTxt = (b.textContent || '').toLowerCase().trim()
+                            return bTxt.includes('claim') || bTxt.includes('klaim') || bTxt.includes('>')
+                        }) || targetContainer.querySelector('a, button, div[role="button"]') || targetContainer) as HTMLElement
+                        
+                        if (activeBtn) {
+                            activeBtn.click()
+                            activeBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }))
+                            activeBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }))
+                            activeBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
+                            
+                            return { clicked: true, label: `Ready to claim (${pts || 'Pending'} Pts)`, pts: pts > 0 ? pts : null }
+                        }
+                    }
+                }
+
+                // 2. Fallback: Cari elemen claim individual lainnya di seluruh halaman
+                const candidates = Array.from(document.querySelectorAll('a, button, div[role="button"], span, .p-card, .c-card, [id*="claim"], [class*="claim"], [data-bi-id*="claim"]'))
                 
                 for (const rawEl of candidates) {
                     const el = rawEl as HTMLElement
@@ -31,17 +86,10 @@ export class Workers {
                     
                     if (el.closest('#b_results, #ans_nws, .news, .b_algo, #news, .feed-card, [data-bi-id*="news"], article, nav, header, footer')) continue
                     
-                    const isClaim = txt.includes('claim') || txt.includes('klaim') || txt.includes('ready to claim')
+                    const isClaim = txt === 'claim' || txt === 'klaim' || txt === 'claim >' || txt.includes('claim all') || txt.includes('klaim semua') || (txt.includes('claim') && !txt.includes('0 claim') && !txt.includes('unclaimed') && !txt.includes('disclaimer'))
                     if (!isClaim) continue
                     
-                    const explicitPlus = rawText.match(/\+(\d+)/)?.[1]
-                    const explicitPts = rawText.match(/\b(\d+)\s*(pts|poin|points)\b/i)?.[1]
-                    const anyDigit = rawText.match(/\b(\d+)\b/)?.[1]
-                    const detectedNumStr = explicitPlus || explicitPts || anyDigit || ''
-                    const detectedNum = detectedNumStr ? parseInt(detectedNumStr, 10) : null
-                    
-                    if (detectedNum === 0 || txt.includes('0 claim') || txt.includes('claim 0') || txt.includes('ready to claim 0')) continue
-                    if (txt.includes('feedback') || txt.includes('terms') || txt.includes('suggest') || txt.includes('code')) continue
+                    if (txt.includes('feedback') || txt.includes('terms') || txt.includes('suggest') || txt.includes('code') || txt.includes('reward')) continue
                     
                     const rect = el.getBoundingClientRect()
                     if (rect.width === 0 || rect.height === 0) continue
@@ -55,8 +103,12 @@ export class Workers {
                     clickTarget.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }))
                     clickTarget.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
                     
-                    return { clicked: true, label: rawText.replace(/\s+/g, ' ').slice(0, 30), pts: detectedNum }
+                    const explicitNum = rawText.match(/(\d+)/)?.[1]
+                    const detectedPts = explicitNum ? parseInt(explicitNum, 10) : null
+                    
+                    return { clicked: true, label: rawText.replace(/\s+/g, ' ').slice(0, 30), pts: detectedPts }
                 }
+
                 return { clicked: false, label: '', pts: null }
             }).catch(() => ({ clicked: false, label: '', pts: null }))
 
@@ -65,29 +117,37 @@ export class Workers {
                 this.bot.logger.info(this.bot.isMobile, 'DASHBOARD', `🎉 Nemu koin nyangkut di ${this.bot.isMobile ? 'Mobile' : 'Desktop'}${ptsLabel}! Mengeksekusi klaim: "${claimResult.label || 'Claim'}"...`, 'green')
                 await this.bot.utils.wait(2500)
                 
+                // Cek apakah ada drawer / flyout / modal popup yang muncul untuk tombol "Claim All" atau "Got it"
                 await page.evaluate(() => {
-                    const btns = Array.from(document.querySelectorAll('.flyout button, .drawer button, [role="dialog"] button, button'))
+                    const btns = Array.from(document.querySelectorAll('.flyout button, .drawer button, [role="dialog"] button, [class*="drawer"] button, [class*="modal"] button, [class*="flyout"] button, button, a'))
                     for (const btn of btns) {
                         const t = (btn.textContent || '').toLowerCase().trim()
-                        if (['claim all', 'klaim semua', 'got it', 'ok', 'terima'].includes(t)) {
+                        if (['claim all', 'klaim semua', 'claim', 'klaim', 'got it', 'ok', 'terima', 'done'].includes(t)) {
                             (btn as HTMLElement).click()
+                            btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
                             break
                         }
                     }
                 }).catch(() => {})
                 
+                await this.bot.utils.wait(2000)
+                
                 const oldBalance = Number(this.bot.userData.currentPoints ?? 0)
                 const newBalance = await this.bot.browser.func.getCurrentPoints(page).catch(() => oldBalance)
                 const gainedPoints = Math.max(0, newBalance - oldBalance)
-                if (gainedPoints > 0) {
-                    this.bot.userData.currentPoints = newBalance
-                    this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
-                    this.bot.logger.info(this.bot.isMobile, 'DASHBOARD', `✅ Koin nyangkut sukses diamankan! | +${gainedPoints} points | newBalance=${newBalance}`, 'green')
-                    void Database.getInstance().recordActivity(this.bot.activeAccount?.email || '', 'CLAIM_PENDING_POINTS', gainedPoints)
+                const finalGained = gainedPoints > 0 ? gainedPoints : (claimResult.pts ?? 0)
+                
+                if (finalGained > 0) {
+                    this.bot.userData.currentPoints = Math.max(newBalance, oldBalance + finalGained)
+                    this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + finalGained
+                    this.bot.logger.info(this.bot.isMobile, 'DASHBOARD', `✅ Koin nyangkut sukses diamankan! | +${finalGained} points | newBalance=${this.bot.userData.currentPoints}`, 'green')
+                    void Database.getInstance().recordActivity(this.bot.activeAccount?.email || '', 'CLAIM_PENDING_POINTS', finalGained)
                 }
+            } else {
+                this.bot.logger.debug(this.bot.isMobile, 'DASHBOARD', 'Tidak ada koin nyangkut yang perlu diklaim.')
             }
         } catch {
-            this.bot.logger.debug(this.bot.isMobile, 'DASHBOARD', 'Tidak ada koin nyangkut yang perlu diklaim.')
+            this.bot.logger.debug(this.bot.isMobile, 'DASHBOARD', 'Pengecekan koin nyangkut selesai.')
         }
     }
     
