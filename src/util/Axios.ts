@@ -10,12 +10,34 @@ class AxiosClient {
     private instance: AxiosInstance
     private account: AccountProxy
 
-    constructor(account: AccountProxy, localProxyPort?: number) {
+    constructor(account: AccountProxy, localProxyPort?: number, onBandwidth?: (bytes: number) => void) {
         this.account = account
 
         this.instance = axios.create({
             timeout: 20000
         })
+
+        if (onBandwidth) {
+            this.instance.interceptors.response.use(response => {
+                try {
+                    const cl = response.headers?.['content-length']
+                    if (cl) {
+                        const bytes = parseInt(cl, 10)
+                        if (!isNaN(bytes) && bytes > 0) {
+                            onBandwidth(bytes)
+                            return response
+                        }
+                    }
+                    if (response.data) {
+                        const len = typeof response.data === 'string'
+                            ? response.data.length
+                            : JSON.stringify(response.data).length
+                        if (len > 0) onBandwidth(len)
+                    }
+                } catch {}
+                return response
+            })
+        }
 
         if (this.account.url && this.account.proxyAxios) {
             const agent = this.getAgentForProxy(this.account)

@@ -13,6 +13,7 @@ export interface AccountDashboardStatus {
     collectedPoints: number
     desktopProgress: string
     mobileProgress: string
+    bandwidth?: string
     error?: string
     lastUpdate: string
 }

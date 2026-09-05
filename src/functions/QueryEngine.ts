@@ -402,10 +402,8 @@ export class QueryCore {
         } catch (error) {
             this.bot.logger.debug(
                 this.bot.isMobile,
-                'SEARCH-WIKIPEDIA-TRENDING',
-                `request failed | lang=${langCode} | error=${
-                    error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ''}` : String(error)
-                }`
+                'SEARCH-WIKIPEDIA',
+                `Wikipedia API unavailable (${error instanceof Error ? error.message : String(error)}), silently falling back to next engine.`
             )
             return []
         }
@@ -417,8 +415,10 @@ export class QueryCore {
             const request: AxiosRequestConfig = {
                 url: `https://www.reddit.com/r/${safe}.json?limit=50`,
                 method: 'GET',
-                timeout: 2500,
+                timeout: 3000,
                 headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+                    Accept: 'application/json',
                     ...(this.bot.fingerprint?.headers ?? {})
                 }
             }
@@ -441,9 +441,7 @@ export class QueryCore {
             this.bot.logger.debug(
                 this.bot.isMobile,
                 'SEARCH-REDDIT',
-                `request failed | subreddit=${subreddit} | error=${
-                    error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ''}` : String(error)
-                }`
+                `Reddit API unavailable (403/rate-limit), silently falling back to Google & Local queries.`
             )
             return []
         }
