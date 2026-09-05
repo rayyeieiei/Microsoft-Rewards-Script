@@ -1,6 +1,7 @@
 import type { AxiosRequestConfig } from 'axios'
 import { randomUUID } from 'crypto'
 import { Workers } from '../../Workers'
+import { Database } from '../../../util/Database'
 
 export class DailyCheckIn extends Workers {
     private oldBalance: number = this.bot.userData.currentPoints
@@ -24,10 +25,27 @@ export class DailyCheckIn extends Workers {
         )
 
         try {
+            let expectedPoints = 0
+            try {
+                const appEarnable = await this.bot.browser.func.getAppEarnablePoints()
+                if (appEarnable && appEarnable.checkIn === 0) {
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'DAILY-CHECK-IN',
+                        'Daily Check-In already completed for today! Skipping.',
+                        'green'
+                    )
+                    return
+                }
+                if (appEarnable && appEarnable.checkIn > 0) {
+                    expectedPoints = appEarnable.checkIn
+                }
+            } catch {}
+
             // Try type 101 first
             this.bot.logger.debug(this.bot.isMobile, 'DAILY-CHECK-IN', 'Attempting Daily Check-In | type=101')
 
-            let response = await this.submitDaily(101) // Try using 101 (EU Variant?)
+            let response = await this.submitDaily(101)
             this.bot.logger.debug(
                 this.bot.isMobile,
                 'DAILY-CHECK-IN',
@@ -37,59 +55,48 @@ export class DailyCheckIn extends Workers {
             let isSuccess = response?.status === 200
             let rawServerBalance = Number(response?.data?.response?.balance ?? 0)
 
-            if (isSuccess) {
-                let gained = rawServerBalance > this.oldBalance ? (rawServerBalance - this.oldBalance) : 10
-                let newBal = Math.max(rawServerBalance, this.oldBalance + gained)
-
-                this.bot.userData.currentPoints = newBal
-                this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gained
-
-                this.bot.logger.info(
+            if (!isSuccess) {
+                this.bot.logger.debug(
                     this.bot.isMobile,
                     'DAILY-CHECK-IN',
-                    `Completed Daily Check-In | type=101 | gainedPoints=+${gained} | oldBalance=${this.oldBalance} | newBalance=${newBal}`,
-                    'green'
+                    `Type 101 did not return success status | retryingWithType=103`
                 )
-                return
+
+                // Fallback to type 103
+                response = await this.submitDaily(103)
+                this.bot.logger.debug(
+                    this.bot.isMobile,
+                    'DAILY-CHECK-IN',
+                    `Received Daily Check-In response | type=103 | status=${response?.status ?? 'unknown'}`
+                )
+
+                isSuccess = response?.status === 200
+                rawServerBalance = Number(response?.data?.response?.balance ?? 0)
             }
 
-            this.bot.logger.debug(
-                this.bot.isMobile,
-                'DAILY-CHECK-IN',
-                `Type 101 did not return success status | retryingWithType=103`
-            )
-
-            // Fallback to type 103
-            this.bot.logger.debug(this.bot.isMobile, 'DAILY-CHECK-IN', 'Attempting Daily Check-In | type=103')
-
-            response = await this.submitDaily(103) // Try using 103 (USA Variant?)
-            this.bot.logger.debug(
-                this.bot.isMobile,
-                'DAILY-CHECK-IN',
-                `Received Daily Check-In response | type=103 | status=${response?.status ?? 'unknown'}`
-            )
-
-            isSuccess = response?.status === 200
-            rawServerBalance = Number(response?.data?.response?.balance ?? 0)
-
             if (isSuccess) {
-                let gained = rawServerBalance > this.oldBalance ? (rawServerBalance - this.oldBalance) : 10
-                let newBal = Math.max(rawServerBalance, this.oldBalance + gained)
-
+                const gained = expectedPoints > 0 ? expectedPoints : (rawServerBalance > this.oldBalance ? (rawServerBalance - this.oldBalance) : 10)
+                const newBal = Number(this.bot.userData.currentPoints ?? this.oldBalance) + gained
                 this.bot.userData.currentPoints = newBal
                 this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gained
+
+                void Database.getInstance().recordActivity(
+                    this.bot.activeAccount?.email || '',
+                    'DAILY_CHECK_IN',
+                    gained
+                )
 
                 this.bot.logger.info(
                     this.bot.isMobile,
                     'DAILY-CHECK-IN',
-                    `Completed Daily Check-In | type=103 | gainedPoints=+${gained} | oldBalance=${this.oldBalance} | newBalance=${newBal}`,
+                    `Completed Daily Check-In | gainedPoints=+${gained} | oldBalance=${this.oldBalance} | newBalance=${newBal}`,
                     'green'
                 )
             } else {
                 this.bot.logger.warn(
                     this.bot.isMobile,
                     'DAILY-CHECK-IN',
-                    `Daily Check-In completed | typesTried=101,103 | currentBalance=${this.oldBalance}`
+                    `Daily Check-In completed | currentBalance=${this.oldBalance}`
                 )
             }
         } catch (error) {

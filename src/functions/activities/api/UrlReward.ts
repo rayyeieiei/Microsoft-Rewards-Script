@@ -1,6 +1,7 @@
 import type { BasePromotion, PunchCard } from '../../../interface/DashboardData'
 import { Workers } from '../../Workers'
 import { Page } from 'patchright'
+import { Database } from '../../../util/Database'
 
 export class UrlReward extends Workers {
     private cookieHeader: string = ''
@@ -141,6 +142,30 @@ export class UrlReward extends Workers {
                     }
                 }
 
+                // Deteksi dan trigger tombol aksi sub-task Punch Card (e.g. "Shop the look", "Explore now", "Shop now")
+                const actionButtonSelectors = [
+                    'a:has-text("Shop the look")',
+                    'button:has-text("Shop the look")',
+                    'div[role="button"]:has-text("Shop the look")',
+                    'a:has-text("Shop now")',
+                    'button:has-text("Shop now")',
+                    'a:has-text("Explore")',
+                    'button:has-text("Explore")',
+                    '.punchcard-step a',
+                    '[data-bi-area*="punchcard"] a',
+                    '[data-bi-id*="shop"]'
+                ]
+
+                for (const actionSel of actionButtonSelectors) {
+                    const actBtn = tab.locator(actionSel).first()
+                    if (await actBtn.isVisible().catch(() => false)) {
+                        this.bot.logger.debug(this.bot.isMobile, 'URL-REWARD', `Triggering punchcard action button: ${actionSel}`)
+                        await actBtn.click({ force: true }).catch(() => {})
+                        await this.bot.utils.wait(2000)
+                        break
+                    }
+                }
+
                 // Simulasi interaksi scroll natural & human-like movement
                 this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Simulating interaction & safe scroll...`)
                 await tab.evaluate(() => {
@@ -153,8 +178,8 @@ export class UrlReward extends Workers {
                 }).catch(() => {})
                 await this.bot.utils.wait(1200)
 
-                // Jeda tunggu aman telemetri (/fd/ls/ & bat.bing.com)
-                const dwellTime = this.bot.utils.randomDelay(3500, 5000)
+                // Jeda tunggu aman telemetri (/fd/ls/ & bat.bing.com) - 5-7 detik jika punchcard
+                const dwellTime = punchCard ? this.bot.utils.randomDelay(5000, 7000) : this.bot.utils.randomDelay(3500, 5000)
                 await this.bot.utils.wait(dwellTime)
 
             } finally {
@@ -185,27 +210,58 @@ export class UrlReward extends Workers {
                 }
             }
 
-            const expectedPoints = Number(promotion.pointProgressMax ?? 10)
-            const livePoints = await this.bot.browser.func.getCurrentPoints()
-            const calculatedDelta = livePoints > this.oldBalance ? (livePoints - this.oldBalance) : expectedPoints
-            const finalBalance = Math.max(livePoints, this.oldBalance + calculatedDelta)
-            this.updatePoints(finalBalance, promotion.offerId, promotion.title, calculatedDelta)
+            const offerIdLower = (promotion.offerId || '').toLowerCase()
+            const isPunchCard = Boolean(punchCard) || (promotion.promotionType ?? '').toLowerCase() === 'punchcard' || offerIdLower.includes('punchcard')
+            let livePoints = await this.bot.browser.func.getCurrentPoints(page)
+            let realServerDelta = Math.max(0, livePoints - this.oldBalance)
+
+            // Jika realServerDelta masih 0, beri jeda singkat 1.5 detik dan re-check untuk memastikan telemetry Microsoft selesai
+            if (realServerDelta === 0) {
+                await this.bot.utils.wait(1500)
+                livePoints = await this.bot.browser.func.getCurrentPoints(page)
+                realServerDelta = Math.max(0, livePoints - this.oldBalance)
+            }
+
+            let calculatedDelta = 0
+            let finalBalance = this.oldBalance
+
+            if (realServerDelta > 0) {
+                // Server nyata bertambah
+                calculatedDelta = realServerDelta
+                finalBalance = livePoints
+            } else {
+                // Nol poin palsu: jika server Microsoft tidak menambah saldo, tetapkan 0 poin
+                calculatedDelta = 0
+                finalBalance = this.oldBalance
+            }
+
+            this.updatePoints(finalBalance, promotion.offerId, promotion.title, calculatedDelta, isPunchCard)
 
         } catch (err: any) {
             this.bot.logger.error(this.bot.isMobile, 'URL-REWARD', `Process failed | offerId=${promotion.offerId}`)
         }
     }
 
-    private updatePoints(newBalance: number, offerId: string, title?: string, pointsEarned?: number) {
+    private updatePoints(newBalance: number, offerId: string, title?: string, pointsEarned?: number, isPunchCard?: boolean) {
         this.gainedPoints = pointsEarned ?? Math.max(0, newBalance - this.oldBalance)
         const displayTitle = title ? `"${title}"` : `offerId=${offerId}`
         const isDailySet = (offerId || '').toLowerCase().includes('dailyset') || (title || '').toLowerCase().includes('daily set')
-        const tag = isDailySet ? 'DAILY-SET' : 'KEEP-EARNING'
+        const tag = isPunchCard ? 'PUNCHCARD' : (isDailySet ? 'DAILY-SET' : 'KEEP-EARNING')
 
         this.bot.userData.currentPoints = newBalance
         this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + this.gainedPoints
         if (offerId) this.bot.workers.completedOffersInSession.add(offerId)
         if (title) this.bot.workers.completedOffersInSession.add(title.toLowerCase().trim())
-        this.bot.logger.info(this.bot.isMobile, tag, `Completed: ${displayTitle} | gainedPoints=+${this.gainedPoints} | oldBalance=${this.oldBalance} | newBalance=${newBalance}`, 'green')
+
+        if (this.gainedPoints > 0) {
+            void Database.getInstance().recordActivity(this.bot.activeAccount?.email || '', isDailySet ? 'DAILY_SET' : 'PROMOTIONS', this.gainedPoints)
+            this.bot.logger.info(this.bot.isMobile, tag, `Completed: ${displayTitle} | gainedPoints=+${this.gainedPoints} | oldBalance=${this.oldBalance} | newBalance=${newBalance}`, 'green')
+        } else {
+            if (isPunchCard) {
+                this.bot.logger.info(this.bot.isMobile, tag, `Step Completed: ${displayTitle} | gainedPoints=+0 (progress in multi-day card) | currentBalance=${newBalance}`, 'green')
+            } else {
+                this.bot.logger.info(this.bot.isMobile, tag, `Activity Checked: ${displayTitle} | gainedPoints=+0 (server balance unchanged) | currentBalance=${newBalance}`, 'yellow')
+            }
+        }
     }
 }

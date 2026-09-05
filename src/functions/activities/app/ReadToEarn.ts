@@ -1,6 +1,7 @@
 import type { AxiosRequestConfig } from 'axios'
 import { randomBytes } from 'crypto'
 import { Workers } from '../../Workers'
+import { Database } from '../../../util/Database'
 
 export class ReadToEarn extends Workers {
     public async doReadToEarn() {
@@ -24,6 +25,23 @@ export class ReadToEarn extends Workers {
         )
 
         try {
+            let remainingQuota = 30
+            try {
+                const appEarnable = await this.bot.browser.func.getAppEarnablePoints()
+                if (appEarnable && appEarnable.readToEarn === 0) {
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'READ-TO-EARN',
+                        'All Read to Earn points already completed for today (30/30 pts)! Skipping.',
+                        'green'
+                    )
+                    return
+                }
+                if (appEarnable && appEarnable.readToEarn > 0) {
+                    remainingQuota = appEarnable.readToEarn
+                }
+            } catch {}
+
             const jsonData = {
                 amount: 1,
                 id: '1',
@@ -34,10 +52,9 @@ export class ReadToEarn extends Workers {
                 country: this.bot.userData.geoLocale
             }
 
-            const articleCount = 10
+            const articleCount = Math.min(10, Math.ceil(remainingQuota / 3))
             let totalGained = 0
             let articlesRead = 0
-            let oldBalance = startBalance
 
             for (let i = 0; i < articleCount; ++i) {
                 jsonData.id = randomBytes(64).toString('hex')
@@ -72,55 +89,44 @@ export class ReadToEarn extends Workers {
                 )
 
                 const isSuccess = response?.status === 200
-                const rawServerBalance = Number(response?.data?.response?.balance ?? 0)
-                
-                let gainedPoints = 3
-                let newBalance = oldBalance + 3
-
-                if (rawServerBalance > oldBalance) {
-                    gainedPoints = rawServerBalance - oldBalance
-                    newBalance = rawServerBalance
-                } else if (rawServerBalance > 0 && rawServerBalance >= oldBalance) {
-                    newBalance = rawServerBalance
-                }
-
-                this.bot.logger.debug(
-                    this.bot.isMobile,
-                    'READ-TO-EARN',
-                    `Balance delta after article | article=${i + 1}/${articleCount} | oldBalance=${oldBalance} | newBalance=${newBalance} | gainedPoints=${gainedPoints}`
-                )
 
                 if (!isSuccess) {
                     this.bot.logger.info(
                         this.bot.isMobile,
                         'READ-TO-EARN',
-                        `API returned non-200 status, stopping Read to Earn | article=${i + 1}/${articleCount} | status=${response?.status} | oldBalance=${oldBalance} | newBalance=${newBalance}`
+                        `API returned non-200 status, stopping Read to Earn | article=${i + 1}/${articleCount} | status=${response?.status}`
                     )
                     break
                 }
 
-                // Update point tracking
-                this.bot.userData.currentPoints = newBalance
+                const gainedPoints = 3
+                this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
                 this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
                 totalGained += gainedPoints
                 articlesRead = i + 1
-                oldBalance = newBalance
+
+                void Database.getInstance().recordActivity(
+                    this.bot.activeAccount?.email || '',
+                    'READ_TO_EARN',
+                    gainedPoints
+                )
 
                 this.bot.logger.info(
                     this.bot.isMobile,
                     'READ-TO-EARN',
-                    `Read article ${i + 1}/${articleCount} | status=${response.status} | gainedPoints=+${gainedPoints} | newBalance=${newBalance}`,
+                    `Read article ${i + 1}/${articleCount} | status=${response.status} | gainedPoints=+${gainedPoints} | newBalance=${this.bot.userData.currentPoints}`,
                     'green'
                 )
 
                 // Wait random delay between articles
-                this.bot.logger.debug(
-                    this.bot.isMobile,
-                    'READ-TO-EARN',
-                    `Waiting between articles | article=${i + 1}/${articleCount} | delayRange=${delayMin}-${delayMax}`
-                )
-
-                await this.bot.utils.wait(this.bot.utils.randomDelay(delayMin, delayMax))
+                if (i + 1 < articleCount) {
+                    this.bot.logger.debug(
+                        this.bot.isMobile,
+                        'READ-TO-EARN',
+                        `Waiting between articles | article=${i + 1}/${articleCount} | delayRange=${delayMin}-${delayMax}`
+                    )
+                    await this.bot.utils.wait(this.bot.utils.randomDelay(delayMin, delayMax))
+                }
             }
 
             const finalBalance = Number(this.bot.userData.currentPoints ?? startBalance)
