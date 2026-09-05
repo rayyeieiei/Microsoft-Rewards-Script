@@ -35,29 +35,34 @@ export class SearchManager {
             `Start | account=${accountEmail} | mobileMissing=${missingSearchPoints.mobilePoints} | desktopMissing=${missingSearchPoints.desktopPoints}`
         )
 
+        const pcProg = data?.userStatus?.counters?.pcSearch?.[0] ? `${data.userStatus.counters.pcSearch[0].pointProgress}/${data.userStatus.counters.pcSearch[0].pointProgressMax}` : '0/0'
+        const mobileProg = data?.userStatus?.counters?.mobileSearch?.[0] ? `${data.userStatus.counters.mobileSearch[0].pointProgress}/${data.userStatus.counters.mobileSearch[0].pointProgressMax}` : '0/0'
+
         const doMobile = this.bot.config.workers.doMobileSearch && missingSearchPoints.mobilePoints > 0
         const doDesktop = this.bot.config.workers.doDesktopSearch && missingSearchPoints.desktopPoints > 0
 
-        const mobileStatus = this.bot.config.workers.doMobileSearch
-            ? missingSearchPoints.mobilePoints > 0
-                ? 'run'
-                : 'skip-no-points'
-            : 'skip-disabled'
         const desktopStatus = this.bot.config.workers.doDesktopSearch
             ? missingSearchPoints.desktopPoints > 0
-                ? 'run'
-                : 'skip-no-points'
+                ? `run (${missingSearchPoints.desktopPoints} pts remaining)`
+                : `completed (${pcProg})`
+            : 'skip-disabled'
+        const mobileStatus = this.bot.config.workers.doMobileSearch
+            ? missingSearchPoints.mobilePoints > 0
+                ? `run (${missingSearchPoints.mobilePoints} pts remaining)`
+                : !data?.userStatus?.counters?.mobileSearch?.length
+                    ? 'not-available-in-region'
+                    : `completed (${mobileProg})`
             : 'skip-disabled'
 
-        this.bot.logger.info(
-            'main',
-            'SEARCH-MANAGER',
-            `Mobile: ${mobileStatus} (enabled=${this.bot.config.workers.doMobileSearch}, missing=${missingSearchPoints.mobilePoints})`
-        )
         this.bot.logger.info(
             'main',
             'SEARCH-MANAGER',
             `Desktop: ${desktopStatus} (enabled=${this.bot.config.workers.doDesktopSearch}, missing=${missingSearchPoints.desktopPoints})`
+        )
+        this.bot.logger.info(
+            'main',
+            'SEARCH-MANAGER',
+            `Mobile: ${mobileStatus} (enabled=${this.bot.config.workers.doMobileSearch}, missing=${missingSearchPoints.mobilePoints})`
         )
 
         if (!doMobile && !doDesktop) {
@@ -398,18 +403,12 @@ export class SearchManager {
 
         await this.bot['login'].verifyBingSession(this.bot.mainDesktopPage)
         this.bot.cookies.desktop = await session.context.cookies()
+        if (session.fingerprint) {
+            this.bot.fingerprint = session.fingerprint
+        }
 
         this.bot.logger.debug('main', 'SEARCH-DESKTOP-LOGIN', 'Cookies stored')
         this.bot.logger.info('main', 'SEARCH-DESKTOP-LOGIN', 'Desktop session ready')
-
-        // =======================================================================
-        // 🧹 PELATUK KLAIM POIN NYANGKUT (DESKTOP MODE)
-        // Posisi: Persis setelah bot selesai verifikasi login di dashboard Rewards
-        // =======================================================================
-      if (this.bot.mainDesktopPage) {
-            await this.bot.workers.doClaimPendingPoints(this.bot.mainDesktopPage); // 👈 IDUPIN LAGI BRE!
-        }
-        // =======================================================================
 
         return session
     }
@@ -447,10 +446,6 @@ export class SearchManager {
                 this.bot.logger.debug('main', 'SEARCH-MOBILE-SEARCH', 'activities.doSearch (mobile)')
 
                 const pointsEarned = await this.bot.activities.doSearch(data, this.bot.mainMobilePage, true)
-
-                if (this.bot.mainMobilePage) {
-                    await this.bot.workers.doClaimPendingPoints(this.bot.mainMobilePage)
-                }
 
                 this.bot.logger.info(
                     'main',
@@ -594,10 +589,6 @@ export class SearchManager {
                 )
 
                 const pointsEarned = await this.bot.activities.doSearch(data, this.bot.mainDesktopPage, false)
-
-                if (this.bot.mainDesktopPage) {
-                    await this.bot.workers.doClaimPendingPoints(this.bot.mainDesktopPage)
-                }
 
                 this.bot.logger.info(
                     'main',

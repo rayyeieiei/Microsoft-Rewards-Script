@@ -4,6 +4,7 @@ import type { Page } from 'patchright'
 import { DailyCheckIn } from './activities/app/DailyCheckIn'
 import { ReadToEarn } from './activities/app/ReadToEarn'
 import { AppReward } from './activities/app/AppReward'
+import { AppOnlyRewards } from './activities/app/AppOnlyRewards'
 import { UrlReward } from './activities/api/UrlReward'
 import { Quiz } from './activities/api/Quiz'
 import { FindClippy } from './activities/api/FindClippy'
@@ -35,6 +36,8 @@ export default class Activities {
     doDoubleSearchPoints = async (promotion: PurplePromotionalItem) => await new DoubleSearchPoints(this.bot).doDoubleSearchPoints(promotion)
 
     doAppReward = async (promotion: Promotion) => await new AppReward(this.bot).doAppReward(promotion)
+
+    doAppOnlyRewards = async (data: DashboardData, page?: Page) => await new AppOnlyRewards(this.bot).doAppOnlyRewards(data, page)
 
     doReadToEarn = async () => await new ReadToEarn(this.bot).doReadToEarn()
 

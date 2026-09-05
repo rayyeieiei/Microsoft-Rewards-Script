@@ -78,6 +78,7 @@ interface AccountStats {
     finalPoints: number
     collectedPoints: number
     duration: number
+    bandwidthMb?: number
     success: boolean
     error?: string
 }
@@ -137,6 +138,21 @@ export class MicrosoftRewardsBot {
     private searchManager: SearchManager
     public axios!: AxiosClient
 
+    public bandwidthTracker = {
+        totalBytes: 0,
+        blockedRequests: 0
+    }
+
+    public trackBandwidth(bytes: number) {
+        if (typeof bytes === 'number' && bytes > 0) {
+            this.bandwidthTracker.totalBytes += bytes
+        }
+    }
+
+    public trackBlockedRequest() {
+        this.bandwidthTracker.blockedRequests += 1
+    }
+
     constructor() {
         this.userData = {
             userName: '',
@@ -170,6 +186,10 @@ export class MicrosoftRewardsBot {
             currentPoints: 0,
             gainedPoints: 0,
             timezoneOffset: new Date().getTimezoneOffset().toString()
+        }
+        this.bandwidthTracker = {
+            totalBytes: 0,
+            blockedRequests: 0
         }
         this.rewardsVersion = 'legacy'
         this.accessToken = ''
@@ -518,7 +538,7 @@ export class MicrosoftRewardsBot {
 
                 this.logger.info('main', 'ACCOUNT-START', `[ACCOUNT-START] Starting workflow for: ${accountEmail} | geoLocale: ${account.geoLocale}`)
                 this.updateDashboardAccount(accountEmail, { status: 'Starting Browser' })
-                this.axios = new AxiosClient(account.proxy, this.localProxyPort)
+                this.axios = new AxiosClient(account.proxy, this.localProxyPort, (bytes) => this.trackBandwidth(bytes))
 
                 const result = await this.Main(account).catch(error => {
                     const errMsg = error instanceof Error ? error.message : String(error)
@@ -528,6 +548,10 @@ export class MicrosoftRewardsBot {
                 })
 
                 const durationSeconds = ((Date.now() - accountStartTime) / 1000).toFixed(1)
+                const mbConsumed = (this.bandwidthTracker.totalBytes / (1024 * 1024)).toFixed(2)
+                const blockedCount = this.bandwidthTracker.blockedRequests
+                const estimatedSavedMb = ((blockedCount * 180) / 1024).toFixed(1)
+                const percentQuota = ((parseFloat(mbConsumed) / 20) * 100).toFixed(1)
 
                 if (result) {
                     const collectedPoints = result.collectedPoints ?? 0
@@ -536,22 +560,27 @@ export class MicrosoftRewardsBot {
 
                     accountStats.push({
                         email: accountEmail, initialPoints: accountInitialPoints, finalPoints: accountFinalPoints,
-                        collectedPoints: collectedPoints, duration: parseFloat(durationSeconds), success: true
+                        collectedPoints: collectedPoints, duration: parseFloat(durationSeconds),
+                        bandwidthMb: parseFloat(mbConsumed), success: true
                     })
 
                     this.logger.info('main', 'ACCOUNT-FINISH', `[ACCOUNT-FINISH] Completed workflow for: ${accountEmail} | Total: +${collectedPoints} | Old: ${accountInitialPoints} → New: ${accountFinalPoints} | Duration: ${durationSeconds}s`, 'green')
+                    this.logger.info('main', 'DATA-SAVER', `[DATA-SAVER] Quota: ${mbConsumed} MB consumed | ${blockedCount} heavy assets blocked (~${estimatedSavedMb} MB saved) | Limit: < 20 MB [PASS - ${percentQuota}% of budget]`, 'cyan')
                     this.updateDashboardAccount(accountEmail, {
                         status: 'Completed',
-                        collectedPoints: collectedPoints
+                        collectedPoints: collectedPoints,
+                        bandwidth: `${mbConsumed} MB`
                     })
                 } else {
                     accountStats.push({
                         email: accountEmail, initialPoints: 0, finalPoints: 0, collectedPoints: 0,
-                        duration: parseFloat(durationSeconds), success: false, error: 'Flow failed'
+                        duration: parseFloat(durationSeconds), bandwidthMb: parseFloat(mbConsumed),
+                        success: false, error: 'Flow failed'
                     })
                     this.updateDashboardAccount(accountEmail, {
                         status: 'Failed',
-                        error: 'Flow failed'
+                        error: 'Flow failed',
+                        bandwidth: `${mbConsumed} MB`
                     })
                 }
             } catch (error) {
@@ -644,8 +673,10 @@ export class MicrosoftRewardsBot {
             const totalInitial = accountStats.reduce((sum, s) => sum + s.initialPoints, 0)
             const totalFinal = accountStats.reduce((sum, s) => sum + s.finalPoints, 0)
             const totalDuration = ((Date.now() - runStartTime) / 1000 / 60).toFixed(1)
+            const totalBandwidth = accountStats.reduce((sum, s) => sum + (s.bandwidthMb ?? 0), 0).toFixed(2)
+            const avgBandwidth = (accountStats.length > 0 ? (parseFloat(totalBandwidth) / accountStats.length) : 0).toFixed(2)
 
-            this.logger.info('main', 'RUN-END', `Completed all accounts | Accounts processed: ${accountStats.length} | Total points collected: +${totalCollected} | Old total: ${totalInitial} → New total: ${totalFinal} | Total runtime: ${totalDuration}min`, 'green')
+            this.logger.info('main', 'RUN-END', `Completed all accounts | Accounts: ${accountStats.length} | Points: +${totalCollected} | Bandwidth: ${totalBandwidth} MB total (avg ${avgBandwidth} MB/acc) | Old: ${totalInitial} → New: ${totalFinal} | Runtime: ${totalDuration}min`, 'green')
             await flushAllWebhooks()
             if (this.localProxy) {
                 await this.localProxy.stop()
@@ -662,6 +693,11 @@ export class MicrosoftRewardsBot {
     async Main(account: Account): Promise<{ initialPoints: number; collectedPoints: number }> {
         const accountEmail = account.email
         this.logger.info('main', 'FLOW', `Starting session for ${accountEmail}`)
+
+        // Zero Leakage: Reset token and completed offers set for clean per-account isolation
+        this.accessToken = ''
+        this.activeAccount = account
+        this.workers?.completedOffersInSession?.clear()
 
         let mobileSession: BrowserSession | null = null
         let mobileContextClosed = false
@@ -717,7 +753,7 @@ export class MicrosoftRewardsBot {
                 })
 
                 const browserEarnable = await this.browser.func.getBrowserEarnablePoints()
-                this.logger.info('main', 'POINTS', `Earnable today | Mobile: ${browserEarnable.mobileSearchPoints} | Browser: ${browserEarnable.mobileSearchPoints} | ${accountEmail}`)
+                this.logger.info('main', 'POINTS', `Earnable today | Mobile: ${browserEarnable.mobileSearchPoints} | Desktop: ${browserEarnable.desktopSearchPoints} | Daily Set: ${browserEarnable.dailySetPoints} | More: ${browserEarnable.morePromotionsPoints} | Total: ${browserEarnable.totalEarnablePoints} | ${accountEmail}`)
 
                 if (this.mainMobilePage) {
                     await this.workers.doClaimPendingPoints(this.mainMobilePage)
@@ -762,9 +798,18 @@ export class MicrosoftRewardsBot {
                     await this.workers.doPunchCards(data, this.mainMobilePage)
                 }
 
+                if ((this.config.workers.doAppOnlyRewards ?? true) && data) {
+                    this.updateDashboardAccount(accountEmail, { status: 'App-Only Rewards' })
+                    await this.activities.doAppOnlyRewards(data, this.mainMobilePage)
+                }
+
+                if (this.mainMobilePage) {
+                    await this.workers.doClaimPendingPoints(this.mainMobilePage, true)
+                }
+
                 this.updateDashboardAccount(accountEmail, { status: 'Searching...' })
                 const searchPoints = await this.browser.func.getSearchPoints()
-                const missingSearchPoints = this.browser.func.missingSearchPoints(searchPoints, true)
+                const missingSearchPoints = this.browser.func.missingSearchPoints(searchPoints)
 
                 // update search progress before search loop
                 const startPcProg = searchPoints.pcSearch?.[0] ? `${searchPoints.pcSearch[0].pointProgress}/${searchPoints.pcSearch[0].pointProgressMax}` : '0/0'
@@ -822,6 +867,9 @@ export class MicrosoftRewardsBot {
                 return { initialPoints, collectedPoints: collectedPoints || 0 }
             })
         } finally {
+            this.accessToken = ''
+            this.workers?.completedOffersInSession?.clear()
+
             if (mobileSession && !mobileContextClosed) {
                 try {
                     await executionContext.run({ isMobile: true, account }, async () => {

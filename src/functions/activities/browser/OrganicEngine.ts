@@ -80,6 +80,7 @@ export class OrganicEngine {
                 await childTab.route('**/*', route => {
                     const resourceType = route.request().resourceType()
                     if (['image', 'media', 'font', 'websocket'].includes(resourceType)) {
+                        this.bot.trackBlockedRequest()
                         route.abort().catch(() => {})
                     } else {
                         route.continue().catch(() => {})

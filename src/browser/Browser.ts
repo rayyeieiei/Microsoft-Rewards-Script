@@ -35,8 +35,17 @@ class Browser {
         '--disable-web-authentication-ui',
         '--disable-external-intent-requests',
         '--disable-blink-features=Attestation',
-        '--disable-features=WebAuthentication,PasswordManagerOnboarding,PasswordManager,EnablePasswordsAccountStorage,Passkeys,WebAuthenticationProxy,U2F',
-        '--disable-save-password-bubble'
+        '--disable-features=WebAuthentication,PasswordManagerOnboarding,PasswordManager,EnablePasswordsAccountStorage,Passkeys,WebAuthenticationProxy,U2F,Translate,OptimizationHints,MediaRouter',
+        '--disable-save-password-bubble',
+        '--disable-background-networking',
+        '--disable-component-update',
+        '--disable-domain-reliability',
+        '--disable-sync',
+        '--dns-prefetch-disable',
+        '--disable-client-side-phishing-detection',
+        '--disable-default-apps',
+        '--disable-breakpad',
+        '--disable-component-extensions-with-background-pages'
     ] as const
 
     constructor(bot: MicrosoftRewardsBot) {
@@ -125,12 +134,13 @@ class Browser {
                 const type = req.resourceType()
                 const url = req.url().toLowerCase()
 
-                // 1. Blokir resource tipe berat (Gambar, Video, Audio, Font)
-                if (type === 'image' || type === 'media' || type === 'font') {
-                    return route.abort()
+                // 1. Blokir resource tipe berat (Gambar, Video, Audio, Font, WebSocket)
+                if (type === 'image' || type === 'media' || type === 'font' || type === 'websocket') {
+                    this.bot.trackBlockedRequest()
+                    return route.abort().catch(() => {})
                 }
 
-                // 2. Blokir domain iklan dan tracker pihak ketiga yang tidak berhubungan dengan Rewards
+                // 2. Blokir domain iklan, tracker, copilot, dan telemetri berat yang tidak berhubungan dengan klaim Rewards
                 if (
                     url.includes('clarity.ms') ||
                     url.includes('adnxs.com') ||
@@ -138,18 +148,53 @@ class Browser {
                     url.includes('google-analytics.com') ||
                     url.includes('googletagmanager.com') ||
                     url.includes('scorecardresearch.com') ||
+                    url.includes('bat.bing.com') ||
+                    url.includes('pipe.aria.microsoft.com') ||
+                    url.includes('events.data.microsoft.com') ||
+                    url.includes('browser.events.data.msn.com') ||
+                    url.includes('vortex.data.microsoft.com') ||
+                    url.includes('copilot.microsoft.com') ||
+                    url.includes('sydney.bing.com') ||
                     url.includes('/as/api/') || // Bing Ad services
                     url.includes('msn.com/api/news') || // MSN newsfeed video/images payload
                     url.includes('bing.com/overlay') || // Copilot heavy overlay
                     url.includes('bing.com/videos') ||
                     url.includes('bing.com/images') ||
-                    url.includes('bing.com/maps')
+                    url.includes('bing.com/maps') ||
+                    url.includes('bing.com/shop') ||
+                    url.includes('bing.com/widget') ||
+                    url.includes('bing.com/th?id=') ||
+                    url.includes('tiles.virtualearth.net') ||
+                    url.includes('assets.msn.com') ||
+                    url.includes('edgeservices.bing.com') ||
+                    url.includes('c.bing.com') ||
+                    url.includes('c.clarity.ms') ||
+                    url.includes('bing.com/as/suggestions') ||
+                    url.includes('bing.com/fd/ls/lsp.aspx') ||
+                    url.includes('nav.smartscreen.microsoft.com')
                 ) {
-                    return route.abort()
+                    this.bot.trackBlockedRequest()
+                    return route.abort().catch(() => {})
                 }
 
                 // Izinkan document HTML, scripts penting Rewards, telemetri event Microsoft, XHR/Fetch API, dan CSS
-                return route.continue()
+                return route.continue().catch(() => {})
+            });
+
+            // Tracking bandwidth (kuota) real-time dari setiap response jaringan Chromium
+            (context as unknown as BrowserContext).on('response', async (response) => {
+                try {
+                    const s = await response.request().sizes().catch(() => null)
+                    if (s && ((s.responseBodySize ?? 0) > 0 || (s.responseHeadersSize ?? 0) > 0)) {
+                        this.bot.trackBandwidth((s.responseBodySize ?? 0) + (s.responseHeadersSize ?? 0))
+                    } else {
+                        const len = response.headers()['content-length']
+                        if (len) {
+                            const bytes = parseInt(len, 10)
+                            if (!isNaN(bytes) && bytes > 0) this.bot.trackBandwidth(bytes)
+                        }
+                    }
+                } catch {}
             });
 
             if (

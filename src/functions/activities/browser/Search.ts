@@ -115,33 +115,36 @@ export class Search extends Workers {
                     status: `Searching (${isMobile ? 'Mobile' : 'Desktop'})`
                 })
 
-                const curPointsBefore = Number(this.bot.userData.currentPoints ?? 0)
-                const livePointsNow = await this.bot.browser.func.getCurrentPoints(page).catch(() => curPointsBefore)
-                const liveDelta = livePointsNow > curPointsBefore ? (livePointsNow - curPointsBefore) : 0
+                const gainedPoints = missingPointsTotal - newMissingPointsTotal
 
-                const counterDelta = missingPointsTotal - newMissingPointsTotal
-                const standardPoints = 3
-                const rawGained = liveDelta > 0 ? liveDelta : (counterDelta > 0 ? counterDelta : standardPoints)
-                const gainedPoints = Math.min(rawGained, missingPointsTotal > 0 ? missingPointsTotal : standardPoints)
+                if (gainedPoints === 0) {
+                    stagnantLoop++
+                    this.bot.logger.info(
+                        isMobile,
+                        'SEARCH-BING',
+                        `No points gained ${stagnantLoop}/${stagnantLoopMax} | query="${query}" | remaining=${newMissingPointsTotal}`
+                    )
+                } else {
+                    stagnantLoop = 0
+                    void Database.getInstance().recordActivity(
+                        currentEmail,
+                        isMobile ? 'SEARCH_MOBILE' : 'SEARCH_DESKTOP',
+                        gainedPoints
+                    )
 
-                stagnantLoop = 0
-                void Database.getInstance().recordActivity(
-                    currentEmail,
-                    isMobile ? 'SEARCH_MOBILE' : 'SEARCH_DESKTOP',
-                    gainedPoints
-                )
+                    this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
+                    this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
+                    totalGainedPoints += gainedPoints
 
-                this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
-                this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
-                totalGainedPoints += gainedPoints
-                missingPointsTotal = Math.max(0, missingPointsTotal - gainedPoints)
+                    this.bot.logger.info(
+                        isMobile,
+                        'SEARCH-BING',
+                        `gainedPoints=${gainedPoints} points | query="${query}" | remaining=${newMissingPointsTotal}`,
+                        'green'
+                    )
+                }
 
-                this.bot.logger.info(
-                    isMobile,
-                    'SEARCH-BING',
-                    `gainedPoints=${gainedPoints} points | query="${query}" | remaining=${missingPointsTotal}`,
-                    'green'
-                )
+                missingPointsTotal = newMissingPointsTotal
 
                 if (missingPointsTotal === 0) {
                     this.bot.logger.info(
@@ -236,13 +239,7 @@ export class Search extends Workers {
                         const newMissingPoints = this.bot.browser.func.missingSearchPoints(searchCounters, isMobile)
                         const newMissingPointsTotal = newMissingPoints.totalPoints
 
-                        const curPointsBefore = Number(this.bot.userData.currentPoints ?? 0)
-                        const livePointsNow = await this.bot.browser.func.getCurrentPoints(page).catch(() => curPointsBefore)
-                        const liveDelta = livePointsNow > curPointsBefore ? (livePointsNow - curPointsBefore) : 0
-
-                        const counterDelta = missingPointsTotal - newMissingPointsTotal
-                        const rawGained = counterDelta > 0 ? counterDelta : liveDelta
-                        const gainedPoints = Math.max(0, rawGained)
+                        const gainedPoints = missingPointsTotal - newMissingPointsTotal
 
                         if (gainedPoints === 0) {
                             stagnantLoop++
@@ -266,7 +263,7 @@ export class Search extends Workers {
                             )
                         }
 
-                        missingPointsTotal = Math.max(0, counterDelta > 0 ? newMissingPointsTotal : (missingPointsTotal - gainedPoints))
+                        missingPointsTotal = newMissingPointsTotal
 
                         if (missingPointsTotal === 0) {
                             this.bot.logger.info(
