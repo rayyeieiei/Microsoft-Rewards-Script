@@ -140,7 +140,7 @@ class Browser {
                     return route.abort().catch(() => {})
                 }
 
-                // 2. Blokir domain iklan, tracker, copilot, dan telemetri berat yang tidak berhubungan dengan klaim Rewards
+                // 2. Blokir domain iklan, tracker non-Microsoft, copilot, dan aset berat non-Rewards
                 if (
                     url.includes('clarity.ms') ||
                     url.includes('adnxs.com') ||
@@ -148,11 +148,6 @@ class Browser {
                     url.includes('google-analytics.com') ||
                     url.includes('googletagmanager.com') ||
                     url.includes('scorecardresearch.com') ||
-                    url.includes('bat.bing.com') ||
-                    url.includes('pipe.aria.microsoft.com') ||
-                    url.includes('events.data.microsoft.com') ||
-                    url.includes('browser.events.data.msn.com') ||
-                    url.includes('vortex.data.microsoft.com') ||
                     url.includes('copilot.microsoft.com') ||
                     url.includes('sydney.bing.com') ||
                     url.includes('/as/api/') || // Bing Ad services
@@ -170,7 +165,6 @@ class Browser {
                     url.includes('c.bing.com') ||
                     url.includes('c.clarity.ms') ||
                     url.includes('bing.com/as/suggestions') ||
-                    url.includes('bing.com/fd/ls/lsp.aspx') ||
                     url.includes('nav.smartscreen.microsoft.com')
                 ) {
                     this.bot.trackBlockedRequest()

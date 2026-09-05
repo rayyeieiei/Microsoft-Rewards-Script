@@ -33,15 +33,14 @@ export class UrlReward extends Workers {
                         await this.bot.utils.wait(1500)
                     }
                 } else {
-                    if (!currentUrl.includes('rewards.bing.com')) {
-                        await page.goto(targetDashboard, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
-                        await this.bot.utils.wait(1500)
-                    } else if (!punchCard && !currentUrl.includes('/earn')) {
-                        const earnTab = page.locator('a[href*="/earn"], a:has-text("Earn")').first()
-                        if (await earnTab.isVisible().catch(() => false)) {
-                            await earnTab.click().catch(() => {})
+                    if (!punchCard) {
+                        if (!currentUrl.includes('/earn')) {
+                            await page.goto('https://rewards.bing.com/earn', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
                             await this.bot.utils.wait(1500)
                         }
+                    } else if (!currentUrl.includes('rewards.bing.com')) {
+                        await page.goto(targetDashboard, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
+                        await this.bot.utils.wait(1500)
                     }
                 }
 

@@ -28,19 +28,23 @@ export class DailyCheckIn extends Workers {
             let expectedPoints = 0
             try {
                 const appEarnable = await this.bot.browser.func.getAppEarnablePoints()
-                if (appEarnable && appEarnable.checkIn === 0) {
-                    this.bot.logger.info(
-                        this.bot.isMobile,
-                        'DAILY-CHECK-IN',
-                        'Daily Check-In already completed for today! Skipping.',
-                        'green'
-                    )
-                    return
-                }
                 if (appEarnable && appEarnable.checkIn > 0) {
                     expectedPoints = appEarnable.checkIn
                 }
             } catch {}
+
+            // Helper to check if already claimed
+            const isAlreadyClaimed = (res: any) => {
+                if (!res) return false
+                const bodyStr = JSON.stringify(res.data || '').toLowerCase()
+                return (
+                    bodyStr.includes('already') ||
+                    bodyStr.includes('duplicate') ||
+                    bodyStr.includes('claimed') ||
+                    bodyStr.includes('processed') ||
+                    bodyStr.includes('completed')
+                )
+            }
 
             // Try type 101 first
             this.bot.logger.debug(this.bot.isMobile, 'DAILY-CHECK-IN', 'Attempting Daily Check-In | type=101')
@@ -53,9 +57,9 @@ export class DailyCheckIn extends Workers {
             )
 
             let isSuccess = response?.status === 200
-            let rawServerBalance = Number(response?.data?.response?.balance ?? 0)
+            let alreadyClaimed = isAlreadyClaimed(response)
 
-            if (!isSuccess) {
+            if (!isSuccess && !alreadyClaimed) {
                 this.bot.logger.debug(
                     this.bot.isMobile,
                     'DAILY-CHECK-IN',
@@ -71,10 +75,11 @@ export class DailyCheckIn extends Workers {
                 )
 
                 isSuccess = response?.status === 200
-                rawServerBalance = Number(response?.data?.response?.balance ?? 0)
+                alreadyClaimed = isAlreadyClaimed(response)
             }
 
             if (isSuccess) {
+                const rawServerBalance = Number(response?.data?.response?.balance ?? 0)
                 const gained = expectedPoints > 0 ? expectedPoints : (rawServerBalance > this.oldBalance ? (rawServerBalance - this.oldBalance) : 10)
                 const newBal = Number(this.bot.userData.currentPoints ?? this.oldBalance) + gained
                 this.bot.userData.currentPoints = newBal
@@ -92,11 +97,18 @@ export class DailyCheckIn extends Workers {
                     `Completed Daily Check-In | gainedPoints=+${gained} | oldBalance=${this.oldBalance} | newBalance=${newBal}`,
                     'green'
                 )
+            } else if (alreadyClaimed) {
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'DAILY-CHECK-IN',
+                    'Daily Check-In already completed for today! Skipping.',
+                    'green'
+                )
             } else {
                 this.bot.logger.warn(
                     this.bot.isMobile,
                     'DAILY-CHECK-IN',
-                    `Daily Check-In completed | currentBalance=${this.oldBalance}`
+                    `Daily Check-In finished with status=${response?.status ?? 'unknown'} | currentBalance=${this.oldBalance}`
                 )
             }
         } catch (error) {
@@ -138,7 +150,8 @@ export class DailyCheckIn extends Workers {
                     'X-Rewards-Language': 'en',
                     'X-Rewards-ismobile': 'true'
                 },
-                data: JSON.stringify(jsonData)
+                data: JSON.stringify(jsonData),
+                validateStatus: () => true
             }
 
             this.bot.logger.debug(

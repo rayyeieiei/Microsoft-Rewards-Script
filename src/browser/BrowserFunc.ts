@@ -416,12 +416,24 @@ export default class BrowserFunc {
                     readToEarn = Math.max(0, pointMax - pointProgress)
                 } else if (attrs.type === 'checkin') {
                     const progress = parseInt(attrs.progress ?? '0')
-                    const checkInDay = progress % 7
-                    const lastUpdated = new Date(attrs.last_updated ?? '')
-                    const today = new Date()
+                    const checkInDay = (progress % 7) + 1 // Hari ke-1 s/d Hari ke-7
+                    const nextDayKey = `day_${checkInDay}_points`
+                    const possiblePoints = parseInt(attrs[nextDayKey] ?? '10') || 10
 
-                    if (checkInDay < 6 && today.getDate() !== lastUpdated.getDate()) {
-                        checkIn = parseInt(attrs[`day_${checkInDay + 1}_points`] ?? '0')
+                    // Periksa apakah sudah check-in hari ini berdasarkan UTC dan waktu lokal
+                    const lastUpdated = attrs.last_updated ? new Date(attrs.last_updated) : null
+                    const now = new Date()
+                    const isClaimedToday = lastUpdated && (
+                        (lastUpdated.getUTCFullYear() === now.getUTCFullYear() &&
+                         lastUpdated.getUTCMonth() === now.getUTCMonth() &&
+                         lastUpdated.getUTCDate() === now.getUTCDate()) ||
+                        (lastUpdated.getFullYear() === now.getFullYear() &&
+                         lastUpdated.getMonth() === now.getMonth() &&
+                         lastUpdated.getDate() === now.getDate())
+                    )
+
+                    if (!isClaimedToday) {
+                        checkIn = possiblePoints
                     }
                 }
             }
@@ -451,7 +463,28 @@ export default class BrowserFunc {
         try {
             const activePage = page || this.bot.mainMobilePage || this.bot.mainDesktopPage
             if (activePage && !activePage.isClosed()) {
-                // 1. Ekstrak langsung dari kartu "Available points" di Dashboard Rewards modern (Live State)
+                // 1. Coba fetch API resmi Rewards dari browser context (paling akurat & real-time)
+                const apiPoints = await activePage.evaluate(async () => {
+                    try {
+                        const url = window.location.href.toLowerCase()
+                        if (url.includes('rewards.bing.com') || url.includes('bing.com')) {
+                            const res = await fetch('https://rewards.bing.com/api/getuserinfo?type=1', { credentials: 'include' })
+                            if (res.ok) {
+                                const data = await res.json()
+                                const pts = data?.dashboard?.userStatus?.availablePoints
+                                if (typeof pts === 'number' && pts > 0) return pts
+                            }
+                        }
+                    } catch {}
+                    return null
+                }).catch(() => null)
+
+                if (typeof apiPoints === 'number' && apiPoints > 0) {
+                    this.bot.userData.currentPoints = apiPoints
+                    return apiPoints
+                }
+
+                // 2. Ekstrak langsung dari kartu "Available points" di Dashboard Rewards modern (Live State)
                 const domPoints = await activePage.evaluate(() => {
                     const allCards = Array.from(document.querySelectorAll('div, section, .card, .p-card, .c-card, [class*="card"]'))
                     for (const el of allCards) {
@@ -482,6 +515,7 @@ export default class BrowserFunc {
                 }).catch(() => null)
 
                 if (typeof domPoints === 'number' && domPoints > 0) {
+                    this.bot.userData.currentPoints = domPoints
                     return domPoints
                 }
             }

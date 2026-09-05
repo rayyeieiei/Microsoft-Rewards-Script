@@ -206,8 +206,9 @@ export class Workers {
         const todayUtc = `${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, '0')}${String(now.getUTCDate()).padStart(2, '0')}`
         const validDates = new Set([todayLocal, todayUtc])
 
-        let activitiesUncompleted = uniqueDailySet.filter(x => {
-            if (!x || x.complete || x.pointProgressMax <= 0) return false
+        // Filter item Daily Set khusus untuk hari ini dari API
+        const todayDailySetItems = uniqueDailySet.filter(x => {
+            if (!x) return false
             const offerIdLower = (x.offerId ?? '').toLowerCase()
             if (offerIdLower.includes('locked')) return false
             
@@ -219,8 +220,24 @@ export class Workers {
             return true
         })
 
-        // 2. Jika dari API tidak ada item uncompleted, periksa Live DOM Dashboard
-        if (activitiesUncompleted.length === 0) {
+        let activitiesUncompleted = todayDailySetItems.filter(x => {
+            if (!x || x.complete || (x.pointProgressMax > 0 && (x.pointProgress ?? 0) >= x.pointProgressMax)) return false
+            return true
+        })
+
+        // 1. Jika API menemukan item Daily Set untuk hari ini dan semuanya sudah berstatus complete, Daily Set tuntas!
+        if (todayDailySetItems.length > 0 && activitiesUncompleted.length === 0) {
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'DAILY-SET',
+                `Daily Set already completed for today! (${todayDailySetItems.length}/${todayDailySetItems.length} verified on server)`,
+                'green'
+            )
+            return
+        }
+
+        // 2. Fallback: HANYA jika dari API sama sekali tidak ditemukan item Daily Set hari ini, periksa Live DOM Dashboard
+        if (todayDailySetItems.length === 0 && activitiesUncompleted.length === 0) {
             try {
                 const currentUrl = page.url().toLowerCase()
                 if (!currentUrl.includes('rewards.bing.com')) {
