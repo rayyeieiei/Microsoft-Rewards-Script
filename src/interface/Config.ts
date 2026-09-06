@@ -65,6 +65,7 @@ export interface ConfigWorkers {
     doPunchCards: boolean
     doAppPromotions: boolean
     doAppOnlyRewards?: boolean
+    doWindowsAppRewards?: boolean
     doDesktopSearch: boolean
     doMobileSearch: boolean
     doDailyCheckIn: boolean

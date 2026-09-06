@@ -798,9 +798,9 @@ export class MicrosoftRewardsBot {
                     await this.workers.doPunchCards(data, this.mainMobilePage)
                 }
 
-                if ((this.config.workers.doAppOnlyRewards ?? true) && data) {
-                    this.updateDashboardAccount(accountEmail, { status: 'App-Only Rewards' })
-                    await this.activities.doAppOnlyRewards(data, this.mainMobilePage)
+                if (((this.config.workers.doWindowsAppRewards ?? this.config.workers.doAppOnlyRewards) ?? true) && data) {
+                    this.updateDashboardAccount(accountEmail, { status: 'Windows App Rewards' })
+                    await this.activities.doWindowsAppRewards(data, this.mainMobilePage)
                 }
 
                 if (this.mainMobilePage) {
