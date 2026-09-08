@@ -8,6 +8,13 @@ export interface AppOnlyConfig {
     cacheTtlHours: number
 }
 
+export type PunchCardExecutionMode = 'observer' | 'manual-handoff' | 'browser-ui-experimental'
+
+export interface PunchCardExecutionConfig {
+    mode: PunchCardExecutionMode
+    maxChildrenPerRun: number
+}
+
 export interface Config {
     baseURL: string
     sessionPath: string
@@ -22,6 +29,7 @@ export interface Config {
     errorDiagnostics: boolean
     workers: ConfigWorkers
     appOnlyRewards?: AppOnlyConfig
+    punchCardExecution?: PunchCardExecutionConfig
     searchOnBingLocalQueries: boolean
     globalTimeout: number | string
     searchSettings: ConfigSearchSettings

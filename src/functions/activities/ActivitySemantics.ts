@@ -291,3 +291,48 @@ export function evaluateDataSaverBudget(
         overMb
     }
 }
+
+export type UrlRewardActionSource =
+    | 'child-promotion'
+    | 'bootstrap-action-map'
+    | 'fresh-dashboard'
+    | 'dashboard-dom'
+    | 'none'
+
+export type UrlRewardTransport =
+    | 'existing-action-handler'
+    | 'first-party-dashboard-click'
+    | 'none'
+
+export type ActionOutcome =
+    | 'confirmed-accepted'
+    | 'confirmed-rejected'
+    | 'ambiguous'
+    | 'not-attempted'
+
+export type UrlRewardFailureReason =
+    | 'action-data-missing'
+    | 'action-unacknowledged'
+    | 'dashboard-card-not-found'
+    | 'dashboard-click-failed'
+    | 'kill-switch-triggered'
+    | 'server-state-unchanged'
+    | 'server-state-unavailable'
+
+export interface UrlRewardExecutionResult {
+    offerId: string
+    transport: UrlRewardTransport
+    outcome: ActionOutcome
+    acknowledged: boolean
+    failureReason?: UrlRewardFailureReason
+    observedBalanceDelta: number
+}
+
+export interface PunchCardAttemptRecord {
+    runId: string
+    accountScopeId: string
+    parentOfferId: string
+    childOfferId: string
+    attemptedAt: number
+    result: 'verified' | 'processed-unverified' | 'execution-unavailable'
+}

@@ -53,6 +53,14 @@ export const AppOnlyConfigSchema = z.object({
     cacheTtlHours: z.number().positive()
 })
 
+// Punch Card Execution Schema
+export const PunchCardExecutionModeSchema = z.enum(['observer', 'manual-handoff', 'browser-ui-experimental'])
+
+export const PunchCardExecutionConfigSchema = z.object({
+    mode: PunchCardExecutionModeSchema.default('manual-handoff'),
+    maxChildrenPerRun: z.number().int().positive().default(1)
+})
+
 // Config
 export const ConfigSchema = z.object({
     baseURL: z.string(),
@@ -90,6 +98,10 @@ export const ConfigSchema = z.object({
         doReadToEarn: z.boolean()
     }),
     appOnlyRewards: AppOnlyConfigSchema.optional(),
+    punchCardExecution: PunchCardExecutionConfigSchema.optional().default({
+        mode: 'manual-handoff',
+        maxChildrenPerRun: 1
+    }),
     loginRateLimit: z
         .object({
             delay: NumberOrString,

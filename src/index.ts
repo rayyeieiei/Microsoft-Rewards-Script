@@ -35,6 +35,7 @@ import { ManualQuestQueue } from './functions/activities/appOnly/AppOnlyQuestObs
 import { redactAccountKey } from './util/Redaction'
 import { DataSaverManager, mapResourceTypeToCategory } from './util/DataSaver'
 import { Database } from './util/Database'
+import { AccountScope } from './runtime/AccountScope'
 import readline from 'readline'
 
 import type { Account } from './interface/Account'
@@ -131,6 +132,8 @@ export class MicrosoftRewardsBot {
     public localProxy: DynamicOutboundProxy | null = null
     public localProxyPort = 0
     public activeAccount: Account | null = null
+    public accountScope: AccountScope | null = null
+    public runId: string = `run_${Date.now()}`
     public isRunning = false
     public stopRequested = false
     private dashboardServerActive = false
@@ -521,6 +524,7 @@ export class MicrosoftRewardsBot {
     }
 
     private async runTasks(accounts: Account[], runStartTime: number): Promise<AccountStats[]> {
+        this.runId = `run_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`
         const accountStats: AccountStats[] = []
         let processedCount = 0
 
@@ -552,6 +556,8 @@ export class MicrosoftRewardsBot {
             this.resetAccountState()
             const accountStartTime = Date.now()
             const accountEmail = account.email
+            const redactedEmail = redactAccountKey(accountEmail)
+            this.accountScope = new AccountScope(redactedEmail, this.runId)
             this.userData.userName = this.utils.getEmailUsername(accountEmail)
             this.activeAccount = account
 
@@ -687,6 +693,10 @@ export class MicrosoftRewardsBot {
                     error: errMsg
                 })
             } finally {
+                if (this.accountScope) {
+                    await this.accountScope.dispose().catch(() => {})
+                    this.accountScope = null
+                }
                 DataSaverManager.getInstance().resetAccountQuota(accountEmail)
                 this.resetAccountState()
             }

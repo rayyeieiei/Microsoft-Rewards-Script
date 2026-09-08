@@ -1,4 +1,5 @@
 import { runPunchCardTests } from './punchCards.test'
+import { runPunchCardExecutionTests } from './punchCardExecution.test'
 import { runActivitySemanticsTests } from './activitySemantics.test'
 import { runAppOnlyObserverTests } from './appOnlyObserver.test'
 import { runRedactionTests } from './redaction.test'
@@ -8,6 +9,9 @@ async function runAll() {
     console.log('🧪 Starting Full Test Suite Execution...\n')
 
     await runPunchCardTests()
+    console.log('')
+
+    await runPunchCardExecutionTests()
     console.log('')
 
     await runActivitySemanticsTests()
@@ -22,7 +26,7 @@ async function runAll() {
     await runDataSaverTests()
     console.log('')
 
-    console.log('🎉 ALL 15 TESTS IN SUITE PASSED SUCCESSFULLY!')
+    console.log('🎉 ALL TESTS IN SUITE PASSED SUCCESSFULLY!')
 }
 
 runAll().catch(err => {

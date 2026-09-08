@@ -16,6 +16,51 @@ export class UrlReward extends Workers {
             `Processing Activity: "${promotion.title}" (Points: +${promotion.pointProgressMax})`
         )
 
+        // Safe diagnostic metadata logging (zero secrets, zero tokens, zero query strings)
+        if (punchCard) {
+            let destinationOrigin = 'none'
+            let destinationPath = 'none'
+            try {
+                if (promotion.destinationUrl) {
+                    const parsed = new URL(promotion.destinationUrl)
+                    destinationOrigin = parsed.origin
+                    destinationPath = parsed.pathname
+                }
+            } catch {}
+
+            const childTokenPresent = Boolean(promotion.hash || (promotion.attributes as any)?.actionData)
+            const parentTokenPresent = Boolean(punchCard.parentPromotion?.hash || (punchCard.parentPromotion?.attributes as any)?.actionData)
+            const bootstrapActionPresent = false
+            const childKeys = JSON.stringify(Object.keys(promotion || {}))
+            const actionKeys = JSON.stringify(Object.keys(promotion.attributes || {}))
+            const parentOfferId = punchCard.parentPromotion?.offerId || (punchCard as any).offerId || 'unknown'
+            const childOfferId = promotion.offerId || 'unknown'
+
+            this.bot.logger.debug(
+                this.bot.isMobile,
+                'PUNCHCARD-META',
+                `[PUNCHCARD-META] parentOfferId=${parentOfferId} childOfferId=${childOfferId} childType=urlreward childTokenPresent=${childTokenPresent} parentTokenPresent=${parentTokenPresent} bootstrapActionPresent=${bootstrapActionPresent} destinationOrigin=${destinationOrigin} destinationPath=${destinationPath}`
+            )
+            this.bot.logger.debug(
+                this.bot.isMobile,
+                'PUNCHCARD-META',
+                `[PUNCHCARD-META] childKeys=${childKeys}`
+            )
+            this.bot.logger.debug(
+                this.bot.isMobile,
+                'PUNCHCARD-META',
+                `[PUNCHCARD-META] actionKeys=${actionKeys}`
+            )
+        } else {
+            const requestTokenPresent = Boolean(this.bot.requestToken)
+            const actionDataPresent = Boolean(promotion.hash || (promotion.attributes as any)?.actionData)
+            this.bot.logger.debug(
+                this.bot.isMobile,
+                'URL-REWARD-META',
+                `[URL-REWARD-META] source=normal-promotion requestTokenPresent=${requestTokenPresent} actionDataPresent=${actionDataPresent}`
+            )
+        }
+
         try {
             let targetUrl = (promotion.destinationUrl || '').trim()
 

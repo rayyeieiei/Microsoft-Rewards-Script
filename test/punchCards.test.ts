@@ -11,6 +11,7 @@ import {
     type PunchCardStateReader,
     type PunchCardServerSnapshot
 } from '../src/functions/Workers'
+import { AccountScope } from '../src/runtime/AccountScope'
 import type { PunchCard, BasePromotion, DashboardData } from '../src/interface/DashboardData'
 
 export async function runPunchCardTests() {
@@ -222,16 +223,22 @@ export async function runPunchCardTests() {
             }
         }
 
+        const mockScope = new AccountScope('test***@gmail.com', 'run_test_5')
         const mockWorkers = new Workers({
             isMobile: false,
-            userData: { currentPoints: 100 },
+            userData: { userName: 'testuser', currentPoints: 100 },
+            config: { punchCardExecution: { mode: 'browser-ui-experimental', maxChildrenPerRun: 1 } },
+            accountScope: mockScope,
             logger: {
                 info: () => {},
+                warn: () => {},
                 debug: () => {},
                 error: () => {}
             },
             utils: { wait: async () => {} }
         } as any)
+        mockWorkers.checkPunchCardKillSwitch = async () => null
+        mockWorkers.clickExactChildFromDashboard = async () => true
 
         const mockCard: PunchCard = {
             name: 'State Reader Test Punchcard',
@@ -242,8 +249,6 @@ export async function runPunchCardTests() {
             ]
         } as any
 
-        ;(mockWorkers as any).solveActivities = async () => {}
-
         await mockWorkers.doPunchCards({ punchCards: [mockCard] } as DashboardData, {} as any, mockReader)
         assert.ok(readerCallCount >= 1, 'PunchCardStateReader must be invoked for fresh server snapshot')
         console.log('✅ Test 5 Passed: State reader is called to obtain fresh server snapshot')
@@ -252,16 +257,25 @@ export async function runPunchCardTests() {
     // Test 6: Maximum one child executed per parent per run
     {
         const executedOffers: string[] = []
+        const mockScope = new AccountScope('test***@gmail.com', 'run_test_6')
         const mockWorkers = new Workers({
             isMobile: false,
-            userData: { currentPoints: 100 },
+            userData: { userName: 'testuser', currentPoints: 100 },
+            config: { punchCardExecution: { mode: 'browser-ui-experimental', maxChildrenPerRun: 1 } },
+            accountScope: mockScope,
             logger: {
                 info: () => {},
+                warn: () => {},
                 debug: () => {},
                 error: () => {}
             },
             utils: { wait: async () => {} }
         } as any)
+        mockWorkers.checkPunchCardKillSwitch = async () => null
+        mockWorkers.clickExactChildFromDashboard = async (_page, _card, child) => {
+            executedOffers.push(child.offerId)
+            return true
+        }
 
         const mockCard: PunchCard = {
             name: 'Multi-step Card',
@@ -272,10 +286,6 @@ export async function runPunchCardTests() {
                 { offerId: 'step_3', title: 'Step 3', complete: false } as BasePromotion
             ]
         } as any
-
-        ;(mockWorkers as any).solveActivities = async (activities: BasePromotion[]) => {
-            for (const a of activities) executedOffers.push(a.offerId)
-        }
 
         const mockReader: PunchCardStateReader = {
             async fetchPunchCardSnapshot() {
@@ -302,16 +312,25 @@ export async function runPunchCardTests() {
     // Test 7: Locked child is never executed
     {
         const executedOffers: string[] = []
+        const mockScope = new AccountScope('test***@gmail.com', 'run_test_7')
         const mockWorkers = new Workers({
             isMobile: false,
-            userData: { currentPoints: 100 },
+            userData: { userName: 'testuser', currentPoints: 100 },
+            config: { punchCardExecution: { mode: 'browser-ui-experimental', maxChildrenPerRun: 1 } },
+            accountScope: mockScope,
             logger: {
                 info: () => {},
+                warn: () => {},
                 debug: () => {},
                 error: () => {}
             },
             utils: { wait: async () => {} }
         } as any)
+        mockWorkers.checkPunchCardKillSwitch = async () => null
+        mockWorkers.clickExactChildFromDashboard = async (_page, _card, child) => {
+            executedOffers.push(child.offerId)
+            return true
+        }
 
         const mockCard: PunchCard = {
             name: 'Locked Step Card',
@@ -321,10 +340,6 @@ export async function runPunchCardTests() {
                 { offerId: 'step_locked_2', title: 'Locked 2', complete: false, attributes: { isLocked: true } } as any
             ]
         } as any
-
-        ;(mockWorkers as any).solveActivities = async (activities: BasePromotion[]) => {
-            for (const a of activities) executedOffers.push(a.offerId)
-        }
 
         await mockWorkers.doPunchCards({ punchCards: [mockCard] } as DashboardData, {} as any)
         assert.strictEqual(executedOffers.length, 0, 'Locked children must NEVER be executed')

@@ -2,7 +2,11 @@ import type { Page } from 'patchright'
 import type { MicrosoftRewardsBot } from '../index'
 import type { DashboardData, PunchCard, BasePromotion, FindClippyPromotion } from '../interface/DashboardData'
 import type { AppDashboardData } from '../interface/AppDashBoardData'
+import type { PunchCardExecutionMode } from '../interface/Config'
 import { Database } from '../util/Database'
+import { redactAccountKey } from '../util/Redaction'
+import { resolveUrlRewardAction } from './UrlRewardActionResolver'
+import { ManualQuestQueue } from './activities/appOnly/AppOnlyQuestObserver'
 import {
     ActivityExecutionResult,
     ActivityBatchSummary,
@@ -1224,9 +1228,128 @@ export class Workers {
                         `[PUNCHCARD] Before snapshot | parentOfferId=${offerId} childOfferId=${targetChildOfferId} completed=${childBeforeSnapshot.completedChildren}/${childBeforeSnapshot.totalChildren}`
                     )
 
-                    const balanceBefore = Number(this.bot.userData.currentPoints ?? 0)
+                    const executionMode: PunchCardExecutionMode =
+                        (this.bot.config?.punchCardExecution?.mode as PunchCardExecutionMode) || 'manual-handoff'
 
-                    await this.solveActivities([activeChild], page, card)
+                    if (executionMode === 'manual-handoff') {
+                        const source = this.bot.config?.punchCardExecution?.mode ? 'config' : 'global-default'
+                        this.bot.logger.info(
+                            this.bot.isMobile,
+                            'PUNCHCARD-CONFIG',
+                            `[PUNCHCARD-CONFIG] mode=manual-handoff source=${source}`
+                        )
+                        this.bot.logger.info(
+                            this.bot.isMobile,
+                            'PUNCHCARD',
+                            `[PUNCHCARD] Queued for manual handoff | offerId=${targetChildOfferId} title="${stepTitle}"`
+                        )
+                        try {
+                            const accKey =
+                                this.bot.accountScope?.accountKey ||
+                                redactAccountKey(this.bot.userData.userName || 'unknown')
+                            ManualQuestQueue.getInstance().enqueue({
+                                accountKey: accKey,
+                                offerId: targetChildOfferId,
+                                title: stepTitle,
+                                expectedPoints: activeChild.pointProgressMax ?? 10,
+                                complete: false,
+                                locked: false,
+                                lockReason: 'unknown',
+                                confidence: 'high',
+                                observedAt: new Date().toISOString(),
+                                state: 'manual-required',
+                                queuedAt: new Date().toISOString()
+                            })
+                        } catch {}
+
+                        this.bot.logger.info(
+                            this.bot.isMobile,
+                            'PUNCHCARD',
+                            `[PUNCHCARD] Step processed but completion remains unverified. ${taskTag}`,
+                            'yellow'
+                        )
+                        this.bot.logger.info(
+                            this.bot.isMobile,
+                            'PUNCHCARD',
+                            `[PUNCHCARD] Result | title="${title}" status=processed-unverified evidence=state-unchanged`,
+                            'yellow'
+                        )
+                        continue
+                    }
+
+                    if (executionMode === 'observer') {
+                        this.bot.logger.info(
+                            this.bot.isMobile,
+                            'PUNCHCARD-CONFIG',
+                            `[PUNCHCARD-CONFIG] mode=observer source=config`
+                        )
+                        this.bot.logger.info(
+                            this.bot.isMobile,
+                            'PUNCHCARD',
+                            `[PUNCHCARD] Result | title="${title}" status=processed-unverified evidence=state-unchanged`,
+                            'yellow'
+                        )
+                        continue
+                    }
+
+                    // Mode is browser-ui-experimental (explicit opt-in)
+                    // 1. Kill switch check
+                    const killReason = await this.checkPunchCardKillSwitch(page)
+                    if (killReason) {
+                        this.bot.logger.warn(
+                            this.bot.isMobile,
+                            'PUNCHCARD-SAFETY',
+                            `[PUNCHCARD-SAFETY] executionAborted=true reason=${killReason}`
+                        )
+                        this.bot.accountScope?.recordAttempt(offerId, targetChildOfferId, 'execution-unavailable')
+                        continue
+                    }
+
+                    // 2. Run-scoped attempt guard
+                    if (this.bot.accountScope?.hasAttempted(offerId, targetChildOfferId)) {
+                        this.bot.logger.warn(
+                            this.bot.isMobile,
+                            'PUNCHCARD-SAFETY',
+                            `[PUNCHCARD-SAFETY] attemptBlocked=true reason=already-attempted-in-run parentOfferId=${offerId} childOfferId=${targetChildOfferId}`
+                        )
+                        continue
+                    }
+
+                    // 3. Resolve action context
+                    const currentScope = this.bot.accountScope
+                    if (!currentScope || currentScope.isDisposed) {
+                        this.bot.logger.warn(
+                            this.bot.isMobile,
+                            'PUNCHCARD-SAFETY',
+                            `[PUNCHCARD-SAFETY] executionAborted=true reason=scope-unavailable`
+                        )
+                        continue
+                    }
+
+                    const resolvedAction = resolveUrlRewardAction({
+                        parent: card,
+                        child: activeChild,
+                        dashboardData: data,
+                        scopeId: currentScope.id,
+                        requestToken: this.bot.requestToken
+                    })
+
+                    if (resolvedAction?.secret) {
+                        if (resolvedAction.secret.accountScopeId !== currentScope.id) {
+                            this.bot.logger.error(
+                                this.bot.isMobile,
+                                'PUNCHCARD-SAFETY',
+                                `[PUNCHCARD-SAFETY] executionAborted=true reason=account-scope-mismatch`
+                            )
+                            currentScope.recordAttempt(offerId, targetChildOfferId, 'execution-unavailable')
+                            continue
+                        }
+                        currentScope.storeSecret(resolvedAction.secret)
+                    }
+
+                    // 4. Single-transport execution: first-party dashboard click
+                    const balanceBefore = Number(this.bot.userData.currentPoints ?? 0)
+                    await this.clickExactChildFromDashboard(page, card, activeChild)
 
                     // Refresh exact parent/child server state with propagation delay
                     await this.bot.utils.wait(2000)
@@ -1259,6 +1382,11 @@ export class Workers {
                     if (runResult.status === 'verified-complete-today') {
                         this.bot.logger.info(
                             this.bot.isMobile,
+                            'PUNCHCARD-EXEC',
+                            `[PUNCHCARD-EXEC] transport=first-party-dashboard-click outcome=confirmed-accepted`
+                        )
+                        this.bot.logger.info(
+                            this.bot.isMobile,
                             'PUNCHCARD',
                             `[PUNCHCARD] Step "${stepTitle}" completed successfully. ${taskTag}`,
                             'green'
@@ -1269,6 +1397,7 @@ export class Workers {
                             `[PUNCHCARD] Result | title="${title}" status=verified-complete-today evidence=${runResult.evidence} nextAction=wait-for-server-unlock`,
                             'green'
                         )
+                        currentScope.recordAttempt(offerId, targetChildOfferId, 'verified')
                         if (targetChildOfferId) this.completedOffersInSession.add(targetChildOfferId)
                         if (stepTitle) this.completedOffersInSession.add(stepTitle.toLowerCase().trim())
                         if (runResult.after?.parentComplete) {
@@ -1276,6 +1405,17 @@ export class Workers {
                             this.completedOffersInSession.add(title.toLowerCase().trim())
                         }
                     } else {
+                        // Ambiguous / unchanged outcome -> ZERO second transport!
+                        this.bot.logger.info(
+                            this.bot.isMobile,
+                            'PUNCHCARD-EXEC',
+                            `[PUNCHCARD-EXEC] transport=first-party-dashboard-click outcome=ambiguous`
+                        )
+                        this.bot.logger.warn(
+                            this.bot.isMobile,
+                            'PUNCHCARD-SAFETY',
+                            `[PUNCHCARD-SAFETY] secondTransportBlocked=true`
+                        )
                         this.bot.logger.info(
                             this.bot.isMobile,
                             'PUNCHCARD',
@@ -1288,6 +1428,7 @@ export class Workers {
                             `[PUNCHCARD] Result | title="${title}" status=processed-unverified evidence=${runResult.evidence}`,
                             'yellow'
                         )
+                        currentScope.recordAttempt(offerId, targetChildOfferId, 'processed-unverified')
                     }
                 }
             } else if (card.parentPromotion?.destinationUrl) {
@@ -1304,6 +1445,92 @@ export class Workers {
                     `[PUNCHCARD] Before snapshot | parentOfferId=${offerId} completed=${beforeSnapshot.completedChildren}/${beforeSnapshot.totalChildren}`
                 )
 
+                const executionMode: PunchCardExecutionMode =
+                    (this.bot.config?.punchCardExecution?.mode as PunchCardExecutionMode) || 'manual-handoff'
+
+                if (executionMode === 'manual-handoff') {
+                    const source = this.bot.config?.punchCardExecution?.mode ? 'config' : 'global-default'
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'PUNCHCARD-CONFIG',
+                        `[PUNCHCARD-CONFIG] mode=manual-handoff source=${source}`
+                    )
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'PUNCHCARD',
+                        `[PUNCHCARD] Queued for manual handoff | offerId=${offerId} title="${stepTitle}"`
+                    )
+                    try {
+                        const accKey =
+                            this.bot.accountScope?.accountKey ||
+                            redactAccountKey(this.bot.userData.userName || 'unknown')
+                        ManualQuestQueue.getInstance().enqueue({
+                            accountKey: accKey,
+                            offerId,
+                            title: stepTitle,
+                            expectedPoints: card.parentPromotion.pointProgressMax ?? 10,
+                            complete: false,
+                            locked: false,
+                            lockReason: 'unknown',
+                            confidence: 'high',
+                            observedAt: new Date().toISOString(),
+                            state: 'manual-required',
+                            queuedAt: new Date().toISOString()
+                        })
+                    } catch {}
+
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'PUNCHCARD',
+                        `[PUNCHCARD] Step processed but completion remains unverified. ${taskTag}`,
+                        'yellow'
+                    )
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'PUNCHCARD',
+                        `[PUNCHCARD] Result | title="${title}" status=processed-unverified evidence=state-unchanged`,
+                        'yellow'
+                    )
+                    continue
+                }
+
+                if (executionMode === 'observer') {
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'PUNCHCARD-CONFIG',
+                        `[PUNCHCARD-CONFIG] mode=observer source=config`
+                    )
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'PUNCHCARD',
+                        `[PUNCHCARD] Result | title="${title}" status=processed-unverified evidence=state-unchanged`,
+                        'yellow'
+                    )
+                    continue
+                }
+
+                // Mode is browser-ui-experimental
+                const killReason = await this.checkPunchCardKillSwitch(page)
+                if (killReason) {
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'PUNCHCARD-SAFETY',
+                        `[PUNCHCARD-SAFETY] executionAborted=true reason=${killReason}`
+                    )
+                    this.bot.accountScope?.recordAttempt(offerId, offerId, 'execution-unavailable')
+                    continue
+                }
+
+                if (this.bot.accountScope?.hasAttempted(offerId, offerId)) {
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'PUNCHCARD-SAFETY',
+                        `[PUNCHCARD-SAFETY] attemptBlocked=true reason=already-attempted-in-run parentOfferId=${offerId} childOfferId=${offerId}`
+                    )
+                    continue
+                }
+
+                const currentScope = this.bot.accountScope
                 const balanceBefore = Number(this.bot.userData.currentPoints ?? 0)
                 const claimActivity = card.parentPromotion as unknown as BasePromotion
                 await this.bot.activities.doUrlReward(claimActivity, page, card)
@@ -1328,6 +1555,11 @@ export class Workers {
                 if (runResult.status === 'verified-complete-today') {
                     this.bot.logger.info(
                         this.bot.isMobile,
+                        'PUNCHCARD-EXEC',
+                        `[PUNCHCARD-EXEC] transport=existing-action-handler outcome=confirmed-accepted`
+                    )
+                    this.bot.logger.info(
+                        this.bot.isMobile,
                         'PUNCHCARD',
                         `[PUNCHCARD] Step "${stepTitle}" completed successfully. ${taskTag}`,
                         'green'
@@ -1338,9 +1570,20 @@ export class Workers {
                         `[PUNCHCARD] Result | title="${title}" status=verified-complete-today evidence=${runResult.evidence}`,
                         'green'
                     )
+                    currentScope?.recordAttempt(offerId, offerId, 'verified')
                     if (offerId) this.completedOffersInSession.add(offerId)
-                    this.completedOffersInSession.add(title.toLowerCase().trim())
+                    if (stepTitle) this.completedOffersInSession.add(stepTitle.toLowerCase().trim())
                 } else {
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'PUNCHCARD-EXEC',
+                        `[PUNCHCARD-EXEC] transport=existing-action-handler outcome=ambiguous`
+                    )
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'PUNCHCARD-SAFETY',
+                        `[PUNCHCARD-SAFETY] secondTransportBlocked=true`
+                    )
                     this.bot.logger.info(
                         this.bot.isMobile,
                         'PUNCHCARD',
@@ -1353,6 +1596,7 @@ export class Workers {
                         `[PUNCHCARD] Result | title="${title}" status=processed-unverified evidence=${runResult.evidence}`,
                         'yellow'
                     )
+                    currentScope?.recordAttempt(offerId, offerId, 'processed-unverified')
                 }
             }
         }
@@ -1550,6 +1794,102 @@ export class Workers {
                 this.bot.logger.error(this.bot.isMobile, 'ACTIVITY', `Error solving "${activity.title}"`)
             }
         }
+    }
+
+    public async checkPunchCardKillSwitch(page: Page): Promise<string | null> {
+        if (!page || page.isClosed()) return 'page-closed'
+        if (!this.bot.accountScope || this.bot.accountScope.isDisposed) return 'scope-unavailable'
+        if (!this.bot.userData.userName) return 'auth-mismatch'
+
+        const pageUrl = (page.url() || '').toLowerCase()
+        if (pageUrl.includes('/login') || pageUrl.includes('/error') || pageUrl.includes('/challenge')) {
+            return 'dashboard-unavailable'
+        }
+
+        const captchaCount = await page
+            .locator(
+                '.g-recaptcha, #challenge-stage, #cf-please-wait, iframe[src*="captcha"], iframe[src*="challenge"], #recaptcha'
+            )
+            .count()
+            .catch(() => 0)
+        if (captchaCount > 0) return 'captcha-detected'
+
+        const bodyText = await page
+            .evaluate(() => (document.body ? document.body.innerText.toLowerCase() : ''))
+            .catch(() => '')
+        if (
+            bodyText.includes('suspicious activity') ||
+            bodyText.includes('unusual activity') ||
+            bodyText.includes('account restricted') ||
+            bodyText.includes('bot detected') ||
+            bodyText.includes('bot warning')
+        ) {
+            return 'bot-warning-detected'
+        }
+
+        return null
+    }
+
+    public async clickExactChildFromDashboard(
+        page: Page,
+        card: PunchCard,
+        child: BasePromotion
+    ): Promise<boolean> {
+        if (!page || page.isClosed()) return false
+
+        const targetDashboard = (card.parentPromotion?.destinationUrl || 'https://rewards.bing.com').trim()
+        const currentUrl = page.url().toLowerCase()
+        if (!currentUrl.includes('rewards.bing.com')) {
+            await page
+                .goto(targetDashboard, { waitUntil: 'domcontentloaded', timeout: 15000 })
+                .catch(() => {})
+            await this.bot.utils.wait(1500)
+        }
+
+        const safeOfferId = (child.offerId || '').replace(/["\\]/g, '\\$&')
+        const selectors: string[] = []
+        if (safeOfferId) {
+            selectors.push(`[data-offer-id="${safeOfferId}"]`)
+            selectors.push(`[data-bi-id*="${safeOfferId}"]`)
+            selectors.push(`[id*="${safeOfferId}"]`)
+            selectors.push(`a[href*="${safeOfferId}"]`)
+        }
+        if (child.destinationUrl) {
+            try {
+                const parsed = new URL(child.destinationUrl)
+                const safePath = parsed.pathname.replace(/["\\]/g, '\\$&')
+                if (safePath && safePath !== '/') {
+                    selectors.push(`a[href*="${safePath}"]`)
+                }
+            } catch {}
+        }
+        if (child.title) {
+            const cleanTitle = child.title.replace(/[^\w\s]/gi, ' ').trim()
+            selectors.push(`a:has-text("${cleanTitle}")`)
+            selectors.push(`button:has-text("${cleanTitle}")`)
+            selectors.push(`div[role="button"]:has-text("${cleanTitle}")`)
+        }
+
+        for (const sel of selectors) {
+            const el = page.locator(sel).first()
+            if (await el.isVisible().catch(() => false)) {
+                const popupPromise = page.context().waitForEvent('page', { timeout: 5000 }).catch(() => null)
+                await el.click({ timeout: 5000 }).catch(async () => {
+                    await el.evaluate((node: HTMLElement) => node.click()).catch(() => {})
+                })
+                const popup = await popupPromise
+                if (popup) {
+                    this.bot.accountScope?.trackPage(popup)
+                    await this.bot.utils.wait(3000)
+                    await popup.close().catch(() => {})
+                    this.bot.accountScope?.untrackPage(popup)
+                } else {
+                    await this.bot.utils.wait(2000)
+                }
+                return true
+            }
+        }
+        return false
     }
 }
 
