@@ -360,13 +360,6 @@ export class UrlReward extends Workers {
             this.gainedPoints = advertisedPoints
         } else {
             this.gainedPoints = 0
-            if (advertisedPoints > 0 && observedBalanceDelta > 0 && observedBalanceDelta !== advertisedPoints) {
-                this.bot.logger.info(
-                    this.bot.isMobile,
-                    tag,
-                    `advertisedPoints=${advertisedPoints} observedBalanceDelta=${observedBalanceDelta} attributedPoints=unknown`
-                )
-            }
         }
 
         if (this.gainedPoints > 0) {
@@ -379,22 +372,29 @@ export class UrlReward extends Workers {
             this.bot.logger.info(
                 this.bot.isMobile,
                 tag,
-                `Completed: ${displayTitle} | gainedPoints=+${this.gainedPoints} | oldBalance=${this.oldBalance} | newBalance=${newBalance}`,
+                `[ACTIVITY] Verified complete: ${displayTitle} | advertisedPoints=${advertisedPoints} observedBalanceDelta=${observedBalanceDelta} attributedPoints=+${this.gainedPoints} | currentBalance=${newBalance}`,
                 'green'
             )
         } else {
-            if (isPunchCard) {
+            if (observedBalanceDelta > 0) {
                 this.bot.logger.info(
                     this.bot.isMobile,
                     tag,
-                    `Step Completed: ${displayTitle} | gainedPoints=+0 (progress in multi-day card) | currentBalance=${newBalance}`,
+                    `[ACTIVITY] Processed: ${displayTitle} | advertisedPoints=${advertisedPoints} observedBalanceDelta=${observedBalanceDelta} serverCompleted=false attributedPoints=unknown | currentBalance=${newBalance}`,
+                    'yellow'
+                )
+            } else if (isPunchCard) {
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    tag,
+                    `[ACTIVITY] Step Processed: ${displayTitle} | advertisedPoints=${advertisedPoints} observedBalanceDelta=0 (progress in multi-day card) | currentBalance=${newBalance}`,
                     'green'
                 )
             } else {
                 this.bot.logger.info(
                     this.bot.isMobile,
                     tag,
-                    `Activity Checked: ${displayTitle} | gainedPoints=+0 (server balance unchanged or unverified) | currentBalance=${newBalance}`,
+                    `[ACTIVITY] Processed: ${displayTitle} | advertisedPoints=${advertisedPoints} observedBalanceDelta=0 serverCompleted=false | currentBalance=${newBalance}`,
                     'yellow'
                 )
             }

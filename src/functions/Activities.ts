@@ -49,8 +49,11 @@ export default class Activities {
     observeAppOnlyRewards = async (data: DashboardData) =>
         await new WindowsAppRewards(this.bot).doWindowsAppRewards(data)
 
-    verifyAppOnlyRewards = async (data: DashboardData) =>
+    verifyExistingManualQuests = async (data: DashboardData) =>
         await new WindowsAppRewards(this.bot).verifyExistingManualQuests(data)
+
+    verifyAppOnlyRewards = async (data: DashboardData) =>
+        await this.verifyExistingManualQuests(data)
 
     doAppOnlyRewards = async (data: DashboardData, page?: Page) =>
         await new WindowsAppRewards(this.bot).doWindowsAppRewards(data, page)

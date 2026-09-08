@@ -177,17 +177,18 @@ class Browser {
             // Tracking bandwidth (kuota) real-time dari setiap response jaringan Chromium
             ;(context as unknown as BrowserContext).on('response', async response => {
                 try {
+                    const resourceType = response.request().resourceType()
                     const s = await response
                         .request()
                         .sizes()
                         .catch(() => null)
                     if (s && ((s.responseBodySize ?? 0) > 0 || (s.responseHeadersSize ?? 0) > 0)) {
-                        this.bot.trackBandwidth((s.responseBodySize ?? 0) + (s.responseHeadersSize ?? 0))
+                        this.bot.trackBandwidth((s.responseBodySize ?? 0) + (s.responseHeadersSize ?? 0), resourceType)
                     } else {
                         const len = response.headers()['content-length']
                         if (len) {
                             const bytes = parseInt(len, 10)
-                            if (!isNaN(bytes) && bytes > 0) this.bot.trackBandwidth(bytes)
+                            if (!isNaN(bytes) && bytes > 0) this.bot.trackBandwidth(bytes, resourceType)
                         }
                     }
                 } catch {}

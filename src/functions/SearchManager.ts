@@ -3,7 +3,7 @@ import type { BrowserFingerprintWithHeaders } from 'fingerprint-generator'
 import { MicrosoftRewardsBot, executionContext } from '../index'
 import type { DashboardData } from '../interface/DashboardData'
 import type { Account } from '../interface/Account'
-import { redactAccountKey } from './activities/appOnly/AppOnlyTypes'
+import { redactAccountKey } from '../util/Redaction'
 
 interface BrowserSession {
     context: BrowserContext
@@ -105,7 +105,11 @@ export class SearchManager {
 
         const useParallel = this.bot.config.searchSettings.parallelSearching
         this.bot.logger.info('main', 'SEARCH-MANAGER', `Mode: ${useParallel ? 'parallel' : 'sequential'}`)
-        this.bot.logger.debug('main', 'SEARCH-MANAGER', `parallelSearching=${useParallel} | account=${accountEmail}`)
+        this.bot.logger.debug(
+            'main',
+            'SEARCH-MANAGER',
+            `parallelSearching=${useParallel} | account=${redactAccountKey(accountEmail)}`
+        )
 
         if (useParallel) {
             return await this.doParallelSearches(
@@ -140,7 +144,7 @@ export class SearchManager {
         this.bot.logger.debug(
             'main',
             'SEARCH-MANAGER',
-            `Parallel config | account=${accountEmail} | mobileMissing=${missingSearchPoints.mobilePoints} | desktopMissing=${missingSearchPoints.desktopPoints}`
+            `Parallel config | account=${redactAccountKey(accountEmail)} | mobileMissing=${missingSearchPoints.mobilePoints} | desktopMissing=${missingSearchPoints.desktopPoints}`
         )
 
         const shouldDoMobile = this.bot.config.workers.doMobileSearch && missingSearchPoints.mobilePoints > 0
@@ -248,7 +252,7 @@ export class SearchManager {
             this.bot.logger.debug(
                 'main',
                 'SEARCH-MANAGER',
-                `Parallel results | account=${accountEmail} | results=${JSON.stringify(results)}`
+                `Parallel results | account=${redactAccountKey(accountEmail)} | results=${JSON.stringify(results)}`
             )
 
             const mobilePoints = shouldDoMobile ? (results[0] ?? 0) : 0
@@ -276,7 +280,11 @@ export class SearchManager {
         } finally {
             if (!mobileContextClosed && mobileSession) {
                 this.bot.logger.info('main', 'SEARCH-MANAGER', 'Cleanup: closing mobile session')
-                this.bot.logger.debug('main', 'SEARCH-MANAGER', `Cleanup mobile | account=${accountEmail}`)
+                this.bot.logger.debug(
+                    'main',
+                    'SEARCH-MANAGER',
+                    `Cleanup mobile | account=${redactAccountKey(accountEmail)}`
+                )
                 try {
                     await executionContext.run({ isMobile: true, accountEmail }, async () => {
                         await this.bot.browser.func.closeBrowser(mobileSession.context, accountEmail)
@@ -440,7 +448,7 @@ export class SearchManager {
         this.bot.logger.debug(
             'main',
             'SEARCH-MOBILE-SEARCH',
-            `Start | account=${accountEmail} | target=${missingSearchPoints.mobilePoints}`
+            `Start | account=${redactAccountKey(accountEmail)} | target=${missingSearchPoints.mobilePoints}`
         )
 
         return await executionContext.run({ isMobile: true, accountEmail }, async () => {
@@ -472,7 +480,7 @@ export class SearchManager {
                 this.bot.logger.debug(
                     'main',
                     'SEARCH-MOBILE-SEARCH',
-                    `Result | account=${accountEmail} | earned=${pointsEarned}`
+                    `Result | account=${redactAccountKey(accountEmail)} | earned=${pointsEarned}`
                 )
 
                 return pointsEarned
@@ -488,7 +496,11 @@ export class SearchManager {
                 return 0
             } finally {
                 this.bot.logger.info('main', 'SEARCH-MOBILE-SEARCH', 'Closing mobile session')
-                this.bot.logger.debug('main', 'SEARCH-MOBILE-SEARCH', `Closing context | account=${accountEmail}`)
+                this.bot.logger.debug(
+                    'main',
+                    'SEARCH-MOBILE-SEARCH',
+                    `Closing context | account=${redactAccountKey(accountEmail)}`
+                )
                 try {
                     await this.bot.browser.func.closeBrowser(mobileSession.context, accountEmail)
                     this.bot.logger.info('main', 'SEARCH-MOBILE-SEARCH', 'Mobile browser closed')
@@ -516,7 +528,7 @@ export class SearchManager {
         this.bot.logger.debug(
             'main',
             'SEARCH-DESKTOP-PARALLEL',
-            `Start | account=${accountEmail} | target=${missingSearchPoints.desktopPoints}`
+            `Start | account=${redactAccountKey(accountEmail)} | target=${missingSearchPoints.desktopPoints}`
         )
 
         return await executionContext.run({ isMobile: false, accountEmail }, async () => {
@@ -536,7 +548,7 @@ export class SearchManager {
                 this.bot.logger.debug(
                     'main',
                     'SEARCH-DESKTOP-PARALLEL',
-                    `Result | account=${accountEmail} | earned=${pointsEarned}`
+                    `Result | account=${redactAccountKey(accountEmail)} | earned=${pointsEarned}`
                 )
 
                 return pointsEarned
@@ -552,7 +564,11 @@ export class SearchManager {
                 return 0
             } finally {
                 this.bot.logger.info('main', 'SEARCH-DESKTOP-PARALLEL', 'Closing desktop session')
-                this.bot.logger.debug('main', 'SEARCH-DESKTOP-PARALLEL', `Closing context | account=${accountEmail}`)
+                this.bot.logger.debug(
+                    'main',
+                    'SEARCH-DESKTOP-PARALLEL',
+                    `Closing context | account=${redactAccountKey(accountEmail)}`
+                )
                 try {
                     await this.bot.browser.func.closeBrowser(desktopSession.context, accountEmail)
                     this.bot.logger.info('main', 'SEARCH-DESKTOP-PARALLEL', 'Desktop browser closed')
@@ -580,7 +596,7 @@ export class SearchManager {
         this.bot.logger.debug(
             'main',
             'SEARCH-DESKTOP-SEQUENTIAL',
-            `Start | account=${accountEmail} | target=${missingSearchPoints.desktopPoints}`
+            `Start | account=${redactAccountKey(accountEmail)} | target=${missingSearchPoints.desktopPoints}`
         )
 
         return await executionContext.run({ isMobile: false, accountEmail }, async () => {
@@ -615,7 +631,7 @@ export class SearchManager {
                 this.bot.logger.debug(
                     'main',
                     'SEARCH-DESKTOP-SEQUENTIAL',
-                    `Result | account=${accountEmail} | earned=${pointsEarned}`
+                    `Result | account=${redactAccountKey(accountEmail)} | earned=${pointsEarned}`
                 )
 
                 return pointsEarned
@@ -635,7 +651,7 @@ export class SearchManager {
                     this.bot.logger.debug(
                         'main',
                         'SEARCH-DESKTOP-SEQUENTIAL',
-                        `Closing context | account=${accountEmail}`
+                        `Closing context | account=${redactAccountKey(accountEmail)}`
                     )
                     try {
                         await this.bot.browser.func.closeBrowser(desktopSession.context, accountEmail)

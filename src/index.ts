@@ -32,7 +32,8 @@ import {
     registerManualQuestProvider
 } from './util/DashboardServer'
 import { ManualQuestQueue } from './functions/activities/appOnly/AppOnlyQuestObserver'
-import { redactAccountKey } from './functions/activities/appOnly/AppOnlyTypes'
+import { redactAccountKey } from './util/Redaction'
+import { DataSaverManager, mapResourceTypeToCategory } from './util/DataSaver'
 import { Database } from './util/Database'
 import readline from 'readline'
 
@@ -146,14 +147,17 @@ export class MicrosoftRewardsBot {
         blockedRequests: 0
     }
 
-    public trackBandwidth(bytes: number) {
+    public trackBandwidth(bytes: number, resourceType?: string) {
         if (typeof bytes === 'number' && bytes > 0) {
             this.bandwidthTracker.totalBytes += bytes
+            const category = mapResourceTypeToCategory(resourceType || 'other')
+            DataSaverManager.getInstance().recordTransferredResource(category, bytes)
         }
     }
 
     public trackBlockedRequest() {
         this.bandwidthTracker.blockedRequests += 1
+        DataSaverManager.getInstance().recordBlockedRequest()
     }
 
     constructor() {
@@ -317,14 +321,14 @@ export class MicrosoftRewardsBot {
                     }
                     const targetAcc = this.accounts.find(a => a.email.toLowerCase() === cmd.email!.toLowerCase())
                     if (!targetAcc) {
-                        this.logger.error('main', 'C2-CONTROL', `Account with email ${cmd.email} not found!`)
+                        this.logger.error('main', 'C2-CONTROL', `Account with email ${redactAccountKey(cmd.email)} not found!`)
                         return
                     }
 
                     this.logger.info(
                         'main',
                         'C2-CONTROL',
-                        `Starting execution for single account: ${targetAcc.email}...`
+                        `Starting execution for single account: ${redactAccountKey(targetAcc.email)}...`
                     )
                     this.isRunning = true
                     this.stopRequested = false
@@ -337,7 +341,7 @@ export class MicrosoftRewardsBot {
                         this.logger.error(
                             'main',
                             'C2-CONTROL-ERROR',
-                            `Execution failed for ${targetAcc.email}: ${errMsg}`
+                            `Execution failed for ${redactAccountKey(targetAcc.email)}: ${errMsg}`
                         )
                     } finally {
                         this.isRunning = false
@@ -577,6 +581,7 @@ export class MicrosoftRewardsBot {
                     `[ACCOUNT-START] Starting workflow for: ${redactAccountKey(accountEmail)} | geoLocale: ${account.geoLocale}`
                 )
                 this.updateDashboardAccount(accountEmail, { status: 'Starting Browser' })
+                DataSaverManager.getInstance().beginAccountQuota(accountEmail)
                 this.axios = new AxiosClient(account.proxy, this.localProxyPort, bytes => this.trackBandwidth(bytes))
 
                 const result = await this.Main(account).catch(error => {
@@ -592,9 +597,10 @@ export class MicrosoftRewardsBot {
 
                 const durationSeconds = ((Date.now() - accountStartTime) / 1000).toFixed(1)
                 const mbConsumed = (this.bandwidthTracker.totalBytes / (1024 * 1024)).toFixed(2)
-                const blockedCount = this.bandwidthTracker.blockedRequests
-                const estimatedSavedMb = ((blockedCount * 180) / 1024).toFixed(1)
-                const percentQuota = ((parseFloat(mbConsumed) / 20) * 100).toFixed(1)
+
+                const quotaReport = DataSaverManager.getInstance().finishAccountQuota(accountEmail)
+                const bRes = quotaReport.budgetResult
+                const statusColor = bRes.status === 'PASS' ? 'cyan' : 'yellow'
 
                 if (result) {
                     const collectedPoints = result.collectedPoints ?? 0
@@ -620,8 +626,14 @@ export class MicrosoftRewardsBot {
                     this.logger.info(
                         'main',
                         'DATA-SAVER',
-                        `[DATA-SAVER] Quota: ${mbConsumed} MB consumed | ${blockedCount} heavy assets blocked (~${estimatedSavedMb} MB saved) | Limit: < 20 MB [PASS - ${percentQuota}% of budget]`,
-                        'cyan'
+                        `[DATA-SAVER] Quota=${bRes.consumedMb.toFixed(2)}MB budget=${bRes.budgetMb.toFixed(2)}MB usage=${bRes.percentage.toFixed(1)}% status=${bRes.status}${bRes.status === 'OVER_BUDGET' ? ` overBy=${bRes.overMb.toFixed(2)}MB` : ''}`,
+                        statusColor
+                    )
+                    const bd = quotaReport.breakdown
+                    this.logger.info(
+                        'main',
+                        'DATA-SAVER',
+                        `[DATA-SAVER] Breakdown: document=${(bd.document.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.document.requests} req) | script=${(bd.script.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.script.requests} req) | xhr/fetch=${(bd['xhr/fetch'].bytes / (1024 * 1024)).toFixed(2)}MB (${bd['xhr/fetch'].requests} req) | image=${(bd.image.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.image.requests} req) | media=${(bd.media.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.media.requests} req) | font=${(bd.font.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.font.requests} req) | other=${(bd.other.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.other.requests} req)`
                     )
                     this.updateDashboardAccount(accountEmail, {
                         status: 'Completed',
@@ -629,6 +641,18 @@ export class MicrosoftRewardsBot {
                         bandwidth: `${mbConsumed} MB`
                     })
                 } else {
+                    this.logger.info(
+                        'main',
+                        'DATA-SAVER',
+                        `[DATA-SAVER] Quota=${bRes.consumedMb.toFixed(2)}MB budget=${bRes.budgetMb.toFixed(2)}MB usage=${bRes.percentage.toFixed(1)}% status=${bRes.status}${bRes.status === 'OVER_BUDGET' ? ` overBy=${bRes.overMb.toFixed(2)}MB` : ''}`,
+                        statusColor
+                    )
+                    const bd = quotaReport.breakdown
+                    this.logger.info(
+                        'main',
+                        'DATA-SAVER',
+                        `[DATA-SAVER] Breakdown: document=${(bd.document.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.document.requests} req) | script=${(bd.script.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.script.requests} req) | xhr/fetch=${(bd['xhr/fetch'].bytes / (1024 * 1024)).toFixed(2)}MB (${bd['xhr/fetch'].requests} req) | image=${(bd.image.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.image.requests} req) | media=${(bd.media.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.media.requests} req) | font=${(bd.font.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.font.requests} req) | other=${(bd.other.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.other.requests} req)`
+                    )
                     accountStats.push({
                         email: accountEmail,
                         initialPoints: 0,
@@ -663,6 +687,7 @@ export class MicrosoftRewardsBot {
                     error: errMsg
                 })
             } finally {
+                DataSaverManager.getInstance().resetAccountQuota(accountEmail)
                 this.resetAccountState()
             }
 
@@ -907,7 +932,7 @@ export class MicrosoftRewardsBot {
 
                 // Hook 1: Verify pending manual quests
                 if (isAppOnlyEnabled && data) {
-                    await this.activities.verifyAppOnlyRewards(data)
+                    await this.activities.verifyExistingManualQuests(data)
                 }
 
                 // Hook 2: Observe current App-Only promotions

@@ -7,6 +7,7 @@ import { errorDiagnostic } from '../util/ErrorDiagnostic'
 import type { LogFilter } from '../interface/Config'
 import { logEmitter } from '../util/DashboardServer'
 import { Database } from '../util/Database'
+import { sanitizeLogMessage, redactAccountKey } from '../util/Redaction'
 
 export type Platform = boolean | 'main'
 export type LogLevel = 'info' | 'warn' | 'error' | 'debug'
@@ -73,12 +74,16 @@ export class Logger {
         color?: ColorKey
     ): void {
         const now = new Date().toLocaleString()
-        const formatted = formatMessage(message)
+        const rawFormatted = formatMessage(message)
+        const formatted = sanitizeLogMessage(rawFormatted)
 
-        const userName = this.bot.userData.userName ? this.bot.userData.userName : 'MAIN'
+        const rawUserName = this.bot.userData.userName ? this.bot.userData.userName : 'MAIN'
+        const userName = redactAccountKey(rawUserName)
 
         const levelTag = level.toUpperCase()
-        const cleanMsg = `[${now}] [${userName}] [${levelTag}] ${platformText(isMobile)} [${title}] ${formatted}`
+        const cleanMsg = sanitizeLogMessage(
+            `[${now}] [${userName}] [${levelTag}] ${platformText(isMobile)} [${title}] ${formatted}`
+        )
         logEmitter.emit('log', cleanMsg)
 
         if (level === 'error' || level === 'warn') {
@@ -92,7 +97,7 @@ export class Logger {
         }
 
         const badge = platformBadge(isMobile)
-        const consoleStr = `[${now}] [${userName}] [${levelTag}] ${badge} [${title}] ${formatted}`
+        const consoleStr = sanitizeLogMessage(`[${now}] [${userName}] [${levelTag}] ${badge} [${title}] ${formatted}`)
 
         let logColor: ColorKey | undefined = color
 

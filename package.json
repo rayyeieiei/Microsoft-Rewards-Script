@@ -21,7 +21,7 @@
     "scripts": {
         "pre-build": "npm i && rimraf dist && npx patchright install chromium",
         "build": "tsc",
-        "test": "ts-node test/appOnly.test.ts",
+        "test": "ts-node test/index.test.ts",
         "start": "node ./dist/index.js",
         "ts-start": "ts-node ./src/index.ts",
         "dev": "ts-node ./src/index.ts -dev",

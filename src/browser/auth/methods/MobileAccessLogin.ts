@@ -84,32 +84,41 @@ export class MobileAccessLogin {
             while (Date.now() - start < this.maxTimeout) {
                 const currentUrl = this.page.url()
 
-                // Log only when URL changes (high signal, no spam)
-                if (currentUrl !== lastUrl) {
-                    this.bot.logger.debug(this.bot.isMobile, 'LOGIN-APP', `OAuth poll URL changed → ${currentUrl}`)
-                    lastUrl = currentUrl
-                }
-
                 try {
                     const url = new URL(currentUrl)
 
                     if (url.hostname === 'login.live.com' && url.pathname === '/oauth20_desktop.srf') {
-                        code = url.searchParams.get('code') || ''
+                        if (currentUrl !== lastUrl) {
+                            const codePresent = url.searchParams.has('code')
+                            const statePresent = url.searchParams.has('state')
+                            this.bot.logger.info(
+                                this.bot.isMobile,
+                                'LOGIN-APP',
+                                `[LOGIN-APP] OAuth redirect detected | origin=${url.hostname} path=${url.pathname} codePresent=${codePresent} statePresent=${statePresent}`
+                            )
+                            lastUrl = currentUrl
+                        }
 
+                        code = url.searchParams.get('code') || ''
                         if (code) {
-                            this.bot.logger.debug(this.bot.isMobile, 'LOGIN-APP', 'OAuth code detected in redirect URL')
                             break
                         }
+                    } else if (currentUrl !== lastUrl) {
+                        this.bot.logger.debug(
+                            this.bot.isMobile,
+                            'LOGIN-APP',
+                            `OAuth poll URL changed → ${url.origin}${url.pathname}`
+                        )
+                        lastUrl = currentUrl
                     }
 
                     // Handle Passkey prompt if it appears
                     await this.handlePasskeyPrompt()
                 } catch (err) {
-                    this.bot.logger.debug(
-                        this.bot.isMobile,
-                        'LOGIN-APP',
-                        `Invalid URL while polling: ${String(currentUrl)}`
-                    )
+                    if (currentUrl !== lastUrl) {
+                        this.bot.logger.debug(this.bot.isMobile, 'LOGIN-APP', 'Invalid URL while polling')
+                        lastUrl = currentUrl
+                    }
                 }
 
                 await this.bot.utils.wait(1000)
@@ -122,7 +131,16 @@ export class MobileAccessLogin {
                     `Timed out waiting for OAuth code after ${Math.round((Date.now() - start) / 1000)}s`
                 )
 
-                this.bot.logger.debug(this.bot.isMobile, 'LOGIN-APP', `Final page URL: ${this.page.url()}`)
+                try {
+                    const finalParsed = new URL(this.page.url())
+                    this.bot.logger.debug(
+                        this.bot.isMobile,
+                        'LOGIN-APP',
+                        `Final page URL: ${finalParsed.origin}${finalParsed.pathname}`
+                    )
+                } catch {
+                    this.bot.logger.debug(this.bot.isMobile, 'LOGIN-APP', 'Final page URL unavailable')
+                }
 
                 return ''
             }

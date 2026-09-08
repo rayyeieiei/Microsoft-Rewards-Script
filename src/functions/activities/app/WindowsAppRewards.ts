@@ -168,23 +168,7 @@ export class WindowsAppRewards extends Workers {
             promotionSubtype: p.promotionSubtype
         }))
 
-        // 2. Passive verification of any previously queued manual quests
-        try {
-            const currentPoints = Number(this.bot.userData?.currentPoints ?? 0)
-            await this.verifier.verify(classificationInputs, {
-                accountKey: safeAccountKey,
-                currentBalance: currentPoints,
-                logger: {
-                    info: msg => this.bot.logger.info(this.bot.isMobile, 'APP-ONLY-VERIFY', msg),
-                    warn: msg => this.bot.logger.warn(this.bot.isMobile, 'APP-ONLY-VERIFY', msg),
-                    debug: msg => this.bot.logger.debug(this.bot.isMobile, 'APP-ONLY-VERIFY', msg)
-                }
-            })
-        } catch {
-            // Passive verifier errors must fail-open
-        }
-
-        // 3. Observe promotions and execute policy (non-blocking)
+        // 2. Observe promotions and execute policy (non-blocking)
         const decisions: AppOnlyDecision[] = await this.observer.observe(classificationInputs, {
             policy: effectivePolicy,
             cacheTtlHours,

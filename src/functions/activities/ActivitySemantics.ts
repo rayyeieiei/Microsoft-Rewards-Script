@@ -112,3 +112,182 @@ export function evaluateActivityCompletion(params: {
         completionEvidence
     }
 }
+
+export type PunchCardRunStatus =
+    | 'verified-complete-today'
+    | 'processed-unverified'
+    | 'waiting-cooldown'
+    | 'already-complete'
+    | 'no-actionable-child'
+    | 'failed'
+
+export interface PunchCardServerSnapshot {
+    parentOfferId: string
+    childOfferId?: string
+    completedChildren: number
+    totalChildren: number
+    actionableNow: number
+    locked: number
+    futureDated: number
+    parentComplete: boolean
+    childComplete?: boolean
+    childLocked?: boolean
+}
+
+export type PunchCardVerificationEvidence =
+    | 'exact-child-complete'
+    | 'completed-count-increased'
+    | 'parent-complete'
+    | 'state-unchanged'
+    | 'server-state-unavailable'
+
+export interface PunchCardRunResult {
+    status: PunchCardRunStatus
+    before: PunchCardServerSnapshot
+    after?: PunchCardServerSnapshot
+    targetChildOfferId?: string
+    observedBalanceDelta: number
+    evidence: PunchCardVerificationEvidence
+}
+
+export interface PunchCardStateReader {
+    fetchPunchCardSnapshot(
+        parentOfferId: string,
+        targetChildOfferId?: string
+    ): Promise<PunchCardServerSnapshot | null>
+}
+
+export function evaluatePunchCardRun(
+    before: PunchCardServerSnapshot,
+    after?: PunchCardServerSnapshot,
+    targetChildOfferId?: string,
+    observedBalanceDelta: number = 0
+): PunchCardRunResult {
+    if (before.parentComplete) {
+        return {
+            status: 'already-complete',
+            before,
+            after,
+            targetChildOfferId,
+            observedBalanceDelta,
+            evidence: 'parent-complete'
+        }
+    }
+
+    if (before.actionableNow === 0) {
+        if (before.locked > 0 || before.futureDated > 0) {
+            return {
+                status: 'waiting-cooldown',
+                before,
+                after,
+                targetChildOfferId,
+                observedBalanceDelta,
+                evidence: 'state-unchanged'
+            }
+        }
+        return {
+            status: 'no-actionable-child',
+            before,
+            after,
+            targetChildOfferId,
+            observedBalanceDelta,
+            evidence: 'state-unchanged'
+        }
+    }
+
+    if (!after) {
+        return {
+            status: 'processed-unverified',
+            before,
+            after: undefined,
+            targetChildOfferId,
+            observedBalanceDelta,
+            evidence: 'server-state-unavailable'
+        }
+    }
+
+    // Deterministic rules:
+    // 1. after.parentComplete === true -> parent-complete
+    // 2. after.childComplete === true -> exact-child-complete
+    // 3. after.completedChildren > before.completedChildren -> completed-count-increased
+    // 4. otherwise -> state-unchanged
+    if (after.parentComplete === true) {
+        return {
+            status: 'verified-complete-today',
+            before,
+            after,
+            targetChildOfferId,
+            observedBalanceDelta,
+            evidence: 'parent-complete'
+        }
+    }
+
+    if (after.childComplete === true) {
+        return {
+            status: 'verified-complete-today',
+            before,
+            after,
+            targetChildOfferId,
+            observedBalanceDelta,
+            evidence: 'exact-child-complete'
+        }
+    }
+
+    if (after.completedChildren > before.completedChildren) {
+        return {
+            status: 'verified-complete-today',
+            before,
+            after,
+            targetChildOfferId,
+            observedBalanceDelta,
+            evidence: 'completed-count-increased'
+        }
+    }
+
+    return {
+        status: 'processed-unverified',
+        before,
+        after,
+        targetChildOfferId,
+        observedBalanceDelta,
+        evidence: 'state-unchanged'
+    }
+}
+
+export type DataSaverCategory = 'document' | 'script' | 'xhr/fetch' | 'image' | 'media' | 'font' | 'other'
+
+export interface DataSaverBudgetResult {
+    consumedBytes: number
+    budgetBytes: number
+    consumedMb: number
+    budgetMb: number
+    percentage: number
+    withinBudget: boolean
+    status: 'PASS' | 'OVER_BUDGET'
+    overBytes: number
+    overMb: number
+}
+
+export function evaluateDataSaverBudget(
+    consumedBytes: number,
+    budgetBytes: number = 20 * 1024 * 1024
+): DataSaverBudgetResult {
+    const consumedMb = consumedBytes / (1024 * 1024)
+    const budgetMb = budgetBytes / (1024 * 1024)
+    const withinBudget = consumedBytes <= budgetBytes
+    const percentage = budgetBytes > 0 ? (consumedBytes / budgetBytes) * 100 : 0
+    const overBytes = Math.max(0, consumedBytes - budgetBytes)
+    const overMb = overBytes / (1024 * 1024)
+
+    return {
+        consumedBytes,
+        budgetBytes,
+        consumedMb,
+        budgetMb,
+        percentage,
+        withinBudget,
+        status: withinBudget ? 'PASS' : 'OVER_BUDGET',
+        overBytes,
+        overMb
+    }
+}

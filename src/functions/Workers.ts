@@ -3,7 +3,14 @@ import type { MicrosoftRewardsBot } from '../index'
 import type { DashboardData, PunchCard, BasePromotion, FindClippyPromotion } from '../interface/DashboardData'
 import type { AppDashboardData } from '../interface/AppDashBoardData'
 import { Database } from '../util/Database'
-import { ActivityExecutionResult, ActivityBatchSummary, PunchCardTaskCounts } from './activities/ActivitySemantics'
+import {
+    ActivityExecutionResult,
+    ActivityBatchSummary,
+    PunchCardTaskCounts,
+    PunchCardServerSnapshot,
+    PunchCardStateReader,
+    evaluatePunchCardRun
+} from './activities/ActivitySemantics'
 
 export class Workers {
     public bot: MicrosoftRewardsBot
@@ -508,13 +515,6 @@ export class Workers {
                         observedBalanceDelta,
                         attributedPoints: attributed
                     })
-                    if (result.advertisedPoints > 0 && observedBalanceDelta !== result.advertisedPoints) {
-                        this.bot.logger.info(
-                            this.bot.isMobile,
-                            'DAILY-SET',
-                            `advertisedPoints=${result.advertisedPoints} observedBalanceDelta=${observedBalanceDelta} attributedPoints=unknown`
-                        )
-                    }
                 } else {
                     executionMap.set(key, {
                         ...result,
@@ -541,10 +541,17 @@ export class Workers {
 
             this.bot.userData.currentPoints = updatedBalance
 
+            const advertisedTotal = allResults.reduce((sum, r) => sum + r.advertisedPoints, 0)
             this.bot.logger.info(
                 this.bot.isMobile,
                 'DAILY-SET',
-                `[DAILY-SET] Finished processing | total=${summary.total} verified=${summary.verifiedComplete} pending=${summary.pending} failed=${summary.failed} observedBalanceDelta=${summary.observedAccountBalanceDelta}`
+                `[DAILY-SET] Batch reconciliation | advertisedTotal=${advertisedTotal} observedAccountBalanceDelta=${observedBalanceDelta} verified=${summary.verifiedComplete}/${summary.total}`
+            )
+
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'DAILY-SET',
+                `[DAILY-SET] Finished processing | total=${summary.total} verified=${summary.verifiedComplete} processedUnverified=${summary.processedUnverified} pending=${summary.pending} skipped=${summary.skipped} failed=${summary.failed} observedBalanceDelta=${summary.observedAccountBalanceDelta}`
             )
 
             if (summary.total > 0 && summary.verifiedComplete === summary.total) {
@@ -938,13 +945,6 @@ export class Workers {
                     observedBalanceDelta: bonusGained,
                     attributedPoints: attributed
                 })
-                if (result.advertisedPoints > 0 && bonusGained !== result.advertisedPoints) {
-                    this.bot.logger.info(
-                        this.bot.isMobile,
-                        'KEEP-EARNING',
-                        `advertisedPoints=${result.advertisedPoints} observedBalanceDelta=${bonusGained} attributedPoints=unknown`
-                    )
-                }
             } else {
                 executionMap.set(key, {
                     ...result,
@@ -971,10 +971,17 @@ export class Workers {
 
         this.bot.userData.currentPoints = updatedBonusBalance
 
+        const advertisedTotal = allResults.reduce((sum, r) => sum + r.advertisedPoints, 0)
         this.bot.logger.info(
             this.bot.isMobile,
             'KEEP-EARNING',
-            `[KEEP-EARNING] Finished processing | total=${summary.total} verified=${summary.verifiedComplete} pending=${summary.pending} failed=${summary.failed} observedBalanceDelta=${summary.observedAccountBalanceDelta}`
+            `[KEEP-EARNING] Batch reconciliation | advertisedTotal=${advertisedTotal} observedAccountBalanceDelta=${bonusGained} verified=${summary.verifiedComplete}/${summary.total}`
+        )
+
+        this.bot.logger.info(
+            this.bot.isMobile,
+            'KEEP-EARNING',
+            `[KEEP-EARNING] Finished processing | total=${summary.total} verified=${summary.verifiedComplete} processedUnverified=${summary.processedUnverified} pending=${summary.pending} skipped=${summary.skipped} failed=${summary.failed} observedBalanceDelta=${summary.observedAccountBalanceDelta}`
         )
 
         if (summary.total > 0 && summary.verifiedComplete === summary.total) {
@@ -1055,7 +1062,20 @@ export class Workers {
         this.bot.logger.info(this.bot.isMobile, 'CLAIM-BONUS-POINTS', `🎉 Star Bonus points claimed!`, 'green')
     }
 
-    public async doPunchCards(data: DashboardData, page: Page) {
+    private punchCardStateReader?: PunchCardStateReader
+
+    public setPunchCardStateReader(reader: PunchCardStateReader) {
+        this.punchCardStateReader = reader
+    }
+
+    public getPunchCardStateReader(): PunchCardStateReader {
+        if (!this.punchCardStateReader) {
+            this.punchCardStateReader = new ProductionPunchCardStateReader(this.bot.browser?.func)
+        }
+        return this.punchCardStateReader
+    }
+
+    public async doPunchCards(data: DashboardData, page: Page, readerOverride?: PunchCardStateReader) {
         const punchCards: PunchCard[] = [...(data.punchCards ?? [])]
 
         // Periksa juga apakah ada kartu di promotionalItems/morePromotions yang merupakan PunchCard
@@ -1086,6 +1106,8 @@ export class Workers {
             return
         }
 
+        const stateReader = readerOverride || this.getPunchCardStateReader()
+
         this.bot.logger.info(
             this.bot.isMobile,
             'PUNCHCARD',
@@ -1094,9 +1116,10 @@ export class Workers {
 
         for (const card of punchCards) {
             const title = card.parentPromotion?.title || card.name || 'Punch Card'
-            const offerId = card.parentPromotion?.offerId || ''
+            const offerId = card.parentPromotion?.offerId || card.name || ''
 
             const progress = this.getPunchCardProgressDetails(card)
+            const beforeSnapshot = createPunchCardSnapshot(card)
 
             this.bot.logger.info(
                 this.bot.isMobile,
@@ -1104,21 +1127,11 @@ export class Workers {
                 `[PUNCHCARD] Evaluated punchcard: "${title}" | Current Active: Step ${Math.min(progress.maxStep, progress.currentStep + 1)}/${progress.maxStep}`
             )
 
-            if (progress.isCompleted) {
+            if (beforeSnapshot.parentComplete || progress.isCompleted) {
                 this.bot.logger.info(
                     this.bot.isMobile,
                     'PUNCHCARD',
                     `"${title}" | Progress: ${progress.progressStr} | Points: ${progress.pointsStr} | Status: Already Completed 🎉`,
-                    'green'
-                )
-                continue
-            }
-
-            if (progress.isCompletedToday) {
-                this.bot.logger.info(
-                    this.bot.isMobile,
-                    'PUNCHCARD',
-                    `"${title}" | Progress: ${progress.progressStr} | Points: ${progress.pointsStr} | Status: Completed for Today ✅`,
                     'green'
                 )
                 continue
@@ -1133,93 +1146,135 @@ export class Workers {
                 'cyan'
             )
 
-            const children = card.childPromotions ?? []
-            const uncompletedChildren = children.filter(x => {
-                if (!x) return false
-                if (x.complete) return false
-                if (
-                    this.completedOffersInSession.has(x.offerId) ||
-                    this.completedOffersInSession.has((x.title || '').toLowerCase().trim())
-                )
-                    return false
-                if (x.pointProgressMax > 0 && x.pointProgress >= x.pointProgressMax) return false
-                return true
-            })
+            if (counts.actionableNow === 0) {
+                if (counts.locked > 0 || counts.futureDated > 0) {
+                    const lockedChild = (card.childPromotions ?? []).find(
+                        c => isChildLocked(c) || isChildFutureDated(c) || isChildInCooldown(c)
+                    )
+                    const lockedChildAttr = (lockedChild?.attributes ?? {}) as Record<string, any>
+                    const nextEligibleAt =
+                        lockedChildAttr.nextEligibleAt ||
+                        lockedChildAttr.startDate ||
+                        lockedChildAttr.availableAt
+                    if (nextEligibleAt) {
+                        this.bot.logger.info(
+                            this.bot.isMobile,
+                            'PUNCHCARD',
+                            `[PUNCHCARD] Next step is server-locked; eligible at ${nextEligibleAt}`,
+                            'yellow'
+                        )
+                    } else {
+                        this.bot.logger.info(
+                            this.bot.isMobile,
+                            'PUNCHCARD',
+                            `[PUNCHCARD] Next step is server-locked; eligibility time unavailable`,
+                            'yellow'
+                        )
+                    }
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'PUNCHCARD',
+                        `[PUNCHCARD] Progress: ${counts.completed}/${counts.total} Tasks | remaining=${counts.remaining} actionableNow=0 locked=${counts.locked} status=waiting-cooldown executionCount=0`,
+                        'cyan'
+                    )
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'PUNCHCARD',
+                        `[PUNCHCARD] Result | title="${title}" status=waiting-cooldown evidence=state-unchanged`,
+                        'yellow'
+                    )
+                } else {
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'PUNCHCARD',
+                        `[PUNCHCARD] Result | title="${title}" status=no-actionable-child evidence=state-unchanged`,
+                        'yellow'
+                    )
+                }
+                continue
+            }
 
-            if (counts.actionableNow > 0 && uncompletedChildren.length > 0) {
+            const children = card.childPromotions ?? []
+            if (children.length > 0) {
                 // Guardrail: Maksimal satu child per parent per run
-                const activeChild = uncompletedChildren.find(c => {
-                    const attr = (c.attributes || {}) as Record<string, any>
-                    const isLocked =
-                        attr.isLocked === 'True' ||
-                        attr.isLocked === 'true' ||
-                        attr.isLocked === true ||
-                        (c as any).isLocked === true ||
-                        (c as any).exclusiveLockedFeatureStatus === 'locked' ||
-                        attr.locked_category_criteria === 'rewardsApp' ||
-                        attr.is_unlocked === 'False'
-                    const isFutureDated =
-                        attr.isFutureDated === 'True' ||
-                        attr.isFutureDated === true ||
-                        (attr.startDate && new Date(attr.startDate).getTime() > Date.now()) ||
-                        (attr.cooldown && String(attr.cooldown).toLowerCase() === 'true')
-                    const isDisabled =
-                        attr.disabled === 'True' ||
-                        attr.disabled === 'true' ||
-                        attr.disabled === true ||
-                        (c as any).disabled === true
-                    return !isLocked && !isFutureDated && !isDisabled
-                })
+                const activeChild = children.find(
+                    c =>
+                        !isChildComplete(c) &&
+                        !isChildLocked(c) &&
+                        !isChildDisabled(c) &&
+                        !isChildFutureDated(c) &&
+                        !isChildInCooldown(c)
+                )
 
                 if (activeChild) {
-                    const stepTitle = activeChild.title || activeChild.name || `Step ${progress.currentStep + 1}`
-                    const stepNum = progress.currentStep + 1
-                    const taskTag = `(${stepNum}/${progress.maxStep} Tasks)`
+                    const targetChildOfferId = activeChild.offerId
+                    const stepTitle = activeChild.title || activeChild.name || `Step ${counts.completed + 1}`
+                    const stepNum = counts.completed + 1
+                    const taskTag = `(${stepNum}/${counts.total} Tasks)`
+                    const childBeforeSnapshot = createPunchCardSnapshot(card, targetChildOfferId)
 
                     this.bot.logger.info(
                         this.bot.isMobile,
                         'PUNCHCARD',
                         `[PUNCHCARD] Active step detected: "${title}" -> "${stepTitle}" ${taskTag}`
                     )
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'PUNCHCARD',
+                        `[PUNCHCARD] Before snapshot | parentOfferId=${offerId} childOfferId=${targetChildOfferId} completed=${childBeforeSnapshot.completedChildren}/${childBeforeSnapshot.totalChildren}`
+                    )
+
+                    const balanceBefore = Number(this.bot.userData.currentPoints ?? 0)
 
                     await this.solveActivities([activeChild], page, card)
 
-                    // Refresh exact parent/child server state
+                    // Refresh exact parent/child server state with propagation delay
                     await this.bot.utils.wait(2000)
-                    const refreshedData: DashboardData | null = await this.bot.browser.func
-                        .getDashboardData()
-                        .catch(() => null)
-                    const matchingPc = refreshedData?.punchCards?.find(
-                        p =>
-                            (p.parentPromotion?.offerId &&
-                                p.parentPromotion.offerId === card.parentPromotion?.offerId) ||
-                            (p.name && p.name.toLowerCase().trim() === (card.name || '').toLowerCase().trim())
-                    )
-                    const freshChild = matchingPc?.childPromotions?.find(
-                        c =>
-                            c &&
-                            (c.offerId === activeChild.offerId ||
-                                (c.title &&
-                                    c.title.toLowerCase().trim() === (activeChild.title || '').toLowerCase().trim()))
-                    )
-                    const isChildComplete = Boolean(
-                        freshChild &&
-                        (freshChild.complete === true ||
-                            (freshChild.pointProgressMax > 0 &&
-                                (freshChild.pointProgress ?? 0) >= freshChild.pointProgressMax))
+                    let afterSnapshot = await stateReader.fetchPunchCardSnapshot(offerId, targetChildOfferId)
+
+                    const isVerified = Boolean(
+                        afterSnapshot &&
+                            (afterSnapshot.parentComplete ||
+                                afterSnapshot.childComplete ||
+                                afterSnapshot.completedChildren > childBeforeSnapshot.completedChildren)
                     )
 
-                    if (isChildComplete) {
+                    if (!isVerified) {
+                        await this.bot.utils.wait(3000)
+                        const retrySnapshot = await stateReader.fetchPunchCardSnapshot(offerId, targetChildOfferId)
+                        if (retrySnapshot) {
+                            afterSnapshot = retrySnapshot
+                        }
+                    }
+
+                    const balanceAfter = Number(this.bot.userData.currentPoints ?? 0)
+                    const observedBalanceDelta = Math.max(0, balanceAfter - balanceBefore)
+                    const runResult = evaluatePunchCardRun(
+                        childBeforeSnapshot,
+                        afterSnapshot ?? undefined,
+                        targetChildOfferId,
+                        observedBalanceDelta
+                    )
+
+                    if (runResult.status === 'verified-complete-today') {
                         this.bot.logger.info(
                             this.bot.isMobile,
                             'PUNCHCARD',
                             `[PUNCHCARD] Step "${stepTitle}" completed successfully. ${taskTag}`,
                             'green'
                         )
-                        this.completedOffersInSession.add(activeChild.offerId)
-                        this.completedOffersInSession.add((activeChild.title || '').toLowerCase().trim())
-                        this.completedOffersInSession.add(offerId)
-                        this.completedOffersInSession.add(title.toLowerCase().trim())
+                        this.bot.logger.info(
+                            this.bot.isMobile,
+                            'PUNCHCARD',
+                            `[PUNCHCARD] Result | title="${title}" status=verified-complete-today evidence=${runResult.evidence} nextAction=wait-for-server-unlock`,
+                            'green'
+                        )
+                        if (targetChildOfferId) this.completedOffersInSession.add(targetChildOfferId)
+                        if (stepTitle) this.completedOffersInSession.add(stepTitle.toLowerCase().trim())
+                        if (runResult.after?.parentComplete) {
+                            if (offerId) this.completedOffersInSession.add(offerId)
+                            this.completedOffersInSession.add(title.toLowerCase().trim())
+                        }
                     } else {
                         this.bot.logger.info(
                             this.bot.isMobile,
@@ -1227,56 +1282,78 @@ export class Workers {
                             `[PUNCHCARD] Step processed but completion remains unverified. ${taskTag}`,
                             'yellow'
                         )
-                    }
-
-                    // Hentikan eksekusi step berikutnya karena masuk masa 24h cooldown
-                    if (progress.maxStep > 1 && stepNum < progress.maxStep) {
                         this.bot.logger.info(
                             this.bot.isMobile,
                             'PUNCHCARD',
-                            `[PUNCHCARD] Active step completed. Next step is locked (24h cooldown). Moving to next activity.`,
+                            `[PUNCHCARD] Result | title="${title}" status=processed-unverified evidence=${runResult.evidence}`,
                             'yellow'
                         )
                     }
+                }
+            } else if (card.parentPromotion?.destinationUrl) {
+                const stepTitle = 'Daily Step'
+                const taskTag = `(1/1 Tasks)`
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'PUNCHCARD',
+                    `[PUNCHCARD] Active step detected: "${title}" -> "${stepTitle}" ${taskTag}`
+                )
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'PUNCHCARD',
+                    `[PUNCHCARD] Before snapshot | parentOfferId=${offerId} completed=${beforeSnapshot.completedChildren}/${beforeSnapshot.totalChildren}`
+                )
 
+                const balanceBefore = Number(this.bot.userData.currentPoints ?? 0)
+                const claimActivity = card.parentPromotion as unknown as BasePromotion
+                await this.bot.activities.doUrlReward(claimActivity, page, card)
+
+                await this.bot.utils.wait(2000)
+                let afterSnapshot = await stateReader.fetchPunchCardSnapshot(offerId)
+                if (!afterSnapshot?.parentComplete) {
+                    await this.bot.utils.wait(3000)
+                    const retrySnapshot = await stateReader.fetchPunchCardSnapshot(offerId)
+                    if (retrySnapshot) afterSnapshot = retrySnapshot
+                }
+
+                const balanceAfter = Number(this.bot.userData.currentPoints ?? 0)
+                const observedBalanceDelta = Math.max(0, balanceAfter - balanceBefore)
+                const runResult = evaluatePunchCardRun(
+                    beforeSnapshot,
+                    afterSnapshot ?? undefined,
+                    undefined,
+                    observedBalanceDelta
+                )
+
+                if (runResult.status === 'verified-complete-today') {
                     this.bot.logger.info(
                         this.bot.isMobile,
                         'PUNCHCARD',
-                        `"${title}" | Progress: ${stepNum}/${progress.maxStep} Tasks | Status: Completed for Today ✅`,
+                        `[PUNCHCARD] Step "${stepTitle}" completed successfully. ${taskTag}`,
                         'green'
                     )
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'PUNCHCARD',
+                        `[PUNCHCARD] Result | title="${title}" status=verified-complete-today evidence=${runResult.evidence}`,
+                        'green'
+                    )
+                    if (offerId) this.completedOffersInSession.add(offerId)
+                    this.completedOffersInSession.add(title.toLowerCase().trim())
                 } else {
                     this.bot.logger.info(
                         this.bot.isMobile,
                         'PUNCHCARD',
-                        `"${title}" | Remaining steps are locked (24h cooldown). Status: Completed for Today ✅`,
-                        'green'
+                        `[PUNCHCARD] Step processed but completion remains unverified. ${taskTag}`,
+                        'yellow'
+                    )
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'PUNCHCARD',
+                        `[PUNCHCARD] Result | title="${title}" status=processed-unverified evidence=${runResult.evidence}`,
+                        'yellow'
                     )
                 }
-            } else if (card.parentPromotion?.destinationUrl) {
-                const stepNum = Math.min(progress.maxStep, progress.currentStep + 1)
-                const taskTag = `(${stepNum}/${progress.maxStep} Tasks)`
-                this.bot.logger.info(
-                    this.bot.isMobile,
-                    'PUNCHCARD',
-                    `[PUNCHCARD] Active step detected: "${title}" -> "Daily Step" ${taskTag}`
-                )
-                const claimActivity = card.parentPromotion as unknown as BasePromotion
-                await this.bot.activities.doUrlReward(claimActivity, page, card)
-                this.completedOffersInSession.add(offerId)
-                this.completedOffersInSession.add(title.toLowerCase().trim())
-                this.bot.logger.info(
-                    this.bot.isMobile,
-                    'PUNCHCARD',
-                    `[PUNCHCARD] Step "Daily Step" completed successfully. ${taskTag}`,
-                    'green'
-                )
-                this.bot.logger.info(
-                    this.bot.isMobile,
-                    'PUNCHCARD',
-                    `"${title}" | Progress: ${stepNum}/${progress.maxStep} Tasks | Status: Completed for Today ✅`,
-                    'green'
-                )
             }
         }
     }
@@ -1286,7 +1363,11 @@ export class Workers {
         const total = children.length
         if (total === 0) {
             const parent = card.parentPromotion
-            const isComp = Boolean(parent?.complete)
+            const isComp = Boolean(
+                parent?.complete === true ||
+                String(parent?.complete).toLowerCase() === 'true' ||
+                ((parent?.pointProgressMax ?? 0) > 0 && (parent?.pointProgress ?? 0) >= (parent?.pointProgressMax ?? 0))
+            )
             return {
                 total: 1,
                 completed: isComp ? 1 : 0,
@@ -1304,48 +1385,25 @@ export class Workers {
         let disabled = 0
         const eligibleChildren: BasePromotion[] = []
 
+        const now = Date.now()
+
         for (const c of children) {
             if (!c) continue
-            const offerId = (c.offerId || '').toLowerCase()
-            const title = (c.title || c.name || '').toLowerCase().trim()
-            const attr = (c.attributes || {}) as Record<string, any>
-
-            const isComp =
-                c.complete === true ||
-                String(c.complete).toLowerCase() === 'true' ||
-                (c.pointProgressMax > 0 && (c.pointProgress ?? 0) >= c.pointProgressMax) ||
-                this.completedOffersInSession.has(offerId) ||
-                this.completedOffersInSession.has(title)
+            const isComp = isChildComplete(c)
 
             if (isComp) {
                 completed++
                 continue
             }
 
-            const isDis =
-                attr.disabled === 'True' ||
-                attr.disabled === 'true' ||
-                attr.disabled === true ||
-                (c as any).disabled === true
+            const isDis = isChildDisabled(c)
             if (isDis) {
                 disabled++
                 continue
             }
 
-            const isLock =
-                attr.isLocked === 'True' ||
-                attr.isLocked === 'true' ||
-                attr.isLocked === true ||
-                (c as any).isLocked === true ||
-                (c as any).exclusiveLockedFeatureStatus === 'locked' ||
-                attr.locked_category_criteria === 'rewardsApp' ||
-                attr.is_unlocked === 'False'
-
-            const isFut =
-                attr.isFutureDated === 'True' ||
-                attr.isFutureDated === true ||
-                (attr.startDate && new Date(attr.startDate).getTime() > Date.now()) ||
-                (attr.cooldown && String(attr.cooldown).toLowerCase() === 'true')
+            const isLock = isChildLocked(c)
+            const isFut = isChildFutureDated(c, now) || isChildInCooldown(c)
 
             if (isLock) {
                 locked++
@@ -1493,4 +1551,192 @@ export class Workers {
             }
         }
     }
+}
+
+export function isChildComplete(c: BasePromotion): boolean {
+    if (!c) return false
+    return Boolean(
+        c.complete === true ||
+        String(c.complete).toLowerCase() === 'true' ||
+        ((c.pointProgressMax ?? 0) > 0 && (c.pointProgress ?? 0) >= (c.pointProgressMax ?? 0))
+    )
+}
+
+export function isChildLocked(c: BasePromotion): boolean {
+    if (!c) return false
+    const attr = (c.attributes || {}) as Record<string, any>
+    return Boolean(
+        attr.isLocked === 'True' ||
+        attr.isLocked === 'true' ||
+        attr.isLocked === true ||
+        (c as any).isLocked === true ||
+        (c as any).exclusiveLockedFeatureStatus === 'locked' ||
+        attr.locked_category_criteria === 'rewardsApp' ||
+        attr.is_unlocked === 'False'
+    )
+}
+
+export function isChildDisabled(c: BasePromotion): boolean {
+    if (!c) return false
+    const attr = (c.attributes || {}) as Record<string, any>
+    return Boolean(
+        attr.disabled === 'True' ||
+        attr.disabled === 'true' ||
+        attr.disabled === true ||
+        (c as any).disabled === true
+    )
+}
+
+export function isChildFutureDated(c: BasePromotion, now: number = Date.now()): boolean {
+    if (!c) return false
+    const attr = (c.attributes || {}) as Record<string, any>
+    return Boolean(
+        attr.isFutureDated === 'True' ||
+        attr.isFutureDated === true ||
+        (attr.startDate && new Date(attr.startDate).getTime() > now)
+    )
+}
+
+export function isChildInCooldown(c: BasePromotion): boolean {
+    if (!c) return false
+    const attr = (c.attributes || {}) as Record<string, any>
+    return Boolean(
+        (attr.cooldown && String(attr.cooldown).toLowerCase() === 'true') ||
+        attr.inCooldown === true ||
+        String(attr.inCooldown).toLowerCase() === 'true'
+    )
+}
+
+export function createPunchCardSnapshot(
+    card: PunchCard,
+    targetChildOfferId?: string
+): PunchCardServerSnapshot {
+    const parent = card.parentPromotion
+    const parentOfferId = parent?.offerId || card.name || ''
+    const parentComplete = Boolean(
+        parent?.complete === true ||
+        String(parent?.complete).toLowerCase() === 'true' ||
+        ((parent?.pointProgressMax ?? 0) > 0 && (parent?.pointProgress ?? 0) >= (parent?.pointProgressMax ?? 0))
+    )
+
+    const children = card.childPromotions ?? []
+    const totalChildren = children.length > 0 ? children.length : 1
+
+    let completedChildren = 0
+    let locked = 0
+    let futureDated = 0
+    let actionableNow = 0
+    let targetChildComplete: boolean | undefined = undefined
+    let targetChildLocked: boolean | undefined = undefined
+
+    const now = Date.now()
+
+    if (children.length === 0) {
+        if (parentComplete) {
+            completedChildren = 1
+        } else {
+            actionableNow = 1
+        }
+    } else {
+        const eligibleChildren: BasePromotion[] = []
+        for (const c of children) {
+            if (!c) continue
+            const isComp = isChildComplete(c)
+            const isDis = isChildDisabled(c)
+            const isLock = isChildLocked(c)
+            const isFut = isChildFutureDated(c, now) || isChildInCooldown(c)
+
+            if (targetChildOfferId && c.offerId === targetChildOfferId) {
+                targetChildComplete = isComp
+                targetChildLocked = isLock
+            }
+
+            if (isComp) {
+                completedChildren++
+            } else if (isDis) {
+                // disabled
+            } else if (isLock) {
+                locked++
+            } else if (isFut) {
+                futureDated++
+            } else {
+                eligibleChildren.push(c)
+            }
+        }
+        actionableNow = eligibleChildren.length > 0 ? 1 : 0
+        if (eligibleChildren.length > 1) {
+            locked += eligibleChildren.length - 1
+        }
+    }
+
+    return {
+        parentOfferId,
+        childOfferId: targetChildOfferId,
+        completedChildren,
+        totalChildren,
+        actionableNow,
+        locked,
+        futureDated,
+        parentComplete,
+        childComplete: targetChildComplete,
+        childLocked: targetChildLocked
+    }
+}
+
+export function findMatchingPunchCard(
+    data: DashboardData | null | undefined,
+    parentOfferId: string
+): PunchCard | null {
+    if (!data) return null
+    if (data.punchCards) {
+        const found = data.punchCards.find(
+            p =>
+                (p.parentPromotion?.offerId && p.parentPromotion.offerId === parentOfferId) ||
+                (p.name && p.name.toLowerCase().trim() === parentOfferId.toLowerCase().trim())
+        )
+        if (found) return found
+    }
+    const standalone = [
+        ...(data.promotionalItems ?? []),
+        ...(data.morePromotions ?? []),
+        ...(data.morePromotionsWithoutPromotionalItems ?? [])
+    ].find(
+        x =>
+            x &&
+            (x.offerId === parentOfferId ||
+                (x.name && x.name.toLowerCase().trim() === parentOfferId.toLowerCase().trim()))
+    )
+    if (standalone) {
+        return {
+            name: standalone.name || standalone.offerId,
+            parentPromotion: standalone,
+            childPromotions: []
+        } as unknown as PunchCard
+    }
+    return null
+}
+
+export class ProductionPunchCardStateReader implements PunchCardStateReader {
+    constructor(private browserFunc?: { getDashboardData: () => Promise<DashboardData> }) {}
+
+    async fetchPunchCardSnapshot(
+        parentOfferId: string,
+        targetChildOfferId?: string
+    ): Promise<PunchCardServerSnapshot | null> {
+        if (!this.browserFunc?.getDashboardData) return null
+        try {
+            const freshData = await this.browserFunc.getDashboardData()
+            const matchingPc = findMatchingPunchCard(freshData, parentOfferId)
+            if (!matchingPc) return null
+            return createPunchCardSnapshot(matchingPc, targetChildOfferId)
+        } catch {
+            return null
+        }
+    }
+}
+
+export {
+    type PunchCardStateReader,
+    type PunchCardServerSnapshot,
+    evaluatePunchCardRun
 }
