@@ -37,6 +37,7 @@ export class AppOnlyQuestVerifier {
         const pendingQuests = this.queue.getPendingForAccount(safeAccount)
 
         if (!pendingQuests.length) {
+            options.logger?.debug?.('[APP-ONLY-VERIFY] pendingLoaded=0 completed=0 stillPending=0 expired=0')
             return results
         }
 
@@ -45,6 +46,10 @@ export class AppOnlyQuestVerifier {
             typeof options.currentBalance === 'number' && typeof options.previousBalance === 'number'
                 ? Math.max(0, options.currentBalance - options.previousBalance)
                 : 0
+
+        let completedCount = 0
+        let stillPendingCount = 0
+        let expiredCount = 0
 
         for (const quest of pendingQuests) {
             const offerId = quest.offerId
@@ -57,6 +62,7 @@ export class AppOnlyQuestVerifier {
                 const expTime = new Date(quest.expiresAt).getTime()
                 if (!isNaN(expTime) && expTime <= nowTime) {
                     this.queue.updateState(safeAccount, offerId, 'expired')
+                    expiredCount++
                     results.push({
                         offerId,
                         complete: false,
@@ -71,12 +77,14 @@ export class AppOnlyQuestVerifier {
 
             if (!matchingPromo) {
                 // Not found in current dashboard, keep state
+                stillPendingCount++
                 options.logger?.debug?.(
                     `[APP-ONLY-VERIFY] offerId=${offerId} serverComplete=false state=manual-required (not found in server payload)`
                 )
                 continue
             }
 
+            // Priority 1: Exact offer server state complete === true
             const isServerComplete =
                 matchingPromo.complete === true ||
                 String(matchingPromo.complete).toLowerCase() === 'true' ||
@@ -86,6 +94,7 @@ export class AppOnlyQuestVerifier {
                     matchingPromo.pointProgress >= matchingPromo.pointProgressMax)
 
             if (isServerComplete) {
+                completedCount++
                 const delta = baselineDelta > 0 ? baselineDelta : quest.expectedPoints
                 this.queue.updateState(safeAccount, offerId, 'verified-complete', delta)
                 // Invalidate negative cache upon completion
@@ -101,6 +110,7 @@ export class AppOnlyQuestVerifier {
 
                 options.logger?.info?.(`[APP-ONLY-VERIFY] offerId=${offerId} serverComplete=true balanceDelta=${delta}`)
             } else {
+                stillPendingCount++
                 this.queue.updateState(safeAccount, offerId, 'manual-required')
                 results.push({
                     offerId,
@@ -114,6 +124,10 @@ export class AppOnlyQuestVerifier {
                 )
             }
         }
+
+        options.logger?.info?.(
+            `[APP-ONLY-VERIFY] pendingLoaded=${pendingQuests.length} completed=${completedCount} stillPending=${stillPendingCount} expired=${expiredCount}`
+        )
 
         return results
     }

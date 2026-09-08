@@ -4,7 +4,14 @@ import { Workers } from '../../Workers'
 import { AppOnlyQuestObserver } from '../appOnly/AppOnlyQuestObserver'
 import { AppOnlyQuestVerifier } from '../appOnly/AppOnlyQuestVerifier'
 import { AppOnlyClassificationInput } from '../appOnly/AppOnlyQuestClassifier'
-import { AppOnlyDecision, AppOnlyPolicy, ManualQuestRecord, redactAccountKey } from '../appOnly/AppOnlyTypes'
+import {
+    AppOnlyDecision,
+    AppOnlyPolicy,
+    AppOnlyVerificationResult,
+    ManualQuestRecord,
+    redactAccountKey
+} from '../appOnly/AppOnlyTypes'
+import { resolveAppOnlyPolicy } from '../appOnly/AppOnlyPolicy'
 import { logEmitter } from '../../../util/DashboardServer'
 
 export interface WindowsAppRewardResult {
@@ -18,8 +25,8 @@ export interface WindowsAppRewardResult {
  *
  * NOTE: Live DAPI POST and Playwright/WebView2 DOM spoofing have been completely removed.
  * This class now acts as a non-blocking observer that classifies App-Only quests,
- * applies configured policy (skip / notify / manual-handoff), maintains a negative-capability cache,
- * and verifies completion passively via server dashboard data.
+ * applies configured policy (skip / notify / manual-handoff), maintains a process-local
+ * in-memory negative-capability cache, and verifies completion passively via server dashboard data.
  */
 export class WindowsAppRewards extends Workers {
     private observer: AppOnlyQuestObserver
@@ -32,6 +39,50 @@ export class WindowsAppRewards extends Workers {
     }
 
     /**
+     * Passively verifies any pending manual quests against current server-rendered dashboard data.
+     * Guaranteed non-blocking and safe.
+     */
+    public async verifyExistingManualQuests(data: DashboardData): Promise<AppOnlyVerificationResult[]> {
+        const rawEmail = this.bot.activeAccount?.email || 'unknown'
+        const safeAccountKey = redactAccountKey(rawEmail)
+
+        const rawPromos = this.extractAppOnlyPromotions(data)
+        const classificationInputs: AppOnlyClassificationInput[] = rawPromos.map((p: any) => ({
+            accountKey: safeAccountKey,
+            offerId: p.offerId || '',
+            title: p.title || '',
+            description: p.description || '',
+            destinationUrl: p.destinationUrl || '',
+            expectedPoints: Number(p.pointProgressMax ?? p.pointProgress ?? 10),
+            complete: p.complete,
+            pointProgress: p.pointProgress,
+            pointProgressMax: p.pointProgressMax,
+            isLocked: p.isLocked,
+            attributes: p.attributes,
+            exclusiveLockedFeature: p.exclusiveLockedFeature,
+            exclusiveLockedFeatureStatus: p.exclusiveLockedFeatureStatus,
+            exclusiveLockedFeatureCategory: p.exclusiveLockedFeatureCategory,
+            promotionType: p.promotionType,
+            promotionSubtype: p.promotionSubtype
+        }))
+
+        try {
+            const currentPoints = Number(this.bot.userData?.currentPoints ?? 0)
+            return await this.verifier.verify(classificationInputs, {
+                accountKey: safeAccountKey,
+                currentBalance: currentPoints,
+                logger: {
+                    info: msg => this.bot.logger.info(this.bot.isMobile, 'APP-ONLY-VERIFY', msg),
+                    warn: msg => this.bot.logger.warn(this.bot.isMobile, 'APP-ONLY-VERIFY', msg),
+                    debug: msg => this.bot.logger.debug(this.bot.isMobile, 'APP-ONLY-VERIFY', msg)
+                }
+            })
+        } catch {
+            return []
+        }
+    }
+
+    /**
      * Backward-compatible entry point for observing App-Only quests.
      * Guaranteed non-blocking and safe for parallel searching.
      */
@@ -39,17 +90,24 @@ export class WindowsAppRewards extends Workers {
         const rawEmail = this.bot.activeAccount?.email || 'unknown'
         const safeAccountKey = redactAccountKey(rawEmail)
 
+        // Explicit policy resolution: account-override -> global-default -> fallback ('skip')
+        const accountPolicy = (this.bot.activeAccount as any)?.appOnlyPolicy as AppOnlyPolicy | undefined
+        const globalPolicy = this.bot.config.appOnlyRewards?.defaultPolicy as AppOnlyPolicy | undefined
+        const resolved = resolveAppOnlyPolicy(accountPolicy, globalPolicy)
+        const effectivePolicy = resolved.policy
+        const cacheTtlHours = this.bot.config.appOnlyRewards?.cacheTtlHours ?? 24
+
+        this.bot.logger.info(
+            this.bot.isMobile,
+            'APP-ONLY-CONFIG',
+            `policy=${resolved.policy} source=${resolved.source}`
+        )
+
         this.bot.logger.debug(
             this.bot.isMobile,
             'APP-ONLY',
             `[WINDOWS-APP] Processing App-Only quest observer for: ${safeAccountKey}`
         )
-
-        // Determine effective policy: per-account override > global config > default 'skip'
-        const accountPolicy = (this.bot.activeAccount as any)?.appOnlyPolicy as AppOnlyPolicy | undefined
-        const globalPolicy = this.bot.config.appOnlyRewards?.defaultPolicy as AppOnlyPolicy | undefined
-        const effectivePolicy: AppOnlyPolicy = accountPolicy || globalPolicy || 'skip'
-        const cacheTtlHours = this.bot.config.appOnlyRewards?.cacheTtlHours ?? 24
 
         // 1. Extract promotions from dashboard
         let rawPromos = this.extractAppOnlyPromotions(data)

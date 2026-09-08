@@ -119,6 +119,13 @@ export function registerIpConfirmCallback(callback: () => void) {
     onIpConfirmCommand = callback
 }
 
+export type ManualQuestProvider = () => Record<string, any[]>
+let manualQuestProvider: ManualQuestProvider | null = null
+
+export function registerManualQuestProvider(provider: ManualQuestProvider) {
+    manualQuestProvider = provider
+}
+
 const htmlPage = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -793,6 +800,11 @@ export class DashboardServer {
                     if (url === '/api/status') {
                         res.writeHead(200, { 'Content-Type': 'application/json' })
                         let responseData = { ...dashboardState }
+                        if (manualQuestProvider) {
+                            try {
+                                responseData.manualQuests = manualQuestProvider()
+                            } catch {}
+                        }
                         if (Database.getInstance().getIsConnected()) {
                             try {
                                 const dbAccounts = await Database.getInstance().fetchAccountsSummary()

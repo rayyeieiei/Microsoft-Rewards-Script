@@ -10,7 +10,11 @@ export class UrlReward extends Workers {
 
     public async doUrlReward(promotion: BasePromotion, page: Page, punchCard?: PunchCard) {
         this.oldBalance = Number(this.bot.userData.currentPoints ?? 0)
-        this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Processing Activity: "${promotion.title}" (Points: +${promotion.pointProgressMax})`)
+        this.bot.logger.info(
+            this.bot.isMobile,
+            'URL-REWARD',
+            `Processing Activity: "${promotion.title}" (Points: +${promotion.pointProgressMax})`
+        )
 
         try {
             let targetUrl = (promotion.destinationUrl || '').trim()
@@ -18,9 +22,10 @@ export class UrlReward extends Workers {
             // 1. Coba cari kartu di dashboard untuk mengambil URL terlengkap & trigger event klik
             try {
                 const currentUrl = page.url().toLowerCase()
-                const isDailySet = (promotion.offerId || '').toLowerCase().includes('dailyset') ||
-                                   (promotion.offerId || '').toLowerCase().includes('child') ||
-                                   (promotion.name || '').toLowerCase().includes('dailyset')
+                const isDailySet =
+                    (promotion.offerId || '').toLowerCase().includes('dailyset') ||
+                    (promotion.offerId || '').toLowerCase().includes('child') ||
+                    (promotion.name || '').toLowerCase().includes('dailyset')
 
                 let targetDashboard = isDailySet ? 'https://rewards.bing.com' : 'https://rewards.bing.com/earn'
                 if (punchCard && punchCard.parentPromotion?.destinationUrl) {
@@ -28,18 +33,31 @@ export class UrlReward extends Workers {
                 }
 
                 if (isDailySet) {
-                    if (!currentUrl.endsWith('rewards.bing.com/') && !currentUrl.endsWith('rewards.bing.com') && !currentUrl.includes('/dashboard')) {
-                        await page.goto('https://rewards.bing.com', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
+                    if (
+                        !currentUrl.endsWith('rewards.bing.com/') &&
+                        !currentUrl.endsWith('rewards.bing.com') &&
+                        !currentUrl.includes('/dashboard')
+                    ) {
+                        await page
+                            .goto('https://rewards.bing.com', { waitUntil: 'domcontentloaded', timeout: 15000 })
+                            .catch(() => {})
                         await this.bot.utils.wait(1500)
                     }
                 } else {
                     if (!punchCard) {
                         if (!currentUrl.includes('/earn')) {
-                            await page.goto('https://rewards.bing.com/earn', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
+                            await page
+                                .goto('https://rewards.bing.com/earn', {
+                                    waitUntil: 'domcontentloaded',
+                                    timeout: 15000
+                                })
+                                .catch(() => {})
                             await this.bot.utils.wait(1500)
                         }
                     } else if (!currentUrl.includes('rewards.bing.com')) {
-                        await page.goto(targetDashboard, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
+                        await page
+                            .goto(targetDashboard, { waitUntil: 'domcontentloaded', timeout: 15000 })
+                            .catch(() => {})
                         await this.bot.utils.wait(1500)
                     }
                 }
@@ -74,23 +92,36 @@ export class UrlReward extends Workers {
                 for (const sel of selectors) {
                     const el = page.locator(sel).first()
                     if (await el.isVisible().catch(() => false)) {
-                        const statusInfo = await el.evaluate((node: HTMLElement) => {
-                            const txt = (node.innerText || '').toLowerCase()
-                            const hasCheckmark = node.querySelector('.mee-icon-CheckMark, [data-icon-name="CheckMark"], .c-icon-check, .complete-check, svg[aria-label*="Complete"]') !== null
-                            const isCompleted = hasCheckmark ||
-                                                node.getAttribute('aria-checked') === 'true' ||
-                                                node.classList.contains('completed') ||
-                                                node.classList.contains('complete') ||
-                                                txt.includes('completed') ||
-                                                txt.includes('selesai')
-                            const href = node.getAttribute('href') || (node.querySelector('a') ? node.querySelector('a')?.getAttribute('href') : null)
-                            return { isCompleted, href }
-                        }).catch(() => ({ isCompleted: false, href: null }))
+                        const statusInfo = await el
+                            .evaluate((node: HTMLElement) => {
+                                const txt = (node.innerText || '').toLowerCase()
+                                const hasCheckmark =
+                                    node.querySelector(
+                                        '.mee-icon-CheckMark, [data-icon-name="CheckMark"], .c-icon-check, .complete-check, svg[aria-label*="Complete"]'
+                                    ) !== null
+                                const isCompleted =
+                                    hasCheckmark ||
+                                    node.getAttribute('aria-checked') === 'true' ||
+                                    node.classList.contains('completed') ||
+                                    node.classList.contains('complete') ||
+                                    txt.includes('completed') ||
+                                    txt.includes('selesai')
+                                const href =
+                                    node.getAttribute('href') ||
+                                    (node.querySelector('a') ? node.querySelector('a')?.getAttribute('href') : null)
+                                return { isCompleted, href }
+                            })
+                            .catch(() => ({ isCompleted: false, href: null }))
 
                         if (statusInfo.isCompleted) {
-                            this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Card "${promotion.title}" is already completed!`)
+                            this.bot.logger.info(
+                                this.bot.isMobile,
+                                'URL-REWARD',
+                                `Card "${promotion.title}" is already completed!`
+                            )
                             if (promotion.offerId) this.bot.workers.completedOffersInSession.add(promotion.offerId)
-                            if (promotion.title) this.bot.workers.completedOffersInSession.add(promotion.title.toLowerCase().trim())
+                            if (promotion.title)
+                                this.bot.workers.completedOffersInSession.add(promotion.title.toLowerCase().trim())
                             return
                         }
 
@@ -99,12 +130,21 @@ export class UrlReward extends Workers {
                         }
 
                         // Trigger click di dashboard
-                        await el.evaluate((node: HTMLElement) => {
-                            node.click()
-                            node.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
-                        }).catch(() => {})
-                        
-                        this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Dashboard Tile Triggered: "${promotion.title}"`, 'green')
+                        await el
+                            .evaluate((node: HTMLElement) => {
+                                node.click()
+                                node.dispatchEvent(
+                                    new MouseEvent('click', { bubbles: true, cancelable: true, view: window })
+                                )
+                            })
+                            .catch(() => {})
+
+                        this.bot.logger.info(
+                            this.bot.isMobile,
+                            'URL-REWARD',
+                            `Dashboard Tile Triggered: "${promotion.title}"`,
+                            'green'
+                        )
                         break
                     }
                 }
@@ -112,29 +152,45 @@ export class UrlReward extends Workers {
 
             // 2. Kunjungi halaman pencarian / artikel tujuan di tab baru untuk trigger telemetri pencarian
             if (!targetUrl || targetUrl === '' || targetUrl.toLowerCase().endsWith('rewards.bing.com/dashboard')) {
-                targetUrl = promotion.destinationUrl || `https://www.bing.com/search?q=${encodeURIComponent(promotion.title)}`
+                targetUrl =
+                    promotion.destinationUrl || `https://www.bing.com/search?q=${encodeURIComponent(promotion.title)}`
             }
 
             this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Opening Activity URL: "${promotion.title}"`)
             const tab = await page.context().newPage()
 
             try {
-                await tab.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 25000, referer: 'https://rewards.bing.com/' }).catch(() => {})
+                await tab
+                    .goto(targetUrl, {
+                        waitUntil: 'domcontentloaded',
+                        timeout: 25000,
+                        referer: 'https://rewards.bing.com/'
+                    })
+                    .catch(() => {})
                 await this.bot.utils.wait(2000)
 
                 // Selesaikan kuis / poll / trivia interaktif jika ada di halaman
                 for (let q = 0; q < 8; q++) {
-                    const startQuizBtn = tab.locator('#rqStartQuiz, #rqStartQuizToken, input[type="button"][value*="Start"], button:has-text("Start"), div[role="button"]:has-text("Start")').first()
+                    const startQuizBtn = tab
+                        .locator(
+                            '#rqStartQuiz, #rqStartQuizToken, input[type="button"][value*="Start"], button:has-text("Start"), div[role="button"]:has-text("Start")'
+                        )
+                        .first()
                     if (await startQuizBtn.isVisible().catch(() => false)) {
                         await startQuizBtn.click({ force: true }).catch(() => {})
                         await this.bot.utils.wait(2000)
                     }
 
-                    const quizOptions = tab.locator('.btOption, #btoption0, #btoption1, .rqOptions, .wk_Option, [role="radio"], button.optionBtn, .b_ans, .bt_poll, input[type="radio"], div[class*="option"], div[id*="choice"], .rqOption, .b_cards')
+                    const quizOptions = tab.locator(
+                        '.btOption, #btoption0, #btoption1, .rqOptions, .wk_Option, [role="radio"], button.optionBtn, .b_ans, .bt_poll, input[type="radio"], div[class*="option"], div[id*="choice"], .rqOption, .b_cards'
+                    )
                     const optCount = await quizOptions.count().catch(() => 0)
                     if (optCount > 0) {
                         const randIdx = Math.floor(Math.random() * Math.min(optCount, 4))
-                        await quizOptions.nth(randIdx).click({ force: true }).catch(() => {})
+                        await quizOptions
+                            .nth(randIdx)
+                            .click({ force: true })
+                            .catch(() => {})
                         await this.bot.utils.wait(2500)
                     } else {
                         break
@@ -158,7 +214,11 @@ export class UrlReward extends Workers {
                 for (const actionSel of actionButtonSelectors) {
                     const actBtn = tab.locator(actionSel).first()
                     if (await actBtn.isVisible().catch(() => false)) {
-                        this.bot.logger.debug(this.bot.isMobile, 'URL-REWARD', `Triggering punchcard action button: ${actionSel}`)
+                        this.bot.logger.debug(
+                            this.bot.isMobile,
+                            'URL-REWARD',
+                            `Triggering punchcard action button: ${actionSel}`
+                        )
                         await actBtn.click({ force: true }).catch(() => {})
                         await this.bot.utils.wait(2000)
                         break
@@ -167,20 +227,25 @@ export class UrlReward extends Workers {
 
                 // Simulasi interaksi scroll natural & human-like movement
                 this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Simulating interaction & safe scroll...`)
-                await tab.evaluate(() => {
-                    window.scrollBy({ top: 350, behavior: 'smooth' })
-                }).catch(() => {})
+                await tab
+                    .evaluate(() => {
+                        window.scrollBy({ top: 350, behavior: 'smooth' })
+                    })
+                    .catch(() => {})
                 await this.bot.utils.wait(1800)
 
-                await tab.evaluate(() => {
-                    window.scrollBy({ top: -150, behavior: 'smooth' })
-                }).catch(() => {})
+                await tab
+                    .evaluate(() => {
+                        window.scrollBy({ top: -150, behavior: 'smooth' })
+                    })
+                    .catch(() => {})
                 await this.bot.utils.wait(1200)
 
                 // Jeda tunggu aman telemetri (/fd/ls/ & bat.bing.com) - 5-7 detik jika punchcard
-                const dwellTime = punchCard ? this.bot.utils.randomDelay(5000, 7000) : this.bot.utils.randomDelay(3500, 5000)
+                const dwellTime = punchCard
+                    ? this.bot.utils.randomDelay(5000, 7000)
+                    : this.bot.utils.randomDelay(3500, 5000)
                 await this.bot.utils.wait(dwellTime)
-
             } finally {
                 await tab.close().catch(() => {})
             }
@@ -188,9 +253,30 @@ export class UrlReward extends Workers {
             // 3. Secondary API reinforcement jika token/hash tersedia
             if (promotion.hash && this.bot.requestToken) {
                 try {
-                    this.cookieHeader = this.bot.browser.func.buildCookieHeader(this.bot.isMobile ? this.bot.cookies.mobile : this.bot.cookies.desktop, ['bing.com', 'live.com', 'microsoftonline.com'])
-                    const formData = new URLSearchParams({ id: promotion.offerId, hash: promotion.hash, timeZone: this.bot.userData.timezoneOffset || '60', activityAmount: '1', __RequestVerificationToken: this.bot.requestToken })
-                    await this.bot.axios.request({ url: 'https://rewards.bing.com/api/reportactivity?X-Requested-With=XMLHttpRequest', method: 'POST', timeout: 5000, headers: { ...(this.bot.fingerprint?.headers ?? {}), Cookie: this.cookieHeader, Referer: 'https://rewards.bing.com/' }, data: formData }).catch(() => {})
+                    this.cookieHeader = this.bot.browser.func.buildCookieHeader(
+                        this.bot.isMobile ? this.bot.cookies.mobile : this.bot.cookies.desktop,
+                        ['bing.com', 'live.com', 'microsoftonline.com']
+                    )
+                    const formData = new URLSearchParams({
+                        id: promotion.offerId,
+                        hash: promotion.hash,
+                        timeZone: this.bot.userData.timezoneOffset || '60',
+                        activityAmount: '1',
+                        __RequestVerificationToken: this.bot.requestToken
+                    })
+                    await this.bot.axios
+                        .request({
+                            url: 'https://rewards.bing.com/api/reportactivity?X-Requested-With=XMLHttpRequest',
+                            method: 'POST',
+                            timeout: 5000,
+                            headers: {
+                                ...(this.bot.fingerprint?.headers ?? {}),
+                                Cookie: this.cookieHeader,
+                                Referer: 'https://rewards.bing.com/'
+                            },
+                            data: formData
+                        })
+                        .catch(() => {})
                 } catch {}
             }
 
@@ -210,7 +296,10 @@ export class UrlReward extends Workers {
             }
 
             const offerIdLower = (promotion.offerId || '').toLowerCase()
-            const isPunchCard = Boolean(punchCard) || (promotion.promotionType ?? '').toLowerCase() === 'punchcard' || offerIdLower.includes('punchcard')
+            const isPunchCard =
+                Boolean(punchCard) ||
+                (promotion.promotionType ?? '').toLowerCase() === 'punchcard' ||
+                offerIdLower.includes('punchcard')
             let livePoints = await this.bot.browser.func.getCurrentPoints(page)
             let realServerDelta = Math.max(0, livePoints - this.oldBalance)
 
@@ -234,32 +323,80 @@ export class UrlReward extends Workers {
                 finalBalance = this.oldBalance
             }
 
-            this.updatePoints(finalBalance, promotion.offerId, promotion.title, calculatedDelta, isPunchCard)
-
+            this.updatePoints(
+                finalBalance,
+                promotion.offerId,
+                promotion.title,
+                calculatedDelta,
+                isPunchCard,
+                promotion.pointProgressMax
+            )
         } catch (err: any) {
             this.bot.logger.error(this.bot.isMobile, 'URL-REWARD', `Process failed | offerId=${promotion.offerId}`)
         }
     }
 
-    private updatePoints(newBalance: number, offerId: string, title?: string, pointsEarned?: number, isPunchCard?: boolean) {
-        this.gainedPoints = pointsEarned ?? Math.max(0, newBalance - this.oldBalance)
+    private updatePoints(
+        newBalance: number,
+        offerId: string,
+        title?: string,
+        pointsEarned?: number,
+        isPunchCard?: boolean,
+        advertisedMax?: number
+    ) {
+        const advertisedPoints = Number(advertisedMax ?? 10)
+        const observedBalanceDelta = Math.max(0, newBalance - this.oldBalance)
         const displayTitle = title ? `"${title}"` : `offerId=${offerId}`
-        const isDailySet = (offerId || '').toLowerCase().includes('dailyset') || (title || '').toLowerCase().includes('daily set')
-        const tag = isPunchCard ? 'PUNCHCARD' : (isDailySet ? 'DAILY-SET' : 'KEEP-EARNING')
+        const isDailySet =
+            (offerId || '').toLowerCase().includes('dailyset') || (title || '').toLowerCase().includes('daily set')
+        const tag = isPunchCard ? 'PUNCHCARD' : isDailySet ? 'DAILY-SET' : 'KEEP-EARNING'
 
         this.bot.userData.currentPoints = newBalance
-        this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + this.gainedPoints
-        if (offerId) this.bot.workers.completedOffersInSession.add(offerId)
-        if (title) this.bot.workers.completedOffersInSession.add(title.toLowerCase().trim())
+
+        // Strict attribution: if delta != advertised, attributedPoints is unknown (null/0 card points)
+        if (typeof pointsEarned === 'number' && pointsEarned > 0) {
+            this.gainedPoints = pointsEarned
+        } else if (observedBalanceDelta === advertisedPoints && advertisedPoints > 0) {
+            this.gainedPoints = advertisedPoints
+        } else {
+            this.gainedPoints = 0
+            if (advertisedPoints > 0 && observedBalanceDelta > 0 && observedBalanceDelta !== advertisedPoints) {
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    tag,
+                    `advertisedPoints=${advertisedPoints} observedBalanceDelta=${observedBalanceDelta} attributedPoints=unknown`
+                )
+            }
+        }
 
         if (this.gainedPoints > 0) {
-            void Database.getInstance().recordActivity(this.bot.activeAccount?.email || '', isDailySet ? 'DAILY_SET' : 'PROMOTIONS', this.gainedPoints)
-            this.bot.logger.info(this.bot.isMobile, tag, `Completed: ${displayTitle} | gainedPoints=+${this.gainedPoints} | oldBalance=${this.oldBalance} | newBalance=${newBalance}`, 'green')
+            this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + this.gainedPoints
+            void Database.getInstance().recordActivity(
+                this.bot.activeAccount?.email || '',
+                isDailySet ? 'DAILY_SET' : 'PROMOTIONS',
+                this.gainedPoints
+            )
+            this.bot.logger.info(
+                this.bot.isMobile,
+                tag,
+                `Completed: ${displayTitle} | gainedPoints=+${this.gainedPoints} | oldBalance=${this.oldBalance} | newBalance=${newBalance}`,
+                'green'
+            )
         } else {
             if (isPunchCard) {
-                this.bot.logger.info(this.bot.isMobile, tag, `Step Completed: ${displayTitle} | gainedPoints=+0 (progress in multi-day card) | currentBalance=${newBalance}`, 'green')
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    tag,
+                    `Step Completed: ${displayTitle} | gainedPoints=+0 (progress in multi-day card) | currentBalance=${newBalance}`,
+                    'green'
+                )
             } else {
-                this.bot.logger.info(this.bot.isMobile, tag, `Activity Checked: ${displayTitle} | gainedPoints=+0 (server balance unchanged) | currentBalance=${newBalance}`, 'yellow')
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    tag,
+                    `Activity Checked: ${displayTitle} | gainedPoints=+0 (server balance unchanged or unverified) | currentBalance=${newBalance}`,
+                    'yellow'
+                )
             }
         }
     }

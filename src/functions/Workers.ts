@@ -1,13 +1,9 @@
 import type { Page } from 'patchright'
 import type { MicrosoftRewardsBot } from '../index'
-import type {
-    DashboardData,
-    PunchCard,
-    BasePromotion,
-    FindClippyPromotion
-} from '../interface/DashboardData'
+import type { DashboardData, PunchCard, BasePromotion, FindClippyPromotion } from '../interface/DashboardData'
 import type { AppDashboardData } from '../interface/AppDashBoardData'
 import { Database } from '../util/Database'
+import { ActivityExecutionResult, ActivityBatchSummary, PunchCardTaskCounts } from './activities/ActivitySemantics'
 
 export class Workers {
     public bot: MicrosoftRewardsBot
@@ -22,8 +18,14 @@ export class Workers {
         try {
             const currentUrl = page.url().toLowerCase()
             if (!currentUrl.includes('rewards.bing.com')) {
-                this.bot.logger.debug(this.bot.isMobile, 'DASHBOARD', 'Navigating to Rewards dashboard to check pending claims...')
-                await page.goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
+                this.bot.logger.debug(
+                    this.bot.isMobile,
+                    'DASHBOARD',
+                    'Navigating to Rewards dashboard to check pending claims...'
+                )
+                await page
+                    .goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 15000 })
+                    .catch(() => {})
                 await this.bot.utils.wait(2500)
             }
 
@@ -35,21 +37,32 @@ export class Workers {
             )
 
             // 1. Deteksi spesifik kartu "Ready to claim" (Hindari kartu "Available points" dan bagian bawah)
-            const cardInfo = await page.evaluate(() => {
-                const allElements = Array.from(document.querySelectorAll('div, section, .card, .p-card, .c-card, [class*="card"]'))
-                for (const el of allElements) {
-                    const txt = (el.textContent || '').trim()
-                    if ((txt.includes('Ready to claim') || txt.includes('Siap diklaim')) && !txt.includes('Available points') && txt.length < 150) {
-                        const m = txt.match(/(\d+)/)
-                        const pts = m && m[1] ? parseInt(m[1], 10) : 0
-                        if (pts > 0 && pts < 5000) {
-                            return { hasReadyCard: true, hasPanelOpen: false, pts }
+            const cardInfo = await page
+                .evaluate(() => {
+                    const allElements = Array.from(
+                        document.querySelectorAll('div, section, .card, .p-card, .c-card, [class*="card"]')
+                    )
+                    for (const el of allElements) {
+                        const txt = (el.textContent || '').trim()
+                        if (
+                            (txt.includes('Ready to claim') || txt.includes('Siap diklaim')) &&
+                            !txt.includes('Available points') &&
+                            txt.length < 150
+                        ) {
+                            const m = txt.match(/(\d+)/)
+                            const pts = m && m[1] ? parseInt(m[1], 10) : 0
+                            if (pts > 0 && pts < 5000) {
+                                return { hasReadyCard: true, hasPanelOpen: false, pts }
+                            }
                         }
                     }
-                }
-                const hasPanelOpen = document.body ? (document.body.innerText.includes('First search of the day') || document.body.innerText.includes('Claim points')) : false
-                return { hasReadyCard: false, hasPanelOpen, pts: 0 }
-            }).catch(() => ({ hasReadyCard: false, hasPanelOpen: false, pts: 0 }))
+                    const hasPanelOpen = document.body
+                        ? document.body.innerText.includes('First search of the day') ||
+                          document.body.innerText.includes('Claim points')
+                        : false
+                    return { hasReadyCard: false, hasPanelOpen, pts: 0 }
+                })
+                .catch(() => ({ hasReadyCard: false, hasPanelOpen: false, pts: 0 }))
 
             if (!cardInfo.hasReadyCard && !cardInfo.hasPanelOpen) {
                 this.bot.logger.info(
@@ -69,13 +82,22 @@ export class Workers {
             )
 
             // 2. Buka Panel Slide "Claim points" JIKA belum terbuka
-            const panelHeader = page.locator('text="Claim points", text="First search of the day", button:has-text("Claim points")').first()
+            const panelHeader = page
+                .locator('text="Claim points", text="First search of the day", button:has-text("Claim points")')
+                .first()
             const isPanelAlreadyOpen = await panelHeader.isVisible().catch(() => false)
 
             if (!isPanelAlreadyOpen) {
                 // Targetkan secara terisolasi kartu "Ready to claim" (eksklusi Available points / Redeem)
-                const readyCard = page.locator('div, section, .card, .p-card, .c-card, [class*="card"]').filter({ hasText: 'Ready to claim' }).filter({ hasNotText: 'Available points' }).first()
-                const claimLink = readyCard.locator('a, button, [role="button"], span').filter({ hasText: /^Claim(\s*>)?$/i }).first()
+                const readyCard = page
+                    .locator('div, section, .card, .p-card, .c-card, [class*="card"]')
+                    .filter({ hasText: 'Ready to claim' })
+                    .filter({ hasNotText: 'Available points' })
+                    .first()
+                const claimLink = readyCard
+                    .locator('a, button, [role="button"], span')
+                    .filter({ hasText: /^Claim(\s*>)?$/i })
+                    .first()
 
                 if (await claimLink.isVisible().catch(() => false)) {
                     await claimLink.scrollIntoViewIfNeeded().catch(() => {})
@@ -84,18 +106,28 @@ export class Workers {
                     await readyCard.scrollIntoViewIfNeeded().catch(() => {})
                     await readyCard.click({ force: true }).catch(() => {})
                 } else {
-                    await page.evaluate(() => {
-                        const allElements = Array.from(document.querySelectorAll('div, section, .card, .p-card, .c-card, [class*="card"]'))
-                        for (const el of allElements) {
-                            const txt = (el.textContent || '').trim()
-                            if ((txt.includes('Ready to claim') || txt.includes('Siap diklaim')) && !txt.includes('Available points') && txt.length < 150) {
-                                const target = (el.querySelector('a, button, [role="button"]') || el) as HTMLElement
-                                target.click()
-                                target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
-                                break
+                    await page
+                        .evaluate(() => {
+                            const allElements = Array.from(
+                                document.querySelectorAll('div, section, .card, .p-card, .c-card, [class*="card"]')
+                            )
+                            for (const el of allElements) {
+                                const txt = (el.textContent || '').trim()
+                                if (
+                                    (txt.includes('Ready to claim') || txt.includes('Siap diklaim')) &&
+                                    !txt.includes('Available points') &&
+                                    txt.length < 150
+                                ) {
+                                    const target = (el.querySelector('a, button, [role="button"]') || el) as HTMLElement
+                                    target.click()
+                                    target.dispatchEvent(
+                                        new MouseEvent('click', { bubbles: true, cancelable: true, view: window })
+                                    )
+                                    break
+                                }
                             }
-                        }
-                    }).catch(() => {})
+                        })
+                        .catch(() => {})
                 }
 
                 await panelHeader.waitFor({ state: 'visible', timeout: 4000 }).catch(() => {})
@@ -103,34 +135,58 @@ export class Workers {
             }
 
             // 3. TEKAN TOMBOL BESAR [ Claim points ] DI DALAM PANEL (Sesuai Screenshot media_1788187521263.png)
-            this.bot.logger.info(this.bot.isMobile, 'DASHBOARD', `Mengeksekusi tombol "Claim points" di dalam panel...`, 'green')
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'DASHBOARD',
+                `Mengeksekusi tombol "Claim points" di dalam panel...`,
+                'green'
+            )
 
             // a. Native Playwright Click pada tombol Claim points
-            const modalClaimButton = page.locator('button:has-text("Claim points"), [role="button"]:has-text("Claim points"), button:has-text("Klaim poin"), div[role="button"]:has-text("Claim points")').first()
+            const modalClaimButton = page
+                .locator(
+                    'button:has-text("Claim points"), [role="button"]:has-text("Claim points"), button:has-text("Klaim poin"), div[role="button"]:has-text("Claim points")'
+                )
+                .first()
             if (await modalClaimButton.isVisible().catch(() => false)) {
                 await modalClaimButton.scrollIntoViewIfNeeded().catch(() => {})
                 await modalClaimButton.click({ force: true, timeout: 5000 }).catch(() => {})
             }
 
             // b. Fallback DOM Click Event dengan bounding rect nyata
-            await page.evaluate(() => {
-                const btns = Array.from(document.querySelectorAll('button, a, div[role="button"]'))
-                for (const b of btns) {
-                    const txt = ((b as HTMLElement).innerText || b.textContent || '').trim().toLowerCase()
-                    if (txt === 'claim points' || txt === 'klaim poin' || txt === 'claim all' || txt === 'klaim semua') {
-                        (b as HTMLElement).click()
-                        b.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }))
-                        b.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }))
-                        b.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
+            await page
+                .evaluate(() => {
+                    const btns = Array.from(document.querySelectorAll('button, a, div[role="button"]'))
+                    for (const b of btns) {
+                        const txt = ((b as HTMLElement).innerText || b.textContent || '').trim().toLowerCase()
+                        if (
+                            txt === 'claim points' ||
+                            txt === 'klaim poin' ||
+                            txt === 'claim all' ||
+                            txt === 'klaim semua'
+                        ) {
+                            ;(b as HTMLElement).click()
+                            b.dispatchEvent(
+                                new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window })
+                            )
+                            b.dispatchEvent(
+                                new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window })
+                            )
+                            b.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
+                        }
                     }
-                }
-            }).catch(() => {})
+                })
+                .catch(() => {})
 
             await this.bot.utils.wait(2500)
 
             // 4. Tutup Panel Modal (Klik tombol Close X)
             try {
-                const closeBtn = page.locator('button[aria-label*="close" i], button[aria-label*="tutup" i], button.ms-Panel-closeButton, [data-icon-name="Cancel"], [aria-label="Close"]').first()
+                const closeBtn = page
+                    .locator(
+                        'button[aria-label*="close" i], button[aria-label*="tutup" i], button.ms-Panel-closeButton, [data-icon-name="Cancel"], [aria-label="Close"]'
+                    )
+                    .first()
                 if (await closeBtn.isVisible().catch(() => false)) {
                     await closeBtn.click({ force: true }).catch(() => {})
                 }
@@ -139,19 +195,27 @@ export class Workers {
             await this.bot.utils.wait(1500)
 
             // 5. RE-CHECK VERIFIKASI AKHIR: Pastikan koin di dashboard sudah bersih
-            const finalVerify = await page.evaluate(() => {
-                const allElements = Array.from(document.querySelectorAll('div, section, .card, .p-card, .c-card, [class*="card"]'))
-                for (const el of allElements) {
-                    const txt = (el.textContent || '').trim()
-                    if ((txt.includes('Ready to claim') || txt.includes('Siap diklaim')) && !txt.includes('Available points') && txt.length < 150) {
-                        const m = txt.match(/(\d+)/)
-                        if (m && m[1] && parseInt(m[1], 10) > 0) {
-                            return { isClean: false, remaining: parseInt(m[1], 10) }
+            const finalVerify = await page
+                .evaluate(() => {
+                    const allElements = Array.from(
+                        document.querySelectorAll('div, section, .card, .p-card, .c-card, [class*="card"]')
+                    )
+                    for (const el of allElements) {
+                        const txt = (el.textContent || '').trim()
+                        if (
+                            (txt.includes('Ready to claim') || txt.includes('Siap diklaim')) &&
+                            !txt.includes('Available points') &&
+                            txt.length < 150
+                        ) {
+                            const m = txt.match(/(\d+)/)
+                            if (m && m[1] && parseInt(m[1], 10) > 0) {
+                                return { isClean: false, remaining: parseInt(m[1], 10) }
+                            }
                         }
                     }
-                }
-                return { isClean: true }
-            }).catch(() => ({ isClean: true }))
+                    return { isClean: true }
+                })
+                .catch(() => ({ isClean: true }))
 
             // 6. Validasi Nyata Saldo (HANYA BERDASARKAN DELTA SERVER NYATA)
             const oldBalance = Number(this.bot.userData.currentPoints ?? 0)
@@ -167,7 +231,11 @@ export class Workers {
                     `${prefix}✅ Koin nyangkut sukses diamankan! | +${gainedPoints} points | newBalance=${this.bot.userData.currentPoints}`,
                     'green'
                 )
-                void Database.getInstance().recordActivity(this.bot.activeAccount?.email || '', 'CLAIM_PENDING_POINTS', gainedPoints)
+                void Database.getInstance().recordActivity(
+                    this.bot.activeAccount?.email || '',
+                    'CLAIM_PENDING_POINTS',
+                    gainedPoints
+                )
             } else if (finalVerify.isClean) {
                 this.bot.logger.info(
                     this.bot.isMobile,
@@ -186,11 +254,11 @@ export class Workers {
             this.bot.logger.debug(this.bot.isMobile, 'DASHBOARD', 'Pengecekan koin nyangkut selesai.')
         }
     }
-    
+
     public async doDailySet(data: DashboardData, page: Page) {
         // 1. Ambil dari seluruh tanggal di dailySetPromotions (API)
         const dailySetMapItems: BasePromotion[] = Object.values(data.dailySetPromotions ?? {}).flat() as BasePromotion[]
-        
+
         const fallbackPromos = [
             ...(data.promotionalItems ?? []),
             ...(data.morePromotions ?? []),
@@ -211,7 +279,7 @@ export class Workers {
             if (!x) return false
             const offerIdLower = (x.offerId ?? '').toLowerCase()
             if (offerIdLower.includes('locked')) return false
-            
+
             // Lewati jika tanggal DailySet bukan hari ini (kemarin kadaluarsa, besok terkunci)
             const dateMatch = (x.offerId ?? '').match(/DailySet_(\d{8})/i)
             if (dateMatch && dateMatch[1] && !validDates.has(dateMatch[1])) {
@@ -221,7 +289,8 @@ export class Workers {
         })
 
         let activitiesUncompleted = todayDailySetItems.filter(x => {
-            if (!x || x.complete || (x.pointProgressMax > 0 && (x.pointProgress ?? 0) >= x.pointProgressMax)) return false
+            if (!x || x.complete || (x.pointProgressMax > 0 && (x.pointProgress ?? 0) >= x.pointProgressMax))
+                return false
             return true
         })
 
@@ -241,82 +310,111 @@ export class Workers {
             try {
                 const currentUrl = page.url().toLowerCase()
                 if (!currentUrl.includes('rewards.bing.com')) {
-                    await page.goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
+                    await page
+                        .goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 15000 })
+                        .catch(() => {})
                     await this.bot.utils.wait(2000)
                 }
 
-                const liveDailySetCards: BasePromotion[] = await page.evaluate(() => {
-                    const results: any[] = []
-                    
-                    // 1. Cari elemen heading / teks "Daily set"
-                    const allElements = Array.from(document.querySelectorAll('*'))
-                    let dailySetSection: HTMLElement | null = null
-                    
-                    for (const el of allElements) {
-                        const directText = Array.from(el.childNodes)
-                            .filter(n => n.nodeType === Node.TEXT_NODE)
-                            .map(n => n.textContent?.trim())
-                            .join(' ')
-                            .toLowerCase()
-                        
-                        if (directText === 'daily set' || directText.startsWith('daily set')) {
-                            dailySetSection = (el.closest('section') || el.closest('[class*="section"]') || el.parentElement?.parentElement || el.parentElement) as HTMLElement
-                            break
+                const liveDailySetCards: BasePromotion[] = await page
+                    .evaluate(() => {
+                        const results: any[] = []
+
+                        // 1. Cari elemen heading / teks "Daily set"
+                        const allElements = Array.from(document.querySelectorAll('*'))
+                        let dailySetSection: HTMLElement | null = null
+
+                        for (const el of allElements) {
+                            const directText = Array.from(el.childNodes)
+                                .filter(n => n.nodeType === Node.TEXT_NODE)
+                                .map(n => n.textContent?.trim())
+                                .join(' ')
+                                .toLowerCase()
+
+                            if (directText === 'daily set' || directText.startsWith('daily set')) {
+                                dailySetSection = (el.closest('section') ||
+                                    el.closest('[class*="section"]') ||
+                                    el.parentElement?.parentElement ||
+                                    el.parentElement) as HTMLElement
+                                break
+                            }
                         }
-                    }
 
-                    if (!dailySetSection) {
-                        dailySetSection = document.querySelector('#dailyset, [data-bi-area*="DailySet"], .daily-set, [id*="daily-set"]') as HTMLElement
-                    }
-
-                    if (!dailySetSection) return results
-
-                    // 2. Ekstrak kartu-kartu di dalam section Daily Set
-                    const candidateCards = Array.from(dailySetSection.querySelectorAll('a, [role="button"], .c-card, .p-card, [class*="card"], div:has(> [class*="title"]), div:has(> [class*="heading"])'))
-                    
-                    const seenTitles = new Set<string>()
-
-                    for (const rawEl of candidateCards) {
-                        const el = rawEl as HTMLElement
-                        const txt = (el.innerText || el.textContent || '').trim()
-                        if (!txt) continue
-
-                        if (txt.toLowerCase().startsWith('daily set')) continue
-
-                        const titleEl = el.querySelector('h3, h4, h5, .title, .c-heading, [class*="title"], [class*="heading"]')
-                        const rawTitle = (titleEl?.textContent || el.getAttribute('aria-label') || '').trim()
-                        
-                        const lines = txt.split('\n').map(l => l.trim()).filter(Boolean)
-                        const title = rawTitle || lines[0] || ''
-
-                        if (!title || title.length > 60 || seenTitles.has(title.toLowerCase())) continue
-
-                        const href = el.getAttribute('href') || el.querySelector('a')?.getAttribute('href') || 'https://rewards.bing.com'
-                        
-                        const hasCheckmark = el.querySelector('.mee-icon-CheckMark, [data-icon-name="CheckMark"], .c-icon-check, .complete-check, svg[aria-label*="Complete"], [class*="check"]') !== null ||
-                                             el.getAttribute('aria-checked') === 'true' ||
-                                             el.classList.contains('completed') ||
-                                             txt.toLowerCase().includes('completed') ||
-                                             txt.toLowerCase().includes('selesai')
-
-                        const pointsMatch = txt.match(/\+(\d+)/)
-                        const points = pointsMatch && pointsMatch[1] ? parseInt(pointsMatch[1], 10) : 10
-
-                        if (!hasCheckmark && points > 0) {
-                            seenTitles.add(title.toLowerCase())
-                            results.push({
-                                title,
-                                destinationUrl: href.startsWith('http') ? href : 'https://rewards.bing.com',
-                                pointProgressMax: points,
-                                pointProgress: 0,
-                                complete: false,
-                                offerId: `dom_dailyset_${title.replace(/[^\w]/g, '_').toLowerCase()}`,
-                                promotionType: title.toLowerCase().includes('?') || txt.toLowerCase().includes('test your knowledge') || txt.toLowerCase().includes('quiz') ? 'quiz' : 'urlreward'
-                            })
+                        if (!dailySetSection) {
+                            dailySetSection = document.querySelector(
+                                '#dailyset, [data-bi-area*="DailySet"], .daily-set, [id*="daily-set"]'
+                            ) as HTMLElement
                         }
-                    }
-                    return results
-                }).catch(() => [])
+
+                        if (!dailySetSection) return results
+
+                        // 2. Ekstrak kartu-kartu di dalam section Daily Set
+                        const candidateCards = Array.from(
+                            dailySetSection.querySelectorAll(
+                                'a, [role="button"], .c-card, .p-card, [class*="card"], div:has(> [class*="title"]), div:has(> [class*="heading"])'
+                            )
+                        )
+
+                        const seenTitles = new Set<string>()
+
+                        for (const rawEl of candidateCards) {
+                            const el = rawEl as HTMLElement
+                            const txt = (el.innerText || el.textContent || '').trim()
+                            if (!txt) continue
+
+                            if (txt.toLowerCase().startsWith('daily set')) continue
+
+                            const titleEl = el.querySelector(
+                                'h3, h4, h5, .title, .c-heading, [class*="title"], [class*="heading"]'
+                            )
+                            const rawTitle = (titleEl?.textContent || el.getAttribute('aria-label') || '').trim()
+
+                            const lines = txt
+                                .split('\n')
+                                .map(l => l.trim())
+                                .filter(Boolean)
+                            const title = rawTitle || lines[0] || ''
+
+                            if (!title || title.length > 60 || seenTitles.has(title.toLowerCase())) continue
+
+                            const href =
+                                el.getAttribute('href') ||
+                                el.querySelector('a')?.getAttribute('href') ||
+                                'https://rewards.bing.com'
+
+                            const hasCheckmark =
+                                el.querySelector(
+                                    '.mee-icon-CheckMark, [data-icon-name="CheckMark"], .c-icon-check, .complete-check, svg[aria-label*="Complete"], [class*="check"]'
+                                ) !== null ||
+                                el.getAttribute('aria-checked') === 'true' ||
+                                el.classList.contains('completed') ||
+                                txt.toLowerCase().includes('completed') ||
+                                txt.toLowerCase().includes('selesai')
+
+                            const pointsMatch = txt.match(/\+(\d+)/)
+                            const points = pointsMatch && pointsMatch[1] ? parseInt(pointsMatch[1], 10) : 10
+
+                            if (!hasCheckmark && points > 0) {
+                                seenTitles.add(title.toLowerCase())
+                                results.push({
+                                    title,
+                                    destinationUrl: href.startsWith('http') ? href : 'https://rewards.bing.com',
+                                    pointProgressMax: points,
+                                    pointProgress: 0,
+                                    complete: false,
+                                    offerId: `dom_dailyset_${title.replace(/[^\w]/g, '_').toLowerCase()}`,
+                                    promotionType:
+                                        title.toLowerCase().includes('?') ||
+                                        txt.toLowerCase().includes('test your knowledge') ||
+                                        txt.toLowerCase().includes('quiz')
+                                            ? 'quiz'
+                                            : 'urlreward'
+                                })
+                            }
+                        }
+                        return results
+                    })
+                    .catch(() => [])
 
                 if (liveDailySetCards.length > 0) {
                     this.bot.logger.info(
@@ -339,18 +437,123 @@ export class Workers {
 
         if (activitiesUncompleted.length) {
             const startBalance = Number(this.bot.userData.currentPoints ?? 0)
-            this.bot.logger.info(this.bot.isMobile, 'DAILY-SET', `Started solving ${activitiesUncompleted.length} "Daily Set" items (All Valid Variants Checked) | currentPoints=${startBalance}`)
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'DAILY-SET',
+                `Started solving ${activitiesUncompleted.length} "Daily Set" items (All Valid Variants Checked) | currentPoints=${startBalance}`
+            )
+
+            // 1. Simpan execution result sementara per offerId
+            const executionMap = new Map<string, ActivityExecutionResult>()
+            for (const act of activitiesUncompleted) {
+                const key = act.offerId || act.title
+                executionMap.set(key, {
+                    offerId: act.offerId,
+                    title: act.title,
+                    status: 'pending',
+                    advertisedPoints: Number(act.pointProgressMax ?? 10),
+                    observedBalanceDelta: 0,
+                    attributedPoints: null,
+                    serverCompleted: false,
+                    completionEvidence: 'none'
+                })
+            }
+
+            // 2. Selesaikan batch seperti flow lama
             await this.solveActivities(activitiesUncompleted, page)
 
+            // 3. Ambil SATU server snapshot setelah batch
             await this.bot.utils.wait(2000)
-            const updatedBalance = await this.bot.browser.func.getCurrentPoints().catch(() => startBalance)
-            const gained = Math.max(0, updatedBalance - startBalance)
-            if (gained > 0) {
-                this.bot.userData.currentPoints = updatedBalance
-                this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gained
-                this.bot.logger.info(this.bot.isMobile, 'DAILY-SET', `🎉 All Daily Set items completed! | gainedPoints=+${gained} | oldBalance=${startBalance} | newBalance=${updatedBalance}`, 'green')
-            } else {
-                this.bot.logger.info(this.bot.isMobile, 'DAILY-SET', `All Daily Set items completed! | currentBalance=${updatedBalance}`)
+            const refreshedData: DashboardData | null = await this.bot.browser.func.getDashboardData().catch(() => null)
+            const updatedBalance =
+                refreshedData?.userStatus?.availablePoints ??
+                (await this.bot.browser.func.getCurrentPoints().catch(() => startBalance))
+            const observedBalanceDelta = Math.max(0, updatedBalance - startBalance)
+
+            // 4. Reconcile seluruh result berdasarkan exact offerId
+            const freshItems: BasePromotion[] = refreshedData?.dailySetPromotions
+                ? (Object.values(refreshedData.dailySetPromotions).flat() as BasePromotion[])
+                : []
+            const fallbackFresh: BasePromotion[] = refreshedData
+                ? ([...(refreshedData.promotionalItems ?? []), ...(refreshedData.morePromotions ?? [])].filter(x =>
+                      (x?.offerId ?? '').toLowerCase().includes('dailyset')
+                  ) as BasePromotion[])
+                : []
+            const allFreshDailySet = [...freshItems, ...fallbackFresh]
+
+            for (const [key, result] of executionMap.entries()) {
+                const freshMatch = allFreshDailySet.find(
+                    f =>
+                        f &&
+                        (f.offerId === result.offerId ||
+                            (f.title && f.title.toLowerCase().trim() === result.title.toLowerCase().trim()))
+                )
+                const isServerComplete = Boolean(
+                    freshMatch &&
+                    (freshMatch.complete === true ||
+                        (freshMatch.pointProgressMax > 0 &&
+                            (freshMatch.pointProgress ?? 0) >= freshMatch.pointProgressMax))
+                )
+
+                if (isServerComplete) {
+                    const attributed =
+                        observedBalanceDelta === result.advertisedPoints && result.advertisedPoints > 0
+                            ? result.advertisedPoints
+                            : null
+                    executionMap.set(key, {
+                        ...result,
+                        status: 'verified-complete',
+                        serverCompleted: true,
+                        completionEvidence: 'server-dashboard-state',
+                        observedBalanceDelta,
+                        attributedPoints: attributed
+                    })
+                    if (result.advertisedPoints > 0 && observedBalanceDelta !== result.advertisedPoints) {
+                        this.bot.logger.info(
+                            this.bot.isMobile,
+                            'DAILY-SET',
+                            `advertisedPoints=${result.advertisedPoints} observedBalanceDelta=${observedBalanceDelta} attributedPoints=unknown`
+                        )
+                    }
+                } else {
+                    executionMap.set(key, {
+                        ...result,
+                        status: 'processed-unverified',
+                        serverCompleted: false,
+                        completionEvidence: 'none',
+                        observedBalanceDelta,
+                        attributedPoints: null
+                    })
+                }
+            }
+
+            // 5. Buat summary dari hasil reconciliation
+            const allResults = Array.from(executionMap.values())
+            const summary: ActivityBatchSummary = {
+                total: allResults.length,
+                verifiedComplete: allResults.filter(r => r.status === 'verified-complete').length,
+                processedUnverified: allResults.filter(r => r.status === 'processed-unverified').length,
+                pending: allResults.filter(r => r.status === 'pending').length,
+                skipped: allResults.filter(r => r.status === 'skipped').length,
+                failed: allResults.filter(r => r.status === 'failed').length,
+                observedAccountBalanceDelta: observedBalanceDelta
+            }
+
+            this.bot.userData.currentPoints = updatedBalance
+
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'DAILY-SET',
+                `[DAILY-SET] Finished processing | total=${summary.total} verified=${summary.verifiedComplete} pending=${summary.pending} failed=${summary.failed} observedBalanceDelta=${summary.observedAccountBalanceDelta}`
+            )
+
+            if (summary.total > 0 && summary.verifiedComplete === summary.total) {
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'DAILY-SET',
+                    `🎉 All Daily Set items completed! | verified=${summary.verifiedComplete}/${summary.total} | observedBalanceDelta=+${observedBalanceDelta} | oldBalance=${startBalance} | newBalance=${updatedBalance}`,
+                    'green'
+                )
             }
         }
     }
@@ -378,11 +581,13 @@ export class Workers {
             ...((data.userInterests as any)?.promotions ?? [])
         ] as unknown as BasePromotion[]
 
-        const uniquePromos = [...new Map(
-            rawPromotions
-                .filter(p => Boolean(p && (p.offerId || p.title)))
-                .map(p => [p.offerId || p.title, p] as const)
-        ).values()]
+        const uniquePromos = [
+            ...new Map(
+                rawPromotions
+                    .filter(p => Boolean(p && (p.offerId || p.title)))
+                    .map(p => [p.offerId || p.title, p] as const)
+            ).values()
+        ]
 
         return uniquePromos.filter(x => {
             const offerIdLower = (x.offerId ?? '').toLowerCase()
@@ -392,31 +597,37 @@ export class Workers {
 
             const isUncompleted = !x.complete || (x.pointProgressMax > 0 && (x.pointProgress ?? 0) < x.pointProgressMax)
             const hasPoints = (x.pointProgressMax ?? 0) > 0 && (x.pointProgressMax ?? 0) <= 1000
-            const isImpression = offerIdLower.includes('impression') || offerIdLower.includes('refer_and_earn') || !titleLower
+            const isImpression =
+                offerIdLower.includes('impression') || offerIdLower.includes('refer_and_earn') || !titleLower
 
             // Filter out Punch Cards / Multi-day Parent Trackers dari More Promotions
-            const isPunchCard = promoTypeLower === 'punchcard' ||
-                                offerIdLower.includes('punchcard') ||
-                                destUrlLower.includes('punchcard') ||
-                                punchCardParentOfferIds.has(offerIdLower) ||
-                                punchCardParentTitles.has(titleLower) ||
-                                Boolean((x.attributes as any)?.days || (x.attributes as any)?.daysearned || (x.attributes as any)?.totaldays)
+            const isPunchCard =
+                promoTypeLower === 'punchcard' ||
+                offerIdLower.includes('punchcard') ||
+                destUrlLower.includes('punchcard') ||
+                punchCardParentOfferIds.has(offerIdLower) ||
+                punchCardParentTitles.has(titleLower) ||
+                Boolean(
+                    (x.attributes as any)?.days || (x.attributes as any)?.daysearned || (x.attributes as any)?.totaldays
+                )
 
-            const isWelcomeTour = offerIdLower.includes('fre_offer') ||
-                                  offerIdLower.includes('welcometour') ||
-                                  titleLower.includes('take the tour')
+            const isWelcomeTour =
+                offerIdLower.includes('fre_offer') ||
+                offerIdLower.includes('welcometour') ||
+                titleLower.includes('take the tour')
 
-            const isAppOnly = titleLower.includes('rewards app only') ||
-                              titleLower.includes('app only') ||
-                              titleLower.includes('sapphire') ||
-                              offerIdLower.includes('sapphire') ||
-                              offerIdLower.includes('rewardsapp') ||
-                              offerIdLower.includes('app_only') ||
-                              offerIdLower.includes('appoffer') ||
-                              (x as any).exclusiveLockedFeatureCategory === 'rewardsApp' ||
-                              (x as any).exclusiveLockedFeatureStatus === 'locked' ||
-                              (x.attributes as any)?.locked_category_criteria === 'rewardsApp' ||
-                              (x.attributes as any)?.is_unlocked === 'False'
+            const isAppOnly =
+                titleLower.includes('rewards app only') ||
+                titleLower.includes('app only') ||
+                titleLower.includes('sapphire') ||
+                offerIdLower.includes('sapphire') ||
+                offerIdLower.includes('rewardsapp') ||
+                offerIdLower.includes('app_only') ||
+                offerIdLower.includes('appoffer') ||
+                (x as any).exclusiveLockedFeatureCategory === 'rewardsApp' ||
+                (x as any).exclusiveLockedFeatureStatus === 'locked' ||
+                (x.attributes as any)?.locked_category_criteria === 'rewardsApp' ||
+                (x.attributes as any)?.is_unlocked === 'False'
 
             return isUncompleted && hasPoints && !isImpression && !isPunchCard && !isWelcomeTour && !isAppOnly
         })
@@ -430,36 +641,41 @@ export class Workers {
             ...(data.promotionalItem ? [data.promotionalItem] : [])
         ] as unknown as BasePromotion[]
 
-        const unique = [...new Map(
-            rawPromos
-                .filter(p => Boolean(p && (p.offerId || p.title)))
-                .map(p => [p.offerId || p.title, p] as const)
-        ).values()]
+        const unique = [
+            ...new Map(
+                rawPromos.filter(p => Boolean(p && (p.offerId || p.title))).map(p => [p.offerId || p.title, p] as const)
+            ).values()
+        ]
 
         return unique.filter(x => {
             const titleLower = (x.title ?? '').toLowerCase().trim()
             const offerIdLower = (x.offerId ?? '').toLowerCase().trim()
 
-            const isInternalInfo = offerIdLower.endsWith('_info') ||
-                                  offerIdLower.includes('sapphire_appnewbonus_') ||
-                                  offerIdLower.includes('addwidget') ||
-                                  offerIdLower.includes('notification') ||
-                                  titleLower.includes('add widget') ||
-                                  titleLower.includes('enable notification')
+            const isInternalInfo =
+                offerIdLower.endsWith('_info') ||
+                offerIdLower.includes('sapphire_appnewbonus_') ||
+                offerIdLower.includes('addwidget') ||
+                offerIdLower.includes('notification') ||
+                titleLower.includes('add widget') ||
+                titleLower.includes('enable notification')
             if (isInternalInfo) return false
 
-            const isAppOnly = titleLower.includes('rewards app only') ||
-                              titleLower.includes('app only') ||
-                              titleLower.includes('bing app') ||
-                              offerIdLower.includes('rewardsapp') ||
-                              offerIdLower.includes('app_only') ||
-                              offerIdLower.includes('appoffer') ||
-                              (x as any).exclusiveLockedFeatureCategory === 'rewardsApp' ||
-                              (x as any).exclusiveLockedFeatureStatus === 'locked' ||
-                              (x.attributes as any)?.locked_category_criteria === 'rewardsApp' ||
-                              (x.attributes as any)?.is_unlocked === 'False'
+            const isAppOnly =
+                titleLower.includes('rewards app only') ||
+                titleLower.includes('app only') ||
+                titleLower.includes('bing app') ||
+                offerIdLower.includes('rewardsapp') ||
+                offerIdLower.includes('app_only') ||
+                offerIdLower.includes('appoffer') ||
+                (x as any).exclusiveLockedFeatureCategory === 'rewardsApp' ||
+                (x as any).exclusiveLockedFeatureStatus === 'locked' ||
+                (x.attributes as any)?.locked_category_criteria === 'rewardsApp' ||
+                (x.attributes as any)?.is_unlocked === 'False'
 
-            const pointMax = (x.pointProgressMax ?? 0) || parseInt(String((x.attributes as any)?.max || (x.attributes as any)?.points || '10'), 10) || 10
+            const pointMax =
+                (x.pointProgressMax ?? 0) ||
+                parseInt(String((x.attributes as any)?.max || (x.attributes as any)?.points || '10'), 10) ||
+                10
             if (!x.pointProgressMax || x.pointProgressMax <= 0) {
                 x.pointProgressMax = pointMax
             }
@@ -483,103 +699,133 @@ export class Workers {
         try {
             const currentUrl = page.url().toLowerCase()
             if (!currentUrl.includes('rewards.bing.com')) {
-                await page.goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
+                await page
+                    .goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 15000 })
+                    .catch(() => {})
                 await this.bot.utils.wait(2000)
             }
 
-            const { uncompletedCards, completedTitles } = await page.evaluate(() => {
-                const uncompletedCards: any[] = []
-                const completedTitles: string[] = []
-                const seenTitles = new Set<string>()
-                
-                // Cari semua kartu di halaman di luar section Daily Set
-                const allElements = Array.from(document.querySelectorAll('a, [role="button"], .c-card, .p-card, [class*="card"], [data-bi-id], [data-bi-area*="MorePromotions"], [data-bi-area*="Keep earning"]'))
-                
-                for (const rawEl of allElements) {
-                    const el = rawEl as HTMLElement
-                    const txt = (el.innerText || el.textContent || '').trim()
-                    if (!txt) continue
+            const { uncompletedCards, completedTitles } = await page
+                .evaluate(() => {
+                    const uncompletedCards: any[] = []
+                    const completedTitles: string[] = []
+                    const seenTitles = new Set<string>()
 
-                    // Abaikan jika berada di dalam container Daily Set
-                    if (el.closest('#dailyset, [data-bi-area*="DailySet"], .daily-set, [id*="daily-set"]')) continue
-                    
-                    const titleEl = el.querySelector('h3, h4, h5, .title, .c-heading, [class*="title"], [class*="heading"]')
-                    const rawTitle = (titleEl?.textContent || el.getAttribute('aria-label') || '').trim()
-                    
-                    const lines = txt.split('\n').map(l => l.trim()).filter(Boolean)
-                    const title = rawTitle || (lines[0] && lines[0].length < 60 ? lines[0] : '')
+                    // Cari semua kartu di halaman di luar section Daily Set
+                    const allElements = Array.from(
+                        document.querySelectorAll(
+                            'a, [role="button"], .c-card, .p-card, [class*="card"], [data-bi-id], [data-bi-area*="MorePromotions"], [data-bi-area*="Keep earning"]'
+                        )
+                    )
 
-                    if (!title || title.length > 70 || seenTitles.has(title.toLowerCase())) continue
+                    for (const rawEl of allElements) {
+                        const el = rawEl as HTMLElement
+                        const txt = (el.innerText || el.textContent || '').trim()
+                        if (!txt) continue
 
-                    // Abaikan navigasi header / footer / telemetry
-                    const isSystemNav = title.toLowerCase().includes('daily set') ||
-                                        title.toLowerCase().includes('rewards') ||
-                                        title.toLowerCase().includes('sign in') ||
-                                        title.toLowerCase().includes('level') ||
-                                        title.toLowerCase().includes('streak') ||
-                                        title.toLowerCase().includes('feedback') ||
-                                        title.toLowerCase().includes('terms')
+                        // Abaikan jika berada di dalam container Daily Set
+                        if (el.closest('#dailyset, [data-bi-area*="DailySet"], .daily-set, [id*="daily-set"]')) continue
 
-                    if (isSystemNav) continue
-                    seenTitles.add(title.toLowerCase())
+                        const titleEl = el.querySelector(
+                            'h3, h4, h5, .title, .c-heading, [class*="title"], [class*="heading"]'
+                        )
+                        const rawTitle = (titleEl?.textContent || el.getAttribute('aria-label') || '').trim()
 
-                    const href = el.getAttribute('href') || el.querySelector('a')?.getAttribute('href') || ''
-                    const hasCheckmark = el.querySelector('.mee-icon-CheckMark, [data-icon-name="CheckMark"], .c-icon-check, .complete-check, svg[aria-label*="Complete"], [class*="check"]') !== null ||
-                                         el.getAttribute('aria-checked') === 'true' ||
-                                         el.classList.contains('completed') ||
-                                         el.classList.contains('complete') ||
-                                         txt.toLowerCase().includes('completed') ||
-                                         txt.toLowerCase().includes('selesai')
+                        const lines = txt
+                            .split('\n')
+                            .map(l => l.trim())
+                            .filter(Boolean)
+                        const title = rawTitle || (lines[0] && lines[0].length < 60 ? lines[0] : '')
 
-                    const pointsMatch = txt.match(/\+(\d+)/)
-                    const points = pointsMatch && pointsMatch[1] ? parseInt(pointsMatch[1], 10) : 0
+                        if (!title || title.length > 70 || seenTitles.has(title.toLowerCase())) continue
 
-                    // Abaikan Punch Card multi-day / kartu 50 poin bulanan dari scraper Keep Earning DOM
-                    const isPunchCardTile = points >= 50 ||
-                                            txt.toLowerCase().includes('punch card') ||
-                                            txt.toLowerCase().includes('highlight') ||
-                                            txt.toLowerCase().includes('tour') ||
-                                            txt.toLowerCase().includes('day ') ||
-                                            href.toLowerCase().includes('punchcard')
+                        // Abaikan navigasi header / footer / telemetry
+                        const isSystemNav =
+                            title.toLowerCase().includes('daily set') ||
+                            title.toLowerCase().includes('rewards') ||
+                            title.toLowerCase().includes('sign in') ||
+                            title.toLowerCase().includes('level') ||
+                            title.toLowerCase().includes('streak') ||
+                            title.toLowerCase().includes('feedback') ||
+                            title.toLowerCase().includes('terms')
 
-                    const containerSection = (el.closest('section, [class*="section"], [class*="container"]') as HTMLElement | null)
-                    const sectionText = (containerSection?.innerText || containerSection?.textContent || '').toLowerCase()
-                    const isAppOnlySection = sectionText.includes('rewards app only') ||
-                                             sectionText.includes('app only') ||
-                                             el.closest('[data-bi-area*="RewardsApp"], [id*="rewardsapp"]') !== null
+                        if (isSystemNav) continue
+                        seenTitles.add(title.toLowerCase())
 
-                    const isAppOnly = isAppOnlySection ||
-                                      txt.toLowerCase().includes('rewards app only') ||
-                                      txt.toLowerCase().includes('app only') ||
-                                      title.toLowerCase().includes('rewards app only') ||
-                                      title.toLowerCase().includes('app only') ||
-                                      href.toLowerCase().includes('rewardsapp')
+                        const href = el.getAttribute('href') || el.querySelector('a')?.getAttribute('href') || ''
+                        const hasCheckmark =
+                            el.querySelector(
+                                '.mee-icon-CheckMark, [data-icon-name="CheckMark"], .c-icon-check, .complete-check, svg[aria-label*="Complete"], [class*="check"]'
+                            ) !== null ||
+                            el.getAttribute('aria-checked') === 'true' ||
+                            el.classList.contains('completed') ||
+                            el.classList.contains('complete') ||
+                            txt.toLowerCase().includes('completed') ||
+                            txt.toLowerCase().includes('selesai')
 
-                    const isMarketingPromo = title.toLowerCase().includes('referral') ||
-                                             title.toLowerCase().includes('refer ') ||
-                                             title.toLowerCase().includes('search bar') ||
-                                             title.toLowerCase().includes('sweater weather') ||
-                                             title.toLowerCase().includes('wallpaper') ||
-                                             title.toLowerCase().includes('donate') ||
-                                             href.startsWith('microsoft-edge:') ||
-                                             href.includes('images/create')
+                        const pointsMatch = txt.match(/\+(\d+)/)
+                        const points = pointsMatch && pointsMatch[1] ? parseInt(pointsMatch[1], 10) : 0
 
-                    if (hasCheckmark) {
-                        completedTitles.push(title.toLowerCase().trim())
-                    } else if (points > 0 && !isPunchCardTile && !isAppOnly && !isMarketingPromo) {
-                        uncompletedCards.push({
-                            title,
-                            destinationUrl: href && href.startsWith('http') ? href : 'https://rewards.bing.com',
-                            pointProgressMax: points,
-                            pointProgress: 0,
-                            complete: false,
-                            offerId: `dom_bonus_${title.replace(/[^\w]/g, '_').toLowerCase()}`,
-                            promotionType: title.toLowerCase().includes('?') || txt.toLowerCase().includes('quiz') ? 'quiz' : 'urlreward'
-                        })
+                        // Abaikan Punch Card multi-day / kartu 50 poin bulanan dari scraper Keep Earning DOM
+                        const isPunchCardTile =
+                            points >= 50 ||
+                            txt.toLowerCase().includes('punch card') ||
+                            txt.toLowerCase().includes('highlight') ||
+                            txt.toLowerCase().includes('tour') ||
+                            txt.toLowerCase().includes('day ') ||
+                            href.toLowerCase().includes('punchcard')
+
+                        const containerSection = el.closest(
+                            'section, [class*="section"], [class*="container"]'
+                        ) as HTMLElement | null
+                        const sectionText = (
+                            containerSection?.innerText ||
+                            containerSection?.textContent ||
+                            ''
+                        ).toLowerCase()
+                        const isAppOnlySection =
+                            sectionText.includes('rewards app only') ||
+                            sectionText.includes('app only') ||
+                            el.closest('[data-bi-area*="RewardsApp"], [id*="rewardsapp"]') !== null
+
+                        const isAppOnly =
+                            isAppOnlySection ||
+                            txt.toLowerCase().includes('rewards app only') ||
+                            txt.toLowerCase().includes('app only') ||
+                            title.toLowerCase().includes('rewards app only') ||
+                            title.toLowerCase().includes('app only') ||
+                            href.toLowerCase().includes('rewardsapp')
+
+                        const isMarketingPromo =
+                            title.toLowerCase().includes('referral') ||
+                            title.toLowerCase().includes('refer ') ||
+                            title.toLowerCase().includes('search bar') ||
+                            title.toLowerCase().includes('sweater weather') ||
+                            title.toLowerCase().includes('wallpaper') ||
+                            title.toLowerCase().includes('donate') ||
+                            href.startsWith('microsoft-edge:') ||
+                            href.includes('images/create')
+
+                        if (hasCheckmark) {
+                            completedTitles.push(title.toLowerCase().trim())
+                        } else if (points > 0 && !isPunchCardTile && !isAppOnly && !isMarketingPromo) {
+                            uncompletedCards.push({
+                                title,
+                                destinationUrl: href && href.startsWith('http') ? href : 'https://rewards.bing.com',
+                                pointProgressMax: points,
+                                pointProgress: 0,
+                                complete: false,
+                                offerId: `dom_bonus_${title.replace(/[^\w]/g, '_').toLowerCase()}`,
+                                promotionType:
+                                    title.toLowerCase().includes('?') || txt.toLowerCase().includes('quiz')
+                                        ? 'quiz'
+                                        : 'urlreward'
+                            })
+                        }
                     }
-                }
-                return { uncompletedCards, completedTitles }
-            }).catch(() => ({ uncompletedCards: [], completedTitles: [] }))
+                    return { uncompletedCards, completedTitles }
+                })
+                .catch(() => ({ uncompletedCards: [], completedTitles: [] }))
 
             const completedSet = new Set(completedTitles.map(t => t.toLowerCase().trim()))
 
@@ -630,18 +876,114 @@ export class Workers {
         }
 
         const startBonusBalance = Number(this.bot.userData.currentPoints ?? 0)
-        this.bot.logger.info(this.bot.isMobile, 'KEEP-EARNING', `Started solving ${activitiesUncompleted.length} "Keep earning" bonus cards (including +15 Weekly Cards & Punchcards)... | currentPoints=${startBonusBalance}`)
+        this.bot.logger.info(
+            this.bot.isMobile,
+            'KEEP-EARNING',
+            `Started solving ${activitiesUncompleted.length} "Keep earning" bonus cards (including +15 Weekly Cards & Punchcards)... | currentPoints=${startBonusBalance}`
+        )
+
+        // 1. Simpan execution result sementara per offerId
+        const executionMap = new Map<string, ActivityExecutionResult>()
+        for (const act of activitiesUncompleted) {
+            const key = act.offerId || act.title
+            executionMap.set(key, {
+                offerId: act.offerId,
+                title: act.title,
+                status: 'pending',
+                advertisedPoints: Number(act.pointProgressMax ?? 10),
+                observedBalanceDelta: 0,
+                attributedPoints: null,
+                serverCompleted: false,
+                completionEvidence: 'none'
+            })
+        }
+
+        // 2. Selesaikan batch seperti flow lama
         await this.solveActivities(activitiesUncompleted, page)
 
+        // 3. Ambil SATU server snapshot setelah batch
         await this.bot.utils.wait(2000)
-        const updatedBonusBalance = await this.bot.browser.func.getCurrentPoints().catch(() => startBonusBalance)
+        const refreshedData: DashboardData | null = await this.bot.browser.func.getDashboardData().catch(() => null)
+        const updatedBonusBalance =
+            refreshedData?.userStatus?.availablePoints ??
+            (await this.bot.browser.func.getCurrentPoints().catch(() => startBonusBalance))
         const bonusGained = Math.max(0, updatedBonusBalance - startBonusBalance)
-        if (bonusGained > 0) {
-            this.bot.userData.currentPoints = updatedBonusBalance
-            this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + bonusGained
-            this.bot.logger.info(this.bot.isMobile, 'KEEP-EARNING', `🎉 All "Keep earning" bonus cards completed! | gainedPoints=+${bonusGained} | oldBalance=${startBonusBalance} | newBalance=${updatedBonusBalance}`, 'green')
-        } else {
-            this.bot.logger.info(this.bot.isMobile, 'KEEP-EARNING', `All "Keep earning" bonus cards completed! | currentBalance=${updatedBonusBalance}`)
+
+        // 4. Reconcile seluruh result berdasarkan exact offerId
+        const allFreshPromos = refreshedData ? this.extractAllPromotions(refreshedData) : []
+
+        for (const [key, result] of executionMap.entries()) {
+            const freshMatch = allFreshPromos.find(
+                f =>
+                    f &&
+                    (f.offerId === result.offerId ||
+                        (f.title && f.title.toLowerCase().trim() === result.title.toLowerCase().trim()))
+            )
+            const isServerComplete = Boolean(
+                freshMatch &&
+                (freshMatch.complete === true ||
+                    (freshMatch.pointProgressMax > 0 && (freshMatch.pointProgress ?? 0) >= freshMatch.pointProgressMax))
+            )
+
+            if (isServerComplete) {
+                const attributed =
+                    bonusGained === result.advertisedPoints && result.advertisedPoints > 0
+                        ? result.advertisedPoints
+                        : null
+                executionMap.set(key, {
+                    ...result,
+                    status: 'verified-complete',
+                    serverCompleted: true,
+                    completionEvidence: 'server-dashboard-state',
+                    observedBalanceDelta: bonusGained,
+                    attributedPoints: attributed
+                })
+                if (result.advertisedPoints > 0 && bonusGained !== result.advertisedPoints) {
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'KEEP-EARNING',
+                        `advertisedPoints=${result.advertisedPoints} observedBalanceDelta=${bonusGained} attributedPoints=unknown`
+                    )
+                }
+            } else {
+                executionMap.set(key, {
+                    ...result,
+                    status: 'processed-unverified',
+                    serverCompleted: false,
+                    completionEvidence: 'none',
+                    observedBalanceDelta: bonusGained,
+                    attributedPoints: null
+                })
+            }
+        }
+
+        // 5. Buat summary dari hasil reconciliation
+        const allResults = Array.from(executionMap.values())
+        const summary: ActivityBatchSummary = {
+            total: allResults.length,
+            verifiedComplete: allResults.filter(r => r.status === 'verified-complete').length,
+            processedUnverified: allResults.filter(r => r.status === 'processed-unverified').length,
+            pending: allResults.filter(r => r.status === 'pending').length,
+            skipped: allResults.filter(r => r.status === 'skipped').length,
+            failed: allResults.filter(r => r.status === 'failed').length,
+            observedAccountBalanceDelta: bonusGained
+        }
+
+        this.bot.userData.currentPoints = updatedBonusBalance
+
+        this.bot.logger.info(
+            this.bot.isMobile,
+            'KEEP-EARNING',
+            `[KEEP-EARNING] Finished processing | total=${summary.total} verified=${summary.verifiedComplete} pending=${summary.pending} failed=${summary.failed} observedBalanceDelta=${summary.observedAccountBalanceDelta}`
+        )
+
+        if (summary.total > 0 && summary.verifiedComplete === summary.total) {
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'KEEP-EARNING',
+                `🎉 All "Keep earning" bonus cards completed! | verified=${summary.verifiedComplete}/${summary.total} | observedBalanceDelta=+${bonusGained} | oldBalance=${startBonusBalance} | newBalance=${updatedBonusBalance}`,
+                'green'
+            )
         }
     }
 
@@ -670,20 +1012,25 @@ export class Workers {
         ].filter(Boolean) as BasePromotion[]
 
         const uniqueSpecials = [...new Map(allSpecials.map(p => [p.offerId, p])).values()]
-        
-        const uncompleted = uniqueSpecials.filter(x => 
-            !x.complete && 
-            x.pointProgressMax > 0 && 
-            x.pointProgressMax <= 500 &&
-            !(x.offerId ?? '').toLowerCase().includes('locked') &&
-            !(x.offerId ?? '').toLowerCase().includes('impression') &&
-            !(x.offerId ?? '').toLowerCase().includes('refer_and_earn') &&
-            (x.title ?? '').trim() !== ''
+
+        const uncompleted = uniqueSpecials.filter(
+            x =>
+                !x.complete &&
+                x.pointProgressMax > 0 &&
+                x.pointProgressMax <= 500 &&
+                !(x.offerId ?? '').toLowerCase().includes('locked') &&
+                !(x.offerId ?? '').toLowerCase().includes('impression') &&
+                !(x.offerId ?? '').toLowerCase().includes('refer_and_earn') &&
+                (x.title ?? '').trim() !== ''
         )
 
         if (uncompleted.length > 0) {
-            this.bot.logger.info(this.bot.isMobile, 'SPECIAL-ACTIVITY', `Found ${uncompleted.length} special/global promotion items (including Evergreen & Side Quests)! Solving now...`)
-            
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'SPECIAL-ACTIVITY',
+                `Found ${uncompleted.length} special/global promotion items (including Evergreen & Side Quests)! Solving now...`
+            )
+
             for (const activity of uncompleted) {
                 try {
                     await this.solveActivities([activity], page)
@@ -697,7 +1044,7 @@ export class Workers {
     // 💉 SUNTIKAN STAR BONUS 2100 YANG SEMPET ILANG
     public async doClaimBonusPoints(data: DashboardData) {
         const pointsActivity = data.pointClaimBannerPromotion
-        if (!pointsActivity) return;
+        if (!pointsActivity) return
 
         if (pointsActivity.complete) {
             this.bot.logger.info(this.bot.isMobile, 'CLAIM-BONUS-POINTS', `Bonus points have already been claimed`)
@@ -716,10 +1063,13 @@ export class Workers {
             ...(data.promotionalItems ?? []),
             ...(data.morePromotions ?? []),
             ...(data.morePromotionsWithoutPromotionalItems ?? [])
-        ].filter(x => 
-            x && 
-            ((x.promotionType ?? '').toLowerCase() === 'punchcard' || (x.offerId ?? '').toLowerCase().includes('punchcard') || (x.destinationUrl ?? '').toLowerCase().includes('punchcard')) &&
-            (x.pointProgressMax ?? 0) > 0
+        ].filter(
+            x =>
+                x &&
+                ((x.promotionType ?? '').toLowerCase() === 'punchcard' ||
+                    (x.offerId ?? '').toLowerCase().includes('punchcard') ||
+                    (x.destinationUrl ?? '').toLowerCase().includes('punchcard')) &&
+                (x.pointProgressMax ?? 0) > 0
         )
 
         for (const promo of standaloneCards) {
@@ -736,12 +1086,16 @@ export class Workers {
             return
         }
 
-        this.bot.logger.info(this.bot.isMobile, 'PUNCHCARD', `[TASK-DETECT] Found ${punchCards.length} Punch Card(s) in account status`)
+        this.bot.logger.info(
+            this.bot.isMobile,
+            'PUNCHCARD',
+            `[TASK-DETECT] Found ${punchCards.length} Punch Card(s) in account status`
+        )
 
         for (const card of punchCards) {
             const title = card.parentPromotion?.title || card.name || 'Punch Card'
             const offerId = card.parentPromotion?.offerId || ''
-            
+
             const progress = this.getPunchCardProgressDetails(card)
 
             this.bot.logger.info(
@@ -770,30 +1124,51 @@ export class Workers {
                 continue
             }
 
-            const children = card.childPromotions ?? []
-            const uncompletedChildren = children.filter(x => {
-                if (!x) return false
-                if (x.complete) return false
-                if (this.completedOffersInSession.has(x.offerId) || this.completedOffersInSession.has((x.title || '').toLowerCase().trim())) return false
-                if (x.pointProgressMax > 0 && x.pointProgress >= x.pointProgressMax) return false
-                return true
-            })
+            const counts = this.getPunchCardTaskCounts(card)
 
             this.bot.logger.info(
                 this.bot.isMobile,
                 'PUNCHCARD',
-                `"${title}" | Progress: ${progress.progressStr} | Points: ${progress.pointsStr} | Status: ${uncompletedChildren.length > 0 ? `${uncompletedChildren.length} active sub-task(s)` : 'Multi-day daily task in progress'}`,
+                `"${title}" | Progress: ${counts.completed}/${counts.total} Tasks | remaining=${counts.remaining} actionableNow=${counts.actionableNow} locked=${counts.locked}`,
                 'cyan'
             )
 
-            if (uncompletedChildren.length > 0) {
-                // Hanya cari SATU step yang aktif dan tidak terkunci (locked / cooldown 24 jam)
+            const children = card.childPromotions ?? []
+            const uncompletedChildren = children.filter(x => {
+                if (!x) return false
+                if (x.complete) return false
+                if (
+                    this.completedOffersInSession.has(x.offerId) ||
+                    this.completedOffersInSession.has((x.title || '').toLowerCase().trim())
+                )
+                    return false
+                if (x.pointProgressMax > 0 && x.pointProgress >= x.pointProgressMax) return false
+                return true
+            })
+
+            if (counts.actionableNow > 0 && uncompletedChildren.length > 0) {
+                // Guardrail: Maksimal satu child per parent per run
                 const activeChild = uncompletedChildren.find(c => {
-                    const isLocked = (c.attributes as any)?.isLocked === 'True' ||
-                                     (c.attributes as any)?.isLocked === 'true' ||
-                                     (c.attributes as any)?.isLocked === true ||
-                                     (c as any).isLocked === true
-                    return !isLocked
+                    const attr = (c.attributes || {}) as Record<string, any>
+                    const isLocked =
+                        attr.isLocked === 'True' ||
+                        attr.isLocked === 'true' ||
+                        attr.isLocked === true ||
+                        (c as any).isLocked === true ||
+                        (c as any).exclusiveLockedFeatureStatus === 'locked' ||
+                        attr.locked_category_criteria === 'rewardsApp' ||
+                        attr.is_unlocked === 'False'
+                    const isFutureDated =
+                        attr.isFutureDated === 'True' ||
+                        attr.isFutureDated === true ||
+                        (attr.startDate && new Date(attr.startDate).getTime() > Date.now()) ||
+                        (attr.cooldown && String(attr.cooldown).toLowerCase() === 'true')
+                    const isDisabled =
+                        attr.disabled === 'True' ||
+                        attr.disabled === 'true' ||
+                        attr.disabled === true ||
+                        (c as any).disabled === true
+                    return !isLocked && !isFutureDated && !isDisabled
                 })
 
                 if (activeChild) {
@@ -809,17 +1184,50 @@ export class Workers {
 
                     await this.solveActivities([activeChild], page, card)
 
-                    this.bot.logger.info(
-                        this.bot.isMobile,
-                        'PUNCHCARD',
-                        `[PUNCHCARD] Step "${stepTitle}" completed successfully. ${taskTag}`,
-                        'green'
+                    // Refresh exact parent/child server state
+                    await this.bot.utils.wait(2000)
+                    const refreshedData: DashboardData | null = await this.bot.browser.func
+                        .getDashboardData()
+                        .catch(() => null)
+                    const matchingPc = refreshedData?.punchCards?.find(
+                        p =>
+                            (p.parentPromotion?.offerId &&
+                                p.parentPromotion.offerId === card.parentPromotion?.offerId) ||
+                            (p.name && p.name.toLowerCase().trim() === (card.name || '').toLowerCase().trim())
+                    )
+                    const freshChild = matchingPc?.childPromotions?.find(
+                        c =>
+                            c &&
+                            (c.offerId === activeChild.offerId ||
+                                (c.title &&
+                                    c.title.toLowerCase().trim() === (activeChild.title || '').toLowerCase().trim()))
+                    )
+                    const isChildComplete = Boolean(
+                        freshChild &&
+                        (freshChild.complete === true ||
+                            (freshChild.pointProgressMax > 0 &&
+                                (freshChild.pointProgress ?? 0) >= freshChild.pointProgressMax))
                     )
 
-                    this.completedOffersInSession.add(activeChild.offerId)
-                    this.completedOffersInSession.add((activeChild.title || '').toLowerCase().trim())
-                    this.completedOffersInSession.add(offerId)
-                    this.completedOffersInSession.add(title.toLowerCase().trim())
+                    if (isChildComplete) {
+                        this.bot.logger.info(
+                            this.bot.isMobile,
+                            'PUNCHCARD',
+                            `[PUNCHCARD] Step "${stepTitle}" completed successfully. ${taskTag}`,
+                            'green'
+                        )
+                        this.completedOffersInSession.add(activeChild.offerId)
+                        this.completedOffersInSession.add((activeChild.title || '').toLowerCase().trim())
+                        this.completedOffersInSession.add(offerId)
+                        this.completedOffersInSession.add(title.toLowerCase().trim())
+                    } else {
+                        this.bot.logger.info(
+                            this.bot.isMobile,
+                            'PUNCHCARD',
+                            `[PUNCHCARD] Step processed but completion remains unverified. ${taskTag}`,
+                            'yellow'
+                        )
+                    }
 
                     // Hentikan eksekusi step berikutnya karena masuk masa 24h cooldown
                     if (progress.maxStep > 1 && stepNum < progress.maxStep) {
@@ -848,14 +1256,121 @@ export class Workers {
             } else if (card.parentPromotion?.destinationUrl) {
                 const stepNum = Math.min(progress.maxStep, progress.currentStep + 1)
                 const taskTag = `(${stepNum}/${progress.maxStep} Tasks)`
-                this.bot.logger.info(this.bot.isMobile, 'PUNCHCARD', `[PUNCHCARD] Active step detected: "${title}" -> "Daily Step" ${taskTag}`)
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'PUNCHCARD',
+                    `[PUNCHCARD] Active step detected: "${title}" -> "Daily Step" ${taskTag}`
+                )
                 const claimActivity = card.parentPromotion as unknown as BasePromotion
                 await this.bot.activities.doUrlReward(claimActivity, page, card)
                 this.completedOffersInSession.add(offerId)
                 this.completedOffersInSession.add(title.toLowerCase().trim())
-                this.bot.logger.info(this.bot.isMobile, 'PUNCHCARD', `[PUNCHCARD] Step "Daily Step" completed successfully. ${taskTag}`, 'green')
-                this.bot.logger.info(this.bot.isMobile, 'PUNCHCARD', `"${title}" | Progress: ${stepNum}/${progress.maxStep} Tasks | Status: Completed for Today ✅`, 'green')
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'PUNCHCARD',
+                    `[PUNCHCARD] Step "Daily Step" completed successfully. ${taskTag}`,
+                    'green'
+                )
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'PUNCHCARD',
+                    `"${title}" | Progress: ${stepNum}/${progress.maxStep} Tasks | Status: Completed for Today ✅`,
+                    'green'
+                )
             }
+        }
+    }
+
+    public getPunchCardTaskCounts(card: PunchCard): PunchCardTaskCounts {
+        const children = card.childPromotions ?? []
+        const total = children.length
+        if (total === 0) {
+            const parent = card.parentPromotion
+            const isComp = Boolean(parent?.complete)
+            return {
+                total: 1,
+                completed: isComp ? 1 : 0,
+                remaining: isComp ? 0 : 1,
+                actionableNow: isComp ? 0 : 1,
+                locked: 0,
+                futureDated: 0,
+                disabled: 0
+            }
+        }
+
+        let completed = 0
+        let locked = 0
+        let futureDated = 0
+        let disabled = 0
+        const eligibleChildren: BasePromotion[] = []
+
+        for (const c of children) {
+            if (!c) continue
+            const offerId = (c.offerId || '').toLowerCase()
+            const title = (c.title || c.name || '').toLowerCase().trim()
+            const attr = (c.attributes || {}) as Record<string, any>
+
+            const isComp =
+                c.complete === true ||
+                String(c.complete).toLowerCase() === 'true' ||
+                (c.pointProgressMax > 0 && (c.pointProgress ?? 0) >= c.pointProgressMax) ||
+                this.completedOffersInSession.has(offerId) ||
+                this.completedOffersInSession.has(title)
+
+            if (isComp) {
+                completed++
+                continue
+            }
+
+            const isDis =
+                attr.disabled === 'True' ||
+                attr.disabled === 'true' ||
+                attr.disabled === true ||
+                (c as any).disabled === true
+            if (isDis) {
+                disabled++
+                continue
+            }
+
+            const isLock =
+                attr.isLocked === 'True' ||
+                attr.isLocked === 'true' ||
+                attr.isLocked === true ||
+                (c as any).isLocked === true ||
+                (c as any).exclusiveLockedFeatureStatus === 'locked' ||
+                attr.locked_category_criteria === 'rewardsApp' ||
+                attr.is_unlocked === 'False'
+
+            const isFut =
+                attr.isFutureDated === 'True' ||
+                attr.isFutureDated === true ||
+                (attr.startDate && new Date(attr.startDate).getTime() > Date.now()) ||
+                (attr.cooldown && String(attr.cooldown).toLowerCase() === 'true')
+
+            if (isLock) {
+                locked++
+            } else if (isFut) {
+                futureDated++
+            } else {
+                eligibleChildren.push(c)
+            }
+        }
+
+        const remaining = total - completed
+        const actionableNow = eligibleChildren.length > 0 ? 1 : 0
+
+        if (eligibleChildren.length > 1) {
+            locked += eligibleChildren.length - 1
+        }
+
+        return {
+            total,
+            completed,
+            remaining,
+            actionableNow,
+            locked,
+            futureDated,
+            disabled
         }
     }
 
@@ -874,7 +1389,9 @@ export class Workers {
 
         // 1. Hitung total task sebenarnya dari children jika ada!
         const totalChildrenCount = children.length
-        const completedChildrenCount = children.filter(c => c.complete || (c.pointProgressMax > 0 && c.pointProgress >= c.pointProgressMax)).length
+        const completedChildrenCount = children.filter(
+            c => c.complete || (c.pointProgressMax > 0 && c.pointProgress >= c.pointProgressMax)
+        ).length
 
         let maxStep = 0
         let currentStep = 0
@@ -919,10 +1436,12 @@ export class Workers {
         const isCompleted = isParentComplete || isMaxStepReached || (isPointsMaxReached && isAllChildrenComplete)
 
         // Periksa apakah hari ini sudah dikerjakan
-        const uncompletedChildren = children.filter(c => !c.complete && (!c.pointProgressMax || c.pointProgress < c.pointProgressMax))
+        const uncompletedChildren = children.filter(
+            c => !c.complete && (!c.pointProgressMax || c.pointProgress < c.pointProgressMax)
+        )
         const isCompletedToday = isCompleted || (totalChildrenCount > 0 && uncompletedChildren.length === 0)
 
-        const percent = maxStep > 0 ? Math.min(100, Math.round((currentStep / maxStep) * 100)) : (isCompleted ? 100 : 0)
+        const percent = maxStep > 0 ? Math.min(100, Math.round((currentStep / maxStep) * 100)) : isCompleted ? 100 : 0
         const progressStr = `${currentStep}/${maxStep} Tasks [${percent}%]`
 
         return {
@@ -942,12 +1461,19 @@ export class Workers {
                 const type = (activity.promotionType ?? '').toLowerCase()
                 const name = (activity.name ?? '').toLowerCase()
                 const offerId = (activity.offerId ?? '').toLowerCase()
-                
+
                 const isTokenMissing = !this.bot.requestToken || this.bot.rewardsVersion === 'modern'
 
-                this.bot.logger.debug(this.bot.isMobile, 'ACTIVITY', `Processing | title="${activity.title}" | type=${type} | tokenMissing=${isTokenMissing}`)
+                this.bot.logger.debug(
+                    this.bot.isMobile,
+                    'ACTIVITY',
+                    `Processing | title="${activity.title}" | type=${type} | tokenMissing=${isTokenMissing}`
+                )
 
-                if ((type === 'quiz' || type.includes('trivia') || type.includes('poll') || type.includes('survey')) && !offerId.includes('dailyset')) {
+                if (
+                    (type === 'quiz' || type.includes('trivia') || type.includes('poll') || type.includes('survey')) &&
+                    !offerId.includes('dailyset')
+                ) {
                     await this.bot.activities.doQuiz(activity)
                 } else if (type === 'findclippy') {
                     await this.bot.activities.doFindClippy(activity as unknown as FindClippyPromotion)
@@ -955,14 +1481,13 @@ export class Workers {
                     await this.bot.activities.doSearchOnBing(activity, page)
                 } else {
                     // Default fallback: Selesaikan via Hybrid UrlReward solver (mencakup Daily Set URL, side quests 15 poin, explore cards, promo links, punchcard items)
-                    await this.bot.activities.doUrlReward(activity, page, punchCard) 
+                    await this.bot.activities.doUrlReward(activity, page, punchCard)
                 }
-                
+
                 if (activity.offerId) this.completedOffersInSession.add(activity.offerId)
                 if (activity.title) this.completedOffersInSession.add(activity.title.toLowerCase().trim())
 
                 await this.bot.utils.wait(this.bot.utils.randomDelay(4000, 8000))
-
             } catch (error) {
                 this.bot.logger.error(this.bot.isMobile, 'ACTIVITY', `Error solving "${activity.title}"`)
             }

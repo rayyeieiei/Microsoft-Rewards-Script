@@ -3,6 +3,7 @@ import type { BrowserFingerprintWithHeaders } from 'fingerprint-generator'
 import { MicrosoftRewardsBot, executionContext } from '../index'
 import type { DashboardData } from '../interface/DashboardData'
 import type { Account } from '../interface/Account'
+import { redactAccountKey } from './activities/appOnly/AppOnlyTypes'
 
 interface BrowserSession {
     context: BrowserContext
@@ -32,11 +33,15 @@ export class SearchManager {
         this.bot.logger.debug(
             'main',
             'SEARCH-MANAGER',
-            `Start | account=${accountEmail} | mobileMissing=${missingSearchPoints.mobilePoints} | desktopMissing=${missingSearchPoints.desktopPoints}`
+            `Start | account=${redactAccountKey(accountEmail)} | mobileMissing=${missingSearchPoints.mobilePoints} | desktopMissing=${missingSearchPoints.desktopPoints}`
         )
 
-        const pcProg = data?.userStatus?.counters?.pcSearch?.[0] ? `${data.userStatus.counters.pcSearch[0].pointProgress}/${data.userStatus.counters.pcSearch[0].pointProgressMax}` : '0/0'
-        const mobileProg = data?.userStatus?.counters?.mobileSearch?.[0] ? `${data.userStatus.counters.mobileSearch[0].pointProgress}/${data.userStatus.counters.mobileSearch[0].pointProgressMax}` : '0/0'
+        const pcProg = data?.userStatus?.counters?.pcSearch?.[0]
+            ? `${data.userStatus.counters.pcSearch[0].pointProgress}/${data.userStatus.counters.pcSearch[0].pointProgressMax}`
+            : '0/0'
+        const mobileProg = data?.userStatus?.counters?.mobileSearch?.[0]
+            ? `${data.userStatus.counters.mobileSearch[0].pointProgress}/${data.userStatus.counters.mobileSearch[0].pointProgressMax}`
+            : '0/0'
 
         const doMobile = this.bot.config.workers.doMobileSearch && missingSearchPoints.mobilePoints > 0
         const doDesktop = this.bot.config.workers.doDesktopSearch && missingSearchPoints.desktopPoints > 0
@@ -50,8 +55,8 @@ export class SearchManager {
             ? missingSearchPoints.mobilePoints > 0
                 ? `run (${missingSearchPoints.mobilePoints} pts remaining)`
                 : !data?.userStatus?.counters?.mobileSearch?.length
-                    ? 'not-available-in-region'
-                    : `completed (${mobileProg})`
+                  ? 'not-available-in-region'
+                  : `completed (${mobileProg})`
             : 'skip-disabled'
 
         this.bot.logger.info(
@@ -181,15 +186,21 @@ export class SearchManager {
             if (shouldDoDesktop) {
                 if (shouldDoMobile) {
                     // Stealth Stagger: Beri jeda 3.5 detik agar Mobile & Desktop tidak submit di milidetik yang sama
-                    this.bot.logger.debug('main', 'SEARCH-MANAGER', 'Staggering desktop start by 3.5s for stealth anti-detection...')
+                    this.bot.logger.debug(
+                        'main',
+                        'SEARCH-MANAGER',
+                        'Staggering desktop start by 3.5s for stealth anti-detection...'
+                    )
                     await this.bot.utils.wait(3500)
                 }
 
                 this.bot.logger.info('main', 'SEARCH-MANAGER', 'Desktop login start')
+                const isProxy = Boolean(account.proxy?.proxyAxios && account.proxy?.url)
+                const proxySummary = isProxy ? `proxyEnabled=true protocol=http` : `proxyEnabled=false`
                 this.bot.logger.debug(
                     'main',
                     'SEARCH-MANAGER',
-                    `Desktop login | account=${accountEmail} | proxy=${account.proxy ?? 'none'}`
+                    `Desktop login | account=${redactAccountKey(accountEmail)} | ${proxySummary}`
                 )
                 try {
                     desktopSession = await executionContext.run({ isMobile: false, accountEmail }, async () =>
@@ -382,17 +393,23 @@ export class SearchManager {
 
     private async createDesktopSession(account: Account, accountEmail: string): Promise<BrowserSession> {
         this.bot.logger.info('main', 'SEARCH-DESKTOP-LOGIN', 'Init desktop session')
+        const isProxy = Boolean(account.proxy?.proxyAxios && account.proxy?.url)
+        const proxySummary = isProxy ? `proxyEnabled=true protocol=http` : `proxyEnabled=false`
         this.bot.logger.debug(
             'main',
             'SEARCH-DESKTOP-LOGIN',
-            `Init | account=${accountEmail} | proxy=${account.proxy ?? 'none'}`
+            `Init | account=${redactAccountKey(accountEmail)} | ${proxySummary}`
         )
 
         const session = await this.bot['browserFactory'].createBrowser(account)
         this.bot.logger.debug('main', 'SEARCH-DESKTOP-LOGIN', 'Browser created, new page')
 
         this.bot.mainDesktopPage = await session.context.newPage()
-        this.bot.logger.info('main', 'SEARCH-DESKTOP-LOGIN', `Browser ready | account=${accountEmail}`)
+        this.bot.logger.info(
+            'main',
+            'SEARCH-DESKTOP-LOGIN',
+            `Browser ready | account=${redactAccountKey(accountEmail)}`
+        )
         this.bot.logger.info('main', 'SEARCH-DESKTOP-LOGIN', 'Login start')
         this.bot.logger.debug('main', 'SEARCH-DESKTOP-LOGIN', 'Calling login handler')
 

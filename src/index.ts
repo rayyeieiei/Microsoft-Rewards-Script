@@ -28,8 +28,11 @@ import {
     updateDashboardGlobal,
     registerControlCallback,
     registerConfigCallback,
-    registerIpConfirmCallback
+    registerIpConfirmCallback,
+    registerManualQuestProvider
 } from './util/DashboardServer'
+import { ManualQuestQueue } from './functions/activities/appOnly/AppOnlyQuestObserver'
+import { redactAccountKey } from './functions/activities/appOnly/AppOnlyTypes'
 import { Database } from './util/Database'
 import readline from 'readline'
 
@@ -262,6 +265,8 @@ export class MicrosoftRewardsBot {
                 this.logger.error('main', 'DASHBOARD-ERROR', `Failed to start dashboard: ${err.message}`)
             })
             this.logger.info('main', 'DASHBOARD', `Local dashboard server started at http://localhost:4000`, 'green')
+
+            registerManualQuestProvider(() => ManualQuestQueue.getInstance().getSanitizedSnapshot())
 
             // Update initial dashboard state
             this.updateDashboardGlobal({
@@ -569,14 +574,18 @@ export class MicrosoftRewardsBot {
                 this.logger.info(
                     'main',
                     'ACCOUNT-START',
-                    `[ACCOUNT-START] Starting workflow for: ${accountEmail} | geoLocale: ${account.geoLocale}`
+                    `[ACCOUNT-START] Starting workflow for: ${redactAccountKey(accountEmail)} | geoLocale: ${account.geoLocale}`
                 )
                 this.updateDashboardAccount(accountEmail, { status: 'Starting Browser' })
                 this.axios = new AxiosClient(account.proxy, this.localProxyPort, bytes => this.trackBandwidth(bytes))
 
                 const result = await this.Main(account).catch(error => {
                     const errMsg = error instanceof Error ? error.message : String(error)
-                    void this.logger.error(true, 'FLOW', `Mobile flow failed for ${accountEmail}: ${errMsg}`)
+                    void this.logger.error(
+                        true,
+                        'FLOW',
+                        `Mobile flow failed for ${redactAccountKey(accountEmail)}: ${errMsg}`
+                    )
                     this.updateDashboardAccount(accountEmail, { status: 'Error', error: errMsg })
                     return undefined
                 })
@@ -605,7 +614,7 @@ export class MicrosoftRewardsBot {
                     this.logger.info(
                         'main',
                         'ACCOUNT-FINISH',
-                        `[ACCOUNT-FINISH] Completed workflow for: ${accountEmail} | Total: +${collectedPoints} | Old: ${accountInitialPoints} → New: ${accountFinalPoints} | Duration: ${durationSeconds}s`,
+                        `[ACCOUNT-FINISH] Completed workflow for: ${redactAccountKey(accountEmail)} | Total: +${collectedPoints} | Old: ${accountInitialPoints} → New: ${accountFinalPoints} | Duration: ${durationSeconds}s`,
                         'green'
                     )
                     this.logger.info(
@@ -639,7 +648,7 @@ export class MicrosoftRewardsBot {
             } catch (error) {
                 const durationSeconds = ((Date.now() - accountStartTime) / 1000).toFixed(1)
                 const errMsg = error instanceof Error ? error.message : String(error)
-                this.logger.error('main', 'ACCOUNT-ERROR', `${accountEmail}: ${errMsg}`)
+                this.logger.error('main', 'ACCOUNT-ERROR', `${redactAccountKey(accountEmail)}: ${errMsg}`)
                 accountStats.push({
                     email: accountEmail,
                     initialPoints: 0,
@@ -809,7 +818,7 @@ export class MicrosoftRewardsBot {
 
     async Main(account: Account): Promise<{ initialPoints: number; collectedPoints: number }> {
         const accountEmail = account.email
-        this.logger.info('main', 'FLOW', `Starting session for ${accountEmail}`)
+        this.logger.info('main', 'FLOW', `Starting session for ${redactAccountKey(accountEmail)}`)
 
         // Zero Leakage: Reset token and completed offers set for clean per-account isolation
         this.accessToken = ''
@@ -825,7 +834,7 @@ export class MicrosoftRewardsBot {
                 const initialContext: BrowserContext = mobileSession.context
                 this.mainMobilePage = await initialContext.newPage()
 
-                this.logger.info('main', 'BROWSER', `Mobile Browser started | ${accountEmail}`)
+                this.logger.info('main', 'BROWSER', `Mobile Browser started | ${redactAccountKey(accountEmail)}`)
 
                 await this.login.login(this.mainMobilePage, account)
 
@@ -887,8 +896,25 @@ export class MicrosoftRewardsBot {
                 this.logger.info(
                     'main',
                     'POINTS',
-                    `Earnable today | Mobile: ${browserEarnable.mobileSearchPoints} | Desktop: ${browserEarnable.desktopSearchPoints} | Daily Set: ${browserEarnable.dailySetPoints} | More: ${browserEarnable.morePromotionsPoints} | Total: ${browserEarnable.totalEarnablePoints} | ${accountEmail}`
+                    `Earnable today | Mobile: ${browserEarnable.mobileSearchPoints} | Desktop: ${browserEarnable.desktopSearchPoints} | Daily Set: ${browserEarnable.dailySetPoints} | More: ${browserEarnable.morePromotionsPoints} | Total: ${browserEarnable.totalEarnablePoints} | ${redactAccountKey(accountEmail)}`
                 )
+
+                const isAppOnlyEnabled =
+                    this.config.appOnlyRewards?.enabled ??
+                    this.config.workers.doWindowsAppRewards ??
+                    this.config.workers.doAppOnlyRewards ??
+                    true
+
+                // Hook 1: Verify pending manual quests
+                if (isAppOnlyEnabled && data) {
+                    await this.activities.verifyAppOnlyRewards(data)
+                }
+
+                // Hook 2: Observe current App-Only promotions
+                if (isAppOnlyEnabled && data) {
+                    this.updateDashboardAccount(accountEmail, { status: 'App-Only Observer' })
+                    await this.activities.observeAppOnlyRewards(data)
+                }
 
                 if (this.mainMobilePage) {
                     await this.workers.doClaimPendingPoints(this.mainMobilePage)
@@ -931,17 +957,6 @@ export class MicrosoftRewardsBot {
                 if (this.config.workers.doPunchCards && data && this.mainMobilePage) {
                     this.updateDashboardAccount(accountEmail, { status: 'Punch Cards' })
                     await this.workers.doPunchCards(data, this.mainMobilePage)
-                }
-
-                const isAppOnlyEnabled =
-                    this.config.appOnlyRewards?.enabled ??
-                    this.config.workers.doWindowsAppRewards ??
-                    this.config.workers.doAppOnlyRewards ??
-                    true
-
-                if (isAppOnlyEnabled && data) {
-                    this.updateDashboardAccount(accountEmail, { status: 'App-Only Observer' })
-                    await this.activities.observeAppOnlyRewards(data)
                 }
 
                 if (this.mainMobilePage) {
@@ -1020,7 +1035,7 @@ export class MicrosoftRewardsBot {
                 this.logger.info(
                     'main',
                     'FLOW',
-                    `Collected: +${collectedPoints} | Mobile: +${mobilePoints} | Desktop: +${desktopPoints} | ${accountEmail}`
+                    `Collected: +${collectedPoints} | Mobile: +${mobilePoints} | Desktop: +${desktopPoints} | ${redactAccountKey(accountEmail)}`
                 )
 
                 return { initialPoints, collectedPoints: collectedPoints || 0 }

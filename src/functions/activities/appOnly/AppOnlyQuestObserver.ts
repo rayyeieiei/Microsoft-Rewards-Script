@@ -1,3 +1,5 @@
+import fs from 'fs'
+import path from 'path'
 import { AppOnlyDecision, AppOnlyPolicy, AppOnlyQuest, ManualQuestRecord, redactAccountKey } from './AppOnlyTypes'
 import { AppOnlyClassificationInput, AppOnlyQuestClassifier } from './AppOnlyQuestClassifier'
 import { AppOnlyCapabilityCache } from './AppOnlyCapabilityCache'
@@ -15,29 +17,132 @@ export interface AppOnlyQuestObserverOptions {
 }
 
 /**
- * In-memory registry for pending manual quests, accessible by C2 and Verifier.
+ * Registry for pending manual quests, backed by atomic local file persistence
+ * and accessible by C2 and Verifier.
  */
 export class ManualQuestQueue {
     private static instance: ManualQuestQueue
     private queue = new Map<string, Map<string, ManualQuestRecord>>() // accountKey -> (offerId -> record)
+    private storagePath: string
 
-    public static getInstance(): ManualQuestQueue {
+    constructor(storagePath?: string) {
+        this.storagePath = storagePath || path.join(process.cwd(), 'browser', 'manual_quests.json')
+        this.loadFromDisk()
+    }
+
+    public static getInstance(storagePath?: string): ManualQuestQueue {
         if (!ManualQuestQueue.instance) {
-            ManualQuestQueue.instance = new ManualQuestQueue()
+            ManualQuestQueue.instance = new ManualQuestQueue(storagePath)
         }
         return ManualQuestQueue.instance
     }
 
+    private loadFromDisk(): void {
+        try {
+            if (fs.existsSync(this.storagePath)) {
+                const raw = fs.readFileSync(this.storagePath, 'utf-8')
+                const parsed = JSON.parse(raw)
+                if (parsed && typeof parsed === 'object') {
+                    for (const [acc, items] of Object.entries(parsed)) {
+                        if (Array.isArray(items)) {
+                            const safeAcc = redactAccountKey(acc)
+                            if (!this.queue.has(safeAcc)) {
+                                this.queue.set(safeAcc, new Map())
+                            }
+                            for (const item of items) {
+                                if (item && item.offerId) {
+                                    this.queue.get(safeAcc)!.set(item.offerId, {
+                                        accountKey: safeAcc,
+                                        offerId: String(item.offerId),
+                                        title: String(item.title || ''),
+                                        expectedPoints: Number(item.expectedPoints || 10),
+                                        state: item.state || 'manual-required',
+                                        queuedAt: item.queuedAt || new Date().toISOString(),
+                                        expiresAt: item.expiresAt,
+                                        detectedAt: item.detectedAt,
+                                        completedAt: item.completedAt,
+                                        verifiedBalanceDelta: item.verifiedBalanceDelta,
+                                        complete: Boolean(item.complete),
+                                        locked: Boolean(item.locked),
+                                        lockReason: item.lockReason || 'app-only',
+                                        confidence: item.confidence || 'high',
+                                        observedAt: item.observedAt || new Date().toISOString()
+                                    })
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch {
+            // Fail-safe: corrupted file should never crash the flow
+        }
+    }
+
+    private persistToDisk(): void {
+        try {
+            const dir = path.dirname(this.storagePath)
+            if (!fs.existsSync(dir)) {
+                fs.mkdirSync(dir, { recursive: true })
+            }
+            const dataToSave: Record<string, ManualQuestRecord[]> = {}
+            for (const [acc, map] of this.queue.entries()) {
+                dataToSave[acc] = Array.from(map.values()).map(r => ({
+                    accountKey: r.accountKey,
+                    offerId: r.offerId,
+                    title: r.title,
+                    expectedPoints: r.expectedPoints,
+                    state: r.state,
+                    queuedAt: r.queuedAt,
+                    expiresAt: r.expiresAt,
+                    detectedAt: r.detectedAt,
+                    completedAt: r.completedAt,
+                    verifiedBalanceDelta: r.verifiedBalanceDelta,
+                    complete: r.complete,
+                    locked: r.locked,
+                    lockReason: r.lockReason,
+                    confidence: r.confidence,
+                    observedAt: r.observedAt
+                }))
+            }
+            const tmpPath = `${this.storagePath}.tmp`
+            fs.writeFileSync(tmpPath, JSON.stringify(dataToSave, null, 2), 'utf-8')
+            fs.renameSync(tmpPath, this.storagePath)
+        } catch {
+            // Fail-safe: persistence write errors must not disrupt operation
+        }
+    }
+
     public enqueue(record: ManualQuestRecord): void {
-        const acc = record.accountKey
+        const acc = redactAccountKey(record.accountKey)
         if (!this.queue.has(acc)) {
             this.queue.set(acc, new Map())
         }
-        this.queue.get(acc)!.set(record.offerId, record)
+        const accMap = this.queue.get(acc)!
+        const existing = accMap.get(record.offerId)
+        if (existing) {
+            // Deduplicate: Don't overwrite verified completion or duplicate
+            if (existing.state === 'verified-complete') {
+                return
+            }
+            accMap.set(record.offerId, {
+                ...existing,
+                ...record,
+                accountKey: acc,
+                queuedAt: existing.queuedAt || record.queuedAt
+            })
+        } else {
+            accMap.set(record.offerId, {
+                ...record,
+                accountKey: acc
+            })
+        }
+        this.persistToDisk()
     }
 
     public getPendingForAccount(accountKey: string): ManualQuestRecord[] {
-        const accMap = this.queue.get(accountKey)
+        const safeAcc = redactAccountKey(accountKey)
+        const accMap = this.queue.get(safeAcc)
         if (!accMap) return []
         return Array.from(accMap.values()).filter(r => r.state === 'manual-required' || r.state === 'detected')
     }
@@ -54,22 +159,38 @@ export class ManualQuestQueue {
         return all
     }
 
+    public getSanitizedSnapshot(): Record<string, ManualQuestRecord[]> {
+        const snapshot: Record<string, ManualQuestRecord[]> = {}
+        for (const [acc, map] of this.queue.entries()) {
+            snapshot[acc] = Array.from(map.values()).map(r => ({ ...r }))
+        }
+        return snapshot
+    }
+
     public updateState(accountKey: string, offerId: string, state: ManualQuestRecord['state'], delta?: number): void {
-        const accMap = this.queue.get(accountKey)
+        const safeAcc = redactAccountKey(accountKey)
+        const accMap = this.queue.get(safeAcc)
         if (accMap && accMap.has(offerId)) {
             const item = accMap.get(offerId)!
             item.state = state
             if (state === 'verified-complete') {
                 item.completedAt = new Date().toISOString()
+                item.complete = true
                 if (typeof delta === 'number') {
                     item.verifiedBalanceDelta = delta
                 }
             }
+            this.persistToDisk()
         }
     }
 
     public clear(): void {
         this.queue.clear()
+        try {
+            if (fs.existsSync(this.storagePath)) {
+                fs.unlinkSync(this.storagePath)
+            }
+        } catch {}
     }
 }
 
@@ -107,6 +228,14 @@ export class AppOnlyQuestObserver {
             const cached = await this.cache.getRecord(safeAccount, offerId)
             if (cached && cached.serverState === 'locked' && cached.classification === 'app-only') {
                 logger?.debug?.(`[APP-ONLY-CACHE] hit=true offerId=${offerId} state=locked`)
+                decisions.push({
+                    quest: this.classifier.classify({ ...promo, accountKey: safeAccount }),
+                    policy,
+                    action: 'skip',
+                    reason: 'cached-negative-capability'
+                })
+                skippedCount++
+                continue
             }
 
             // 2. Classify card independently

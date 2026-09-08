@@ -54,6 +54,7 @@ export interface AppOnlyCapabilityRecord {
 export interface ManualQuestRecord extends AppOnlyQuest {
     state: ManualQuestState
     queuedAt: string
+    detectedAt?: string
     completedAt?: string
     verifiedBalanceDelta?: number
 }
@@ -83,3 +84,5 @@ export function redactAccountKey(identifier: string): string {
     const visibleLen = Math.min(3, Math.max(1, user.length - 2))
     return `${user.slice(0, visibleLen)}***@${domain}`
 }
+
+export * from '../ActivitySemantics'

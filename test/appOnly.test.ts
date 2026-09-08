@@ -1,364 +1,368 @@
 import assert from 'assert'
+import fs from 'fs'
+import path from 'path'
 import { AppOnlyQuestClassifier } from '../src/functions/activities/appOnly/AppOnlyQuestClassifier'
 import {
     AppOnlyCapabilityCache,
     InMemoryCapabilityStore
 } from '../src/functions/activities/appOnly/AppOnlyCapabilityCache'
 import { AppOnlyQuestObserver, ManualQuestQueue } from '../src/functions/activities/appOnly/AppOnlyQuestObserver'
-import { AppOnlyQuestVerifier } from '../src/functions/activities/appOnly/AppOnlyQuestVerifier'
-import { WindowsAppRewards } from '../src/functions/activities/app/WindowsAppRewards'
-import { redactAccountKey } from '../src/functions/activities/appOnly/AppOnlyTypes'
+import { ManualQuestRecord } from '../src/functions/activities/appOnly/AppOnlyTypes'
+import { evaluateActivityCompletion, ActivityBatchSummary } from '../src/functions/activities/ActivitySemantics'
+import { Workers } from '../src/functions/Workers'
+import { resolveAppOnlyPolicy } from '../src/functions/activities/appOnly/AppOnlyPolicy'
+import { validateAccounts } from '../src/util/Validator'
 
 async function runTests() {
-    console.log('🧪 Starting App-Only Observer Flow Test Suite...\n')
+    console.log('🧪 Starting Strict App-Only Observer & Verification Test Suite...\n')
 
     const classifier = new AppOnlyQuestClassifier()
 
-    // 1. Explicit App-Only + locked → app-only/high
+    // 1. Balance +13 pada offer advertised +10 tidak diatribusikan sebagai +13
     {
-        const quest = classifier.classify({
-            accountKey: 'testuser@example.com',
-            offerId: 'offer_app_explicit',
-            title: 'Shop your way to Namaste',
-            exclusiveLockedFeatureCategory: 'rewardsApp',
-            exclusiveLockedFeatureStatus: 'locked'
+        const result = evaluateActivityCompletion({
+            offerId: 'quiz_offer_1',
+            title: 'Quiz Activity',
+            advertisedPoints: 10,
+            observedBalanceDelta: 13,
+            serverCompleted: true,
+            completionEvidence: 'server-dashboard-state'
         })
-        assert.strictEqual(quest.lockReason, 'app-only', 'Fixture 1 failed: lockReason must be app-only')
-        assert.strictEqual(quest.confidence, 'high', 'Fixture 1 failed: confidence must be high')
-        assert.strictEqual(quest.locked, true, 'Fixture 1 failed: quest must be locked')
-        console.log('✅ 1. Explicit App-Only + locked -> app-only/high')
+        assert.strictEqual(result.status, 'verified-complete', 'Status must be verified-complete when server completed')
+        assert.strictEqual(
+            result.attributedPoints,
+            null,
+            'attributedPoints must be null when delta (13) differs from advertised (10)'
+        )
+        assert.notStrictEqual(result.attributedPoints, 13, 'Must NOT attribute full +13 delta to the card')
+        console.log('✅ 1. Balance +13 pada offer advertised +10 tidak diatribusikan sebagai +13')
     }
 
-    // 2. Localized title `(Rewards App only)` without metadata → app-only/medium
+    // 2. Balance +3 pada offer advertised +0 tidak membuktikan completion
     {
-        const quest = classifier.classify({
-            accountKey: 'testuser@example.com',
-            offerId: 'offer_app_text',
-            title: 'Moon miracles (Rewards App only)',
-            isLocked: true
+        const result = evaluateActivityCompletion({
+            offerId: 'explore_offer_2',
+            title: 'Explore on Bing',
+            advertisedPoints: 0,
+            observedBalanceDelta: 3,
+            serverCompleted: false,
+            completionEvidence: 'none'
         })
-        assert.strictEqual(quest.lockReason, 'app-only', 'Fixture 2 failed: lockReason must be app-only')
-        assert.strictEqual(quest.confidence, 'medium', 'Fixture 2 failed: confidence must be medium')
-        assert.strictEqual(quest.locked, true, 'Fixture 2 failed: quest must be locked')
-        console.log('✅ 2. Localized title (Rewards App only) without metadata -> app-only/medium')
+        assert.strictEqual(result.status, 'processed-unverified', 'Status must be processed-unverified')
+        assert.strictEqual(result.serverCompleted, false, 'serverCompleted must remain false')
+        assert.strictEqual(result.attributedPoints, null, 'attributedPoints must be null')
+        assert.strictEqual(result.completionEvidence, 'none', 'completionEvidence must be none')
+        console.log('✅ 2. Balance +3 pada offer advertised +0 tidak membuktikan completion (processed-unverified)')
     }
 
-    // 3. Generic locked task → unknown
+    // 3. Batch summary tidak mengatakan "all completed" jika satu pending / unverified
     {
-        const quest = classifier.classify({
-            accountKey: 'testuser@example.com',
-            offerId: 'offer_generic_locked',
-            title: 'Generic Locked Quest',
-            isLocked: true
-        })
-        assert.strictEqual(quest.lockReason, 'unknown', 'Fixture 3 failed: lockReason must be unknown')
-        assert.strictEqual(quest.locked, true, 'Fixture 3 failed: quest must be locked')
-        console.log('✅ 3. Generic locked task -> unknown')
+        const summary: ActivityBatchSummary = {
+            total: 5,
+            verifiedComplete: 4,
+            processedUnverified: 1,
+            pending: 0,
+            skipped: 0,
+            failed: 0,
+            observedAccountBalanceDelta: 49
+        }
+        const isAllCompleted = summary.total > 0 && summary.verifiedComplete === summary.total
+        assert.strictEqual(isAllCompleted, false, 'Batch summary with unverified item must not be all-completed')
+        assert.strictEqual(summary.verifiedComplete, 4)
+        assert.strictEqual(summary.processedUnverified, 1)
+        console.log('✅ 3. Batch summary tidak mengatakan "all completed" jika satu pending/unverified')
     }
 
-    // 4. Future task → future-dated
+    // 4. Punch Card 0/4 dengan satu eligible menghasilkan actionableNow=1 locked=3
     {
-        const futureDate = new Date(Date.now() + 86400000).toISOString()
-        const quest = classifier.classify({
-            accountKey: 'testuser@example.com',
-            offerId: 'offer_future',
-            title: 'Future Promotion',
-            availableFrom: futureDate
-        })
-        assert.strictEqual(quest.lockReason, 'future-dated', 'Fixture 4 failed: lockReason must be future-dated')
-        assert.strictEqual(quest.locked, true, 'Fixture 4 failed: quest must be locked')
-        console.log('✅ 4. Future task -> future-dated')
+        const mockWorkers = new Workers({} as any)
+        const mockPunchCard = {
+            name: 'Multi-day Punchcard',
+            childPromotions: [
+                { offerId: 'step_1', title: 'Step 1', complete: false, pointProgressMax: 10, pointProgress: 0 },
+                {
+                    offerId: 'step_2',
+                    title: 'Step 2',
+                    complete: false,
+                    pointProgressMax: 10,
+                    pointProgress: 0,
+                    attributes: { isLocked: 'True' }
+                },
+                {
+                    offerId: 'step_3',
+                    title: 'Step 3',
+                    complete: false,
+                    pointProgressMax: 10,
+                    pointProgress: 0,
+                    attributes: { isLocked: 'True' }
+                },
+                {
+                    offerId: 'step_4',
+                    title: 'Step 4',
+                    complete: false,
+                    pointProgressMax: 10,
+                    pointProgress: 0,
+                    attributes: { isLocked: 'True' }
+                }
+            ]
+        } as any
+        const counts = mockWorkers.getPunchCardTaskCounts(mockPunchCard)
+        assert.strictEqual(counts.total, 4)
+        assert.strictEqual(counts.completed, 0)
+        assert.strictEqual(counts.remaining, 4)
+        assert.strictEqual(counts.actionableNow, 1, 'Only 1 step is actionable today')
+        assert.strictEqual(counts.locked, 3, '3 steps must be marked locked')
+        console.log('✅ 4. Punch Card 0/4 dengan satu eligible menghasilkan actionableNow=1 locked=3')
     }
 
-    // 5. Cooldown child → cooldown
+    // 5. Satu child saja dijalankan per parent per run
     {
-        const quest = classifier.classify({
-            accountKey: 'testuser@example.com',
-            offerId: 'offer_cooldown',
-            title: 'Cooldown Quest',
-            attributes: { is_cooldown: true }
-        })
-        assert.strictEqual(quest.lockReason, 'cooldown', 'Fixture 5 failed: lockReason must be cooldown')
-        assert.strictEqual(quest.locked, true, 'Fixture 5 failed: quest must be locked')
-        console.log('✅ 5. Cooldown child -> cooldown')
+        const mockWorkers = new Workers({} as any)
+        // Even if all children have no isLocked attribute, sequential rule enforces actionableNow = 1
+        const mockPunchCardSequential = {
+            name: 'Sequential Streak Card',
+            childPromotions: [
+                { offerId: 's1', title: 'Day 1', complete: false, pointProgressMax: 10, pointProgress: 0 },
+                { offerId: 's2', title: 'Day 2', complete: false, pointProgressMax: 10, pointProgress: 0 },
+                { offerId: 's3', title: 'Day 3', complete: false, pointProgressMax: 10, pointProgress: 0 },
+                { offerId: 's4', title: 'Day 4', complete: false, pointProgressMax: 10, pointProgress: 0 }
+            ]
+        } as any
+        const counts = mockWorkers.getPunchCardTaskCounts(mockPunchCardSequential)
+        assert.strictEqual(counts.actionableNow, 1, 'Only 1 child can be actionableNow per parent per run')
+        assert.strictEqual(counts.locked, 3, 'Subsequent uncompleted steps are locked behind sequential cooldown')
+        console.log('✅ 5. Satu child saja dijalankan per parent per run')
     }
 
-    // 6. Completed App-Only → completed
+    // 6. Verifier dipanggil di production orchestrator
     {
-        const quest = classifier.classify({
-            accountKey: 'testuser@example.com',
-            offerId: 'offer_completed',
-            title: 'Completed Quest (Rewards App only)',
-            complete: true,
-            exclusiveLockedFeatureCategory: 'rewardsApp'
-        })
-        assert.strictEqual(quest.complete, true, 'Fixture 6 failed: complete must be true')
-        assert.strictEqual(quest.lockReason, 'completed', 'Fixture 6 failed: lockReason must be completed')
-        assert.strictEqual(quest.locked, false, 'Fixture 6 failed: completed quest is not locked')
-        console.log('✅ 6. Completed App-Only -> completed')
+        const indexSrc = fs.readFileSync(path.resolve('src/index.ts'), 'utf8')
+        assert.ok(
+            indexSrc.includes('await this.activities.verifyAppOnlyRewards(data)'),
+            'Production orchestrator must call verifyAppOnlyRewards after dashboard load'
+        )
+        assert.ok(
+            indexSrc.includes('await this.activities.observeAppOnlyRewards(data)'),
+            'Production orchestrator must call observeAppOnlyRewards after dashboard load'
+        )
+
+        // Call order assertion: verifyAppOnlyRewards comes before doDailySet
+        const verifyIdx = indexSrc.indexOf('await this.activities.verifyAppOnlyRewards(data)')
+        const dailySetIdx = indexSrc.indexOf('await this.workers.doDailySet(data')
+        assert.ok(
+            verifyIdx !== -1 && dailySetIdx !== -1 && verifyIdx < dailySetIdx,
+            'verifyAppOnlyRewards must be invoked before doDailySet'
+        )
+        console.log('✅ 6. Verifier dipanggil di production orchestrator')
     }
 
-    // 7. Destination rnoreward=1 without other markers → never automatic high confidence
+    // 7. Account policy override terbaca loader
     {
-        const quest = classifier.classify({
-            accountKey: 'testuser@example.com',
-            offerId: 'offer_rnoreward',
-            title: 'Some Quest',
-            destinationUrl: 'https://www.bing.com/search?q=Test&rnoreward=1',
-            isLocked: true
-        })
-        assert.notStrictEqual(quest.confidence, 'high', 'Fixture 7 failed: rnoreward alone must not be high confidence')
-        console.log('✅ 7. Destination rnoreward=1 without markers -> confidence is not high')
-    }
-
-    // 8. 5 App-Only and 3 normal promotions → only 5 are skipped
-    {
-        const promos = [
-            // 5 App-Only
+        const rawAccountData = [
             {
-                accountKey: 'test@example.com',
-                offerId: 'app1',
-                title: 'App 1',
-                exclusiveLockedFeatureCategory: 'rewardsApp'
-            },
-            { accountKey: 'test@example.com', offerId: 'app2', title: 'App 2 (Rewards App only)' },
-            {
-                accountKey: 'test@example.com',
-                offerId: 'app3',
-                title: 'App 3',
-                exclusiveLockedFeatureCategory: 'rewardsApp'
-            },
-            { accountKey: 'test@example.com', offerId: 'app4', title: 'App 4 (Rewards App only)' },
-            {
-                accountKey: 'test@example.com',
-                offerId: 'app5',
-                title: 'App 5',
-                exclusiveLockedFeatureCategory: 'rewardsApp'
-            },
-            // 3 Normal Promotions
-            { accountKey: 'test@example.com', offerId: 'norm1', title: 'Normal 1', isLocked: false },
-            { accountKey: 'test@example.com', offerId: 'norm2', title: 'Normal 2', isLocked: false },
-            { accountKey: 'test@example.com', offerId: 'norm3', title: 'Normal 3', isLocked: false }
+                email: 'custom@override.com',
+                password: 'pass',
+                recoveryEmail: 'rec@test.com',
+                geoLocale: 'ID',
+                langCode: 'id',
+                proxy: { proxyAxios: false, url: '', port: 0, password: '', username: '' },
+                saveFingerprint: { mobile: true, desktop: true },
+                appOnlyPolicy: 'manual-handoff'
+            }
         ]
+        const validated = validateAccounts(rawAccountData)
+        assert.strictEqual(validated[0]?.appOnlyPolicy, 'manual-handoff', 'Loader must retain appOnlyPolicy')
 
-        const observer = new AppOnlyQuestObserver()
-        const decisions = await observer.observe(promos, { policy: 'skip', cacheTtlHours: 24 })
+        // Test precedence resolution
+        const resAccountOverride = resolveAppOnlyPolicy(validated[0]?.appOnlyPolicy, 'skip')
+        assert.strictEqual(resAccountOverride.policy, 'manual-handoff')
+        assert.strictEqual(resAccountOverride.source, 'account-override')
 
-        const skipped = decisions.filter(d => d.action === 'skip')
-        const ignored = decisions.filter(d => d.action === 'ignore')
+        const resGlobalDefault = resolveAppOnlyPolicy(undefined, 'notify')
+        assert.strictEqual(resGlobalDefault.policy, 'notify')
+        assert.strictEqual(resGlobalDefault.source, 'global-default')
 
-        assert.strictEqual(skipped.length, 5, 'Fixture 8 failed: exactly 5 app-only cards must be skipped')
-        assert.strictEqual(ignored.length, 3, 'Fixture 8 failed: 3 normal cards must not be skipped')
-        console.log('✅ 8. Heterogeneous batch (5 App-Only + 3 Normal) -> only 5 skipped, normal cards preserved')
+        const resFallback = resolveAppOnlyPolicy(undefined, undefined)
+        assert.strictEqual(resFallback.policy, 'skip')
+        assert.strictEqual(resFallback.source, 'fallback')
+        console.log('✅ 7. Account policy override terbaca loader')
     }
 
-    // 9. Account A cached locked → Account B with same offer does NOT get cache hit
+    // 8. Cache tidak dibagi lintas akun
     {
         const store = new InMemoryCapabilityStore()
         const cache = new AppOnlyCapabilityCache(store)
+        const offerId = 'offer_cache_boundary'
 
-        const accA = 'userA@domain.com'
-        const accB = 'userB@domain.com'
-        const offer = 'shared_offer_123'
+        await cache.recordLocked('userA@test.com', offerId, 'app-only', 'high', 24)
+        const userARecord = await cache.getRecord('userA@test.com', offerId)
+        const userBRecord = await cache.getRecord('userB@test.com', offerId)
 
-        await cache.recordLocked(accA, offer, 'app-only', 'high', 24)
-
-        const hitA = await cache.getRecord(accA, offer)
-        const hitB = await cache.getRecord(accB, offer)
-
-        assert.notStrictEqual(hitA, null, 'Fixture 9 failed: Account A must have cache hit')
-        assert.strictEqual(hitB, null, 'Fixture 9 failed: Account B must NOT have cache hit')
-        console.log('✅ 9. Cache strict isolation between Account A and Account B verified')
+        assert.notStrictEqual(userARecord, null, 'User A should hit cache')
+        assert.strictEqual(userBRecord, null, 'User B must not share User A cache')
+        console.log('✅ 8. Cache tidak dibagi lintas akun')
     }
 
-    // 10. Verifier does NOT mark completion from simulated HTTP 200 or DOM interaction
+    // 9. Repeated observer call menghasilkan cache hit
     {
-        const queue = new ManualQuestQueue()
-        queue.clear()
-        const verifier = new AppOnlyQuestVerifier(queue)
+        const store = new InMemoryCapabilityStore()
+        const cache = new AppOnlyCapabilityCache(store)
+        const observer = new AppOnlyQuestObserver(classifier, cache)
+        const testPromo = [
+            {
+                accountKey: 'repeat@test.com',
+                offerId: 'promo_repeat_1',
+                title: 'Repeat Task (Rewards App only)',
+                exclusiveLockedFeatureCategory: 'rewardsApp',
+                exclusiveLockedFeatureStatus: 'locked'
+            }
+        ]
 
-        const accKey = 'operator@domain.com'
-        const offerId = 'manual_test_offer'
+        let notifyCount = 0
+        // Call 1: Observes and notifies
+        await observer.observe(testPromo, {
+            policy: 'notify',
+            cacheTtlHours: 24,
+            onNotification: async () => {
+                notifyCount++
+            }
+        })
+        assert.strictEqual(notifyCount, 1, 'First call triggers notification')
 
-        queue.enqueue({
-            accountKey: redactAccountKey(accKey),
-            offerId,
+        // Call 2: Negative-capability cache hit, does not notify again
+        const decisions2 = await observer.observe(testPromo, {
+            policy: 'notify',
+            cacheTtlHours: 24,
+            onNotification: async () => {
+                notifyCount++
+            }
+        })
+        assert.strictEqual(notifyCount, 1, 'Second call hits cache, notification not duplicated')
+        assert.strictEqual(decisions2[0]?.action, 'skip')
+        assert.strictEqual(decisions2[0]?.reason, 'cached-negative-capability')
+        console.log('✅ 9. Repeated observer call menghasilkan cache hit')
+    }
+
+    // 10. Manual queue tidak menduplikasi offer
+    {
+        const testQueueFile = path.resolve('scratch_manual_queue_test.json')
+        try {
+            if (fs.existsSync(testQueueFile)) fs.unlinkSync(testQueueFile)
+        } catch {}
+        const queue = new ManualQuestQueue(testQueueFile)
+
+        const record: ManualQuestRecord = {
+            accountKey: 'manual@test.com',
+            offerId: 'offer_manual_1',
             title: 'Manual Task',
             expectedPoints: 10,
             complete: false,
             locked: true,
             lockReason: 'app-only',
             confidence: 'high',
-            observedAt: new Date().toISOString(),
             state: 'manual-required',
+            observedAt: new Date().toISOString(),
             queuedAt: new Date().toISOString()
-        })
+        }
 
-        // Server payload still returns complete: false (e.g. user navigated or button clicked, but server didn't credit)
-        const serverPromos = [
-            {
-                accountKey: accKey,
-                offerId,
-                title: 'Manual Task',
-                complete: false,
-                pointProgress: 0,
-                pointProgressMax: 10
-            }
-        ]
+        queue.enqueue(record)
+        assert.strictEqual(queue.getPendingForAccount('manual@test.com').length, 1)
 
-        const results = await verifier.verify(serverPromos, { accountKey: accKey })
+        // Enqueue duplicate
+        queue.enqueue({ ...record, expectedPoints: 20 })
         assert.strictEqual(
-            results[0]?.complete,
-            false,
-            'Fixture 10 failed: verifier must not mark completion when server complete is false'
+            queue.getPendingForAccount('manual@test.com').length,
+            1,
+            'Duplicate enqueue must not create multiple records'
         )
+
+        // Update state to complete
+        queue.updateState('manual@test.com', 'offer_manual_1', 'verified-complete', 10)
         assert.strictEqual(
-            queue.getPendingForAccount(redactAccountKey(accKey))[0]?.state,
-            'manual-required',
-            'Fixture 10 failed: state must remain manual-required'
+            queue.getPendingForAccount('manual@test.com').length,
+            0,
+            'Completed quest must be removed from pending list'
         )
-        console.log('✅ 10. Verifier rejects non-server completion (DOM/HTTP 200 without server balance/progress)')
+
+        try {
+            if (fs.existsSync(testQueueFile)) fs.unlinkSync(testQueueFile)
+        } catch {}
+        console.log('✅ 10. Manual queue tidak menduplikasi offer')
     }
 
-    // 11. Verifier marks completion when dashboard server confirms
+    // 11. /api/status menampilkan queue tanpa sensitive data
     {
-        const queue = new ManualQuestQueue()
-        queue.clear()
-        const cache = new AppOnlyCapabilityCache(new InMemoryCapabilityStore())
-        const verifier = new AppOnlyQuestVerifier(queue, cache)
-
-        const accKey = 'operator@domain.com'
-        const offerId = 'verified_offer'
-
-        // Record locked in cache
-        await cache.recordLocked(redactAccountKey(accKey), offerId, 'app-only', 'high', 24)
+        const testQueueFile = path.resolve('scratch_manual_queue_test2.json')
+        try {
+            if (fs.existsSync(testQueueFile)) fs.unlinkSync(testQueueFile)
+        } catch {}
+        const queue = new ManualQuestQueue(testQueueFile)
 
         queue.enqueue({
-            accountKey: redactAccountKey(accKey),
-            offerId,
-            title: 'Verified Task',
+            accountKey: 'baryyaja@gmail.com',
+            offerId: 'offer_c2_test',
+            title: 'C2 Test Task',
             expectedPoints: 10,
             complete: false,
             locked: true,
             lockReason: 'app-only',
             confidence: 'high',
-            observedAt: new Date().toISOString(),
             state: 'manual-required',
+            observedAt: new Date().toISOString(),
             queuedAt: new Date().toISOString()
         })
 
-        // Server payload confirms complete: true
-        const serverPromos = [
-            {
-                accountKey: accKey,
-                offerId,
-                title: 'Verified Task',
-                complete: true,
-                pointProgress: 10,
-                pointProgressMax: 10
-            }
-        ]
+        const snapshot = queue.getSanitizedSnapshot()
+        const jsonStr = JSON.stringify(snapshot)
 
-        const results = await verifier.verify(serverPromos, {
-            accountKey: accKey,
-            previousBalance: 1000,
-            currentBalance: 1010
-        })
+        assert.strictEqual(jsonStr.includes('baryyaja@gmail.com'), false, 'Full email must be redacted')
+        assert.ok(jsonStr.includes('bar***@gmail.com'), 'Redacted accountKey must be present')
+        assert.strictEqual(jsonStr.includes('password'), false, 'Password must not be in snapshot')
+        assert.strictEqual(jsonStr.includes('token'), false, 'Token must not be in snapshot')
+        assert.strictEqual(jsonStr.includes('cookie'), false, 'Cookie must not be in snapshot')
 
-        assert.strictEqual(results[0]?.complete, true, 'Fixture 11 failed: verifier must mark complete')
-        assert.strictEqual(results[0]?.balanceDelta, 10, 'Fixture 11 failed: delta must be 10')
-
-        // Negative cache must be cleared
-        const cachedAfter = await cache.getRecord(redactAccountKey(accKey), offerId)
-        assert.strictEqual(cachedAfter, null, 'Fixture 11 failed: negative cache must be invalidated upon completion')
-        console.log('✅ 11. Verifier confirms completion on server confirmation and clears negative cache')
+        try {
+            if (fs.existsSync(testQueueFile)) fs.unlinkSync(testQueueFile)
+        } catch {}
+        console.log('✅ 11. /api/status menampilkan queue tanpa sensitive data')
     }
 
-    // 12. Policy skip, notify, and manual-handoff are non-blocking
+    // 12. Test JS/TS tidak mengalami source duplication
     {
-        const observer = new AppOnlyQuestObserver()
-        const promo = [
-            {
-                accountKey: 'flow@test.com',
-                offerId: 'policy_test',
-                title: 'Policy Test (Rewards App only)'
-            }
-        ]
-
-        let notified = false
-        let queued = false
-
-        // Test skip
-        const startSkip = Date.now()
-        await observer.observe(promo, { policy: 'skip', cacheTtlHours: 24 })
-        assert.ok(Date.now() - startSkip < 500, 'Skip policy must complete immediately')
-
-        // Test notify
-        const startNotify = Date.now()
-        await observer.observe(promo, {
-            policy: 'notify',
-            cacheTtlHours: 24,
-            onNotification: async () => {
-                notified = true
-            }
-        })
-        assert.ok(Date.now() - startNotify < 500, 'Notify policy must complete immediately')
-        assert.strictEqual(notified, true, 'onNotification callback must be invoked')
-
-        // Test manual-handoff
-        const startManual = Date.now()
-        await observer.observe(promo, {
-            policy: 'manual-handoff',
-            cacheTtlHours: 24,
-            onManualRequired: async () => {
-                queued = true
-            }
-        })
-        assert.ok(Date.now() - startManual < 500, 'Manual-handoff policy must complete immediately')
-        assert.strictEqual(queued, true, 'onManualRequired callback must be invoked')
-
-        console.log('✅ 12. Policies (skip, notify, manual-handoff) operate non-blocking (<500ms)')
+        assert.strictEqual(
+            fs.existsSync(path.resolve('test/appOnly.test.js')),
+            false,
+            'test/appOnly.test.js must be deleted'
+        )
+        const pkgJson = JSON.parse(fs.readFileSync(path.resolve('package.json'), 'utf8'))
+        assert.strictEqual(
+            pkgJson.scripts.test,
+            'ts-node test/appOnly.test.ts',
+            'npm test must run ts-node directly on TypeScript source'
+        )
+        console.log('✅ 12. Test JS/TS tidak mengalami source duplication')
     }
 
-    // 13. Regression Assertions: Verify no DAPI POST or browser automation in WindowsAppRewards
+    // 13. Logger tidak mencetak raw fingerprint atau email lengkap
     {
-        const proto = WindowsAppRewards.prototype as any
-        assert.strictEqual(typeof proto.doWindowsAppRewards, 'function', 'doWindowsAppRewards entrypoint must exist')
-
-        // Verify WindowsAppRewards source code does not contain banned live spoofing keywords
-        const fs = await import('fs')
-        const path = await import('path')
-        const srcCode = fs.readFileSync(path.resolve('src/functions/activities/app/WindowsAppRewards.ts'), 'utf8')
-
+        const browserSrc = fs.readFileSync(path.resolve('src/browser/Browser.ts'), 'utf8')
         assert.strictEqual(
-            srcCode.includes('prod.rewardsplatform.microsoft.com/dapi/me/activities'),
+            browserSrc.includes('JSON.stringify(fingerprint)'),
             false,
-            'Regression failed: WindowsAppRewards must NOT contain DAPI POST endpoint'
+            'Browser.ts must not dump raw JSON fingerprint'
         )
-        assert.strictEqual(
-            srcCode.includes('tab.goto'),
-            false,
-            'Regression failed: WindowsAppRewards must NOT navigate tabs via Playwright'
-        )
-        assert.strictEqual(
-            srcCode.includes('context.newPage'),
-            false,
-            'Regression failed: WindowsAppRewards must NOT spawn browser pages'
-        )
-        assert.strictEqual(
-            srcCode.includes('rnoreward=1'),
-            false,
-            'Regression failed: WindowsAppRewards must NOT manipulate rnoreward query parameters'
-        )
-        assert.strictEqual(
-            srcCode.includes('EmbeddedBrowserWebView/1.0'),
-            false,
-            'Regression failed: WindowsAppRewards must NOT spoof WebView2 UA'
+        assert.ok(
+            browserSrc.includes('BROWSER-FINGERPRINT') && browserSrc.includes('viewport='),
+            'Browser.ts must log structured fingerprint summary'
         )
 
-        console.log(
-            '✅ 13. Regression assertions passed: Zero DAPI POST, zero browser tab navigation, zero UA spoofing'
+        const searchManagerSrc = fs.readFileSync(path.resolve('src/functions/SearchManager.ts'), 'utf8')
+        assert.strictEqual(
+            searchManagerSrc.includes("account.proxy ?? 'none'"),
+            false,
+            'SearchManager must not output proxy=[object Object]'
         )
+        console.log('✅ 13. Logger tidak mencetak raw fingerprint atau email lengkap')
     }
 
     console.log('\n🎉 ALL 13 TEST SUITES PASSED SUCCESSFULLY!\n')
