@@ -463,56 +463,91 @@ export default class BrowserFunc {
         try {
             const activePage = page || this.bot.mainMobilePage || this.bot.mainDesktopPage
             if (activePage && !activePage.isClosed()) {
-                // 1. Coba fetch API resmi Rewards dari browser context (paling akurat & real-time)
-                const apiPoints = await activePage.evaluate(async () => {
-                    try {
-                        const url = window.location.href.toLowerCase()
-                        if (url.includes('rewards.bing.com') || url.includes('bing.com')) {
-                            const res = await fetch('https://rewards.bing.com/api/getuserinfo?type=1', { credentials: 'include' })
-                            if (res.ok) {
-                                const data = await res.json()
-                                const pts = data?.dashboard?.userStatus?.availablePoints
-                                if (typeof pts === 'number' && pts > 0) return pts
+                // 1. Direct Request Context (fastest, no DOM/eval stall risk, shares context cookies)
+                try {
+                    const ctx = activePage.context()
+                    if (ctx && ctx.request) {
+                        const res = await ctx.request.get('https://rewards.bing.com/api/getuserinfo?type=1', {
+                            timeout: 4000,
+                            failOnStatusCode: false
+                        })
+                        if (res && typeof res.ok === 'function' && res.ok()) {
+                            const data = await res.json().catch(() => null)
+                            const pts = data?.dashboard?.userStatus?.availablePoints
+                            if (typeof pts === 'number' && pts > 0) {
+                                this.bot.userData.currentPoints = pts
+                                return pts
                             }
                         }
-                    } catch {}
-                    return null
-                }).catch(() => null)
+                    }
+                } catch {
+                    // Fallback to in-page evaluate if request context fails
+                }
+
+                // 2. Fallback: in-page fetch dengan AbortController & Node-level timeout (6000ms)
+                const apiPoints = await Promise.race([
+                    activePage.evaluate(async () => {
+                        let timeoutId: any
+                        try {
+                            const controller = new AbortController()
+                            timeoutId = setTimeout(() => controller.abort(), 4000)
+                            const url = window.location.href.toLowerCase()
+                            if (url.includes('rewards.bing.com') || url.includes('bing.com')) {
+                                const res = await fetch('https://rewards.bing.com/api/getuserinfo?type=1', {
+                                    credentials: 'include',
+                                    signal: controller.signal
+                                })
+                                if (res.ok) {
+                                    const data = await res.json()
+                                    const pts = data?.dashboard?.userStatus?.availablePoints
+                                    if (typeof pts === 'number' && pts > 0) return pts
+                                }
+                            }
+                        } catch {} finally {
+                            if (timeoutId) clearTimeout(timeoutId)
+                        }
+                        return null
+                    }),
+                    new Promise<null>(resolve => setTimeout(() => resolve(null), 6000))
+                ]).catch(() => null)
 
                 if (typeof apiPoints === 'number' && apiPoints > 0) {
                     this.bot.userData.currentPoints = apiPoints
                     return apiPoints
                 }
 
-                // 2. Ekstrak langsung dari kartu "Available points" di Dashboard Rewards modern (Live State)
-                const domPoints = await activePage.evaluate(() => {
-                    const allCards = Array.from(document.querySelectorAll('div, section, .card, .p-card, .c-card, [class*="card"]'))
-                    for (const el of allCards) {
-                        const txt = (el.textContent || '').trim()
-                        if ((txt.includes('Available points') || txt.includes('Poin yang tersedia')) && !txt.includes('Ready to claim') && txt.length < 150) {
-                            const numbers = txt.replace(/Available points|Poin yang tersedia|Redeem|>|,/gi, ' ').match(/\b(\d+)\b/g)
-                            if (numbers && numbers.length > 0) {
-                                const val = parseInt(numbers[0], 10)
-                                if (val > 0) return val
+                // 3. Ekstrak langsung dari DOM dengan Node-level timeout (3000ms)
+                const domPoints = await Promise.race([
+                    activePage.evaluate(() => {
+                        const allCards = Array.from(document.querySelectorAll('div, section, .card, .p-card, .c-card, [class*="card"]'))
+                        for (const el of allCards) {
+                            const txt = (el.textContent || '').trim()
+                            if ((txt.includes('Available points') || txt.includes('Poin yang tersedia')) && !txt.includes('Ready to claim') && txt.length < 150) {
+                                const numbers = txt.replace(/Available points|Poin yang tersedia|Redeem|>|,/gi, ' ').match(/\b(\d+)\b/g)
+                                if (numbers && numbers.length > 0) {
+                                    const val = parseInt(numbers[0], 10)
+                                    if (val > 0) return val
+                                }
                             }
                         }
-                    }
 
-                    // 2. Badge koin header Bing search (#id_rc atau #rh_meter)
-                    const rc = document.getElementById('id_rc')?.innerText?.replace(/[^0-9]/g, '')
-                    if (rc && !isNaN(Number(rc)) && Number(rc) > 0) return Number(rc)
-                    const flyout = document.querySelector('#rh_meter .rh_meter_points, .id_rh_pts, #id_rh, #id_h')?.textContent?.replace(/[^0-9]/g, '')
-                    if (flyout && !isNaN(Number(flyout)) && Number(flyout) > 0) return Number(flyout)
+                        // 2. Badge koin header Bing search (#id_rc atau #rh_meter)
+                        const rc = document.getElementById('id_rc')?.innerText?.replace(/[^0-9]/g, '')
+                        if (rc && !isNaN(Number(rc)) && Number(rc) > 0) return Number(rc)
+                        const flyout = document.querySelector('#rh_meter .rh_meter_points, .id_rh_pts, #id_rh, #id_h')?.textContent?.replace(/[^0-9]/g, '')
+                        if (flyout && !isNaN(Number(flyout)) && Number(flyout) > 0) return Number(flyout)
 
-                    const headerPts = document.querySelector('header [class*="points"], [data-bi-area*="points"], #userPoints, .user-points')?.textContent?.replace(/[^0-9]/g, '')
-                    if (headerPts && !isNaN(Number(headerPts)) && Number(headerPts) > 0) return Number(headerPts)
+                        const headerPts = document.querySelector('header [class*="points"], [data-bi-area*="points"], #userPoints, .user-points')?.textContent?.replace(/[^0-9]/g, '')
+                        if (headerPts && !isNaN(Number(headerPts)) && Number(headerPts) > 0) return Number(headerPts)
 
-                    // 3. Fallback ke window.dashboard jika di SSR awal
-                    const dashPoints = (window as any).dashboard?.userStatus?.availablePoints
-                    if (dashPoints && !isNaN(Number(dashPoints)) && Number(dashPoints) > 0) return Number(dashPoints)
+                        // 3. Fallback ke window.dashboard jika di SSR awal
+                        const dashPoints = (window as any).dashboard?.userStatus?.availablePoints
+                        if (dashPoints && !isNaN(Number(dashPoints)) && Number(dashPoints) > 0) return Number(dashPoints)
 
-                    return null
-                }).catch(() => null)
+                        return null
+                    }),
+                    new Promise<null>(resolve => setTimeout(() => resolve(null), 3000))
+                ]).catch(() => null)
 
                 if (typeof domPoints === 'number' && domPoints > 0) {
                     this.bot.userData.currentPoints = domPoints

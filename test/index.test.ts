@@ -4,6 +4,7 @@ import { runActivitySemanticsTests } from './activitySemantics.test'
 import { runAppOnlyObserverTests } from './appOnlyObserver.test'
 import { runRedactionTests } from './redaction.test'
 import { runDataSaverTests } from './dataSaver.test'
+import { runBrowserOperationGuardTests } from './browserOperationGuard.test'
 
 async function runAll() {
     console.log('🧪 Starting Full Test Suite Execution...\n')
@@ -24,6 +25,9 @@ async function runAll() {
     console.log('')
 
     await runDataSaverTests()
+    console.log('')
+
+    await runBrowserOperationGuardTests()
     console.log('')
 
     console.log('🎉 ALL TESTS IN SUITE PASSED SUCCESSFULLY!')

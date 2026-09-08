@@ -36,6 +36,7 @@ import { redactAccountKey } from './util/Redaction'
 import { DataSaverManager, mapResourceTypeToCategory } from './util/DataSaver'
 import { Database } from './util/Database'
 import { AccountScope } from './runtime/AccountScope'
+import { createManagedPage, recoverOwnerPage } from './runtime/BrowserOperationGuard'
 import readline from 'readline'
 
 import type { Account } from './interface/Account'
@@ -867,7 +868,12 @@ export class MicrosoftRewardsBot {
             return await executionContext.run({ isMobile: true, account }, async () => {
                 mobileSession = await this.browserFactory.createBrowser(account)
                 const initialContext: BrowserContext = mobileSession.context
-                this.mainMobilePage = await initialContext.newPage()
+                this.mainMobilePage = await createManagedPage({
+                    context: initialContext,
+                    accountScope: accountEmail,
+                    purpose: 'main-mobile-owner',
+                    isMobile: true
+                })
 
                 this.logger.info('main', 'BROWSER', `Mobile Browser started | ${redactAccountKey(accountEmail)}`)
 
@@ -883,11 +889,22 @@ export class MicrosoftRewardsBot {
                     )
                 }
 
-                // Pastikan browser sudah mendarat di Dashboard Rewards & sinkronisasi cookies aktif
-                await this.mainMobilePage
-                    .goto(this.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 15000 })
-                    .catch(() => {})
-                await this.login.verifyBingSession(this.mainMobilePage)
+                // Pastikan browser owner page tetap sehat di Dashboard Rewards & sinkronisasi cookies aktif
+                if (this.mainMobilePage.isClosed()) {
+                    await recoverOwnerPage({
+                        bot: this,
+                        oldPage: this.mainMobilePage,
+                        isMobile: true,
+                        accountScope: accountEmail
+                    })
+                } else {
+                    const currentUrl = this.mainMobilePage.url()
+                    if (!currentUrl.includes('rewards.bing.com/dashboard') && !currentUrl.includes('rewards.bing.com')) {
+                        await this.mainMobilePage
+                            .goto(this.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 15000 })
+                            .catch(() => {})
+                    }
+                }
                 await this.utils.wait(2000)
 
                 this.cookies.mobile = await initialContext.cookies()

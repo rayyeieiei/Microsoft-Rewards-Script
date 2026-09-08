@@ -2,6 +2,11 @@ import type { BasePromotion, PunchCard } from '../../../interface/DashboardData'
 import { Workers } from '../../Workers'
 import { Page } from 'patchright'
 import { Database } from '../../../util/Database'
+import {
+    createManagedPage,
+    runGuardedOperation,
+    performBoundedSafeScroll
+} from '../../../runtime/BrowserOperationGuard'
 
 export class UrlReward extends Workers {
     private cookieHeader: string = ''
@@ -9,6 +14,10 @@ export class UrlReward extends Workers {
     private oldBalance: number = 0
 
     public async doUrlReward(promotion: BasePromotion, page: Page, punchCard?: PunchCard) {
+        const URL_REWARD_TOTAL_BUDGET_MS = 70_000
+        const deadlineAt = Date.now() + URL_REWARD_TOTAL_BUDGET_MS
+        const remainingMs = () => Math.max(0, deadlineAt - Date.now())
+
         this.oldBalance = Number(this.bot.userData.currentPoints ?? 0)
         this.bot.logger.info(
             this.bot.isMobile,
@@ -201,102 +210,161 @@ export class UrlReward extends Workers {
                     promotion.destinationUrl || `https://www.bing.com/search?q=${encodeURIComponent(promotion.title)}`
             }
 
+            if (remainingMs() <= 0) {
+                this.bot.logger.warn(
+                    this.bot.isMobile,
+                    'URL-REWARD',
+                    `[ACTIVITY-TIMEOUT] title="${promotion.title}" stage=total-budget recovery=cleanup-and-continue`
+                )
+                return
+            }
+
             this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Opening Activity URL: "${promotion.title}"`)
-            const tab = await page.context().newPage()
+            const tab = await createManagedPage({
+                context: page.context(),
+                purpose: 'url-reward-tab',
+                isMobile: this.bot.isMobile
+            })
 
             try {
-                await tab
-                    .goto(targetUrl, {
-                        waitUntil: 'domcontentloaded',
-                        timeout: 25000,
-                        referer: 'https://rewards.bing.com/'
+                const navResult = await runGuardedOperation({
+                    stage: 'activity-navigation',
+                    timeoutMs: 20000,
+                    remainingBudgetMs: remainingMs(),
+                    page: tab,
+                    logger: this.bot.logger,
+                    isMobile: this.bot.isMobile,
+                    operation: async (_signal, timeout) => {
+                        await tab.goto(targetUrl, {
+                            waitUntil: 'domcontentloaded',
+                            timeout: Math.max(1000, timeout),
+                            referer: 'https://rewards.bing.com/'
+                        })
+                    }
+                })
+
+                if (navResult.status === 'completed' && remainingMs() > 2000) {
+                    await this.bot.utils.wait(Math.min(2000, remainingMs()))
+
+                    // Selesaikan kuis / poll / trivia interaktif jika ada di halaman
+                    await runGuardedOperation({
+                        stage: 'activity-interaction',
+                        timeoutMs: 10000,
+                        remainingBudgetMs: remainingMs(),
+                        page: tab,
+                        logger: this.bot.logger,
+                        isMobile: this.bot.isMobile,
+                        operation: async (signal) => {
+                            for (let q = 0; q < 8; q++) {
+                                if (signal.aborted || (typeof tab.isClosed === 'function' && tab.isClosed())) break
+
+                                const startQuizBtn = tab
+                                    .locator(
+                                        '#rqStartQuiz, #rqStartQuizToken, input[type="button"][value*="Start"], button:has-text("Start"), div[role="button"]:has-text("Start")'
+                                    )
+                                    .first()
+                                if (await startQuizBtn.isVisible().catch(() => false)) {
+                                    await startQuizBtn.click({ force: true }).catch(() => {})
+                                    await this.bot.utils.wait(1500)
+                                }
+
+                                const quizOptions = tab.locator(
+                                    '.btOption, #btoption0, #btoption1, .rqOptions, .wk_Option, [role="radio"], button.optionBtn, .b_ans, .bt_poll, input[type="radio"], div[class*="option"], div[id*="choice"], .rqOption, .b_cards'
+                                )
+                                const optCount = await quizOptions.count().catch(() => 0)
+                                if (optCount > 0) {
+                                    const randIdx = Math.floor(Math.random() * Math.min(optCount, 4))
+                                    await quizOptions
+                                        .nth(randIdx)
+                                        .click({ force: true })
+                                        .catch(() => {})
+                                    await this.bot.utils.wait(2000)
+                                } else {
+                                    break
+                                }
+                            }
+
+                            // Deteksi dan trigger tombol aksi sub-task Punch Card
+                            const actionButtonSelectors = [
+                                'a:has-text("Shop the look")',
+                                'button:has-text("Shop the look")',
+                                'div[role="button"]:has-text("Shop the look")',
+                                'a:has-text("Shop now")',
+                                'button:has-text("Shop now")',
+                                'a:has-text("Explore")',
+                                'button:has-text("Explore")',
+                                '.punchcard-step a',
+                                '[data-bi-area*="punchcard"] a',
+                                '[data-bi-id*="shop"]'
+                            ]
+
+                            for (const actionSel of actionButtonSelectors) {
+                                if (signal.aborted || (typeof tab.isClosed === 'function' && tab.isClosed())) break
+                                const actBtn = tab.locator(actionSel).first()
+                                if (await actBtn.isVisible().catch(() => false)) {
+                                    this.bot.logger.debug(
+                                        this.bot.isMobile,
+                                        'URL-REWARD',
+                                        `Triggering punchcard action button: ${actionSel}`
+                                    )
+                                    await actBtn.click({ force: true }).catch(() => {})
+                                    await this.bot.utils.wait(1500)
+                                    break
+                                }
+                            }
+                        }
                     })
-                    .catch(() => {})
-                await this.bot.utils.wait(2000)
-
-                // Selesaikan kuis / poll / trivia interaktif jika ada di halaman
-                for (let q = 0; q < 8; q++) {
-                    const startQuizBtn = tab
-                        .locator(
-                            '#rqStartQuiz, #rqStartQuizToken, input[type="button"][value*="Start"], button:has-text("Start"), div[role="button"]:has-text("Start")'
-                        )
-                        .first()
-                    if (await startQuizBtn.isVisible().catch(() => false)) {
-                        await startQuizBtn.click({ force: true }).catch(() => {})
-                        await this.bot.utils.wait(2000)
-                    }
-
-                    const quizOptions = tab.locator(
-                        '.btOption, #btoption0, #btoption1, .rqOptions, .wk_Option, [role="radio"], button.optionBtn, .b_ans, .bt_poll, input[type="radio"], div[class*="option"], div[id*="choice"], .rqOption, .b_cards'
-                    )
-                    const optCount = await quizOptions.count().catch(() => 0)
-                    if (optCount > 0) {
-                        const randIdx = Math.floor(Math.random() * Math.min(optCount, 4))
-                        await quizOptions
-                            .nth(randIdx)
-                            .click({ force: true })
-                            .catch(() => {})
-                        await this.bot.utils.wait(2500)
-                    } else {
-                        break
-                    }
-                }
-
-                // Deteksi dan trigger tombol aksi sub-task Punch Card (e.g. "Shop the look", "Explore now", "Shop now")
-                const actionButtonSelectors = [
-                    'a:has-text("Shop the look")',
-                    'button:has-text("Shop the look")',
-                    'div[role="button"]:has-text("Shop the look")',
-                    'a:has-text("Shop now")',
-                    'button:has-text("Shop now")',
-                    'a:has-text("Explore")',
-                    'button:has-text("Explore")',
-                    '.punchcard-step a',
-                    '[data-bi-area*="punchcard"] a',
-                    '[data-bi-id*="shop"]'
-                ]
-
-                for (const actionSel of actionButtonSelectors) {
-                    const actBtn = tab.locator(actionSel).first()
-                    if (await actBtn.isVisible().catch(() => false)) {
-                        this.bot.logger.debug(
-                            this.bot.isMobile,
-                            'URL-REWARD',
-                            `Triggering punchcard action button: ${actionSel}`
-                        )
-                        await actBtn.click({ force: true }).catch(() => {})
-                        await this.bot.utils.wait(2000)
-                        break
-                    }
                 }
 
                 // Simulasi interaksi scroll natural & human-like movement
-                this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Simulating interaction & safe scroll...`)
-                await tab
-                    .evaluate(() => {
-                        window.scrollBy({ top: 350, behavior: 'smooth' })
+                if (remainingMs() > 2000 && !tab.isClosed()) {
+                    this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Simulating interaction & safe scroll...`)
+                    await runGuardedOperation({
+                        stage: 'safe-scroll',
+                        timeoutMs: 12000,
+                        remainingBudgetMs: remainingMs(),
+                        page: tab,
+                        logger: this.bot.logger,
+                        isMobile: this.bot.isMobile,
+                        operation: async (signal) => {
+                            await performBoundedSafeScroll(tab, {
+                                maxDurationMs: 10000,
+                                maxSteps: 8,
+                                stepDelayMs: 750,
+                                signal,
+                                logger: this.bot.logger,
+                                isMobile: this.bot.isMobile
+                            })
+                        }
                     })
-                    .catch(() => {})
-                await this.bot.utils.wait(1800)
+                }
 
-                await tab
-                    .evaluate(() => {
-                        window.scrollBy({ top: -150, behavior: 'smooth' })
-                    })
-                    .catch(() => {})
-                await this.bot.utils.wait(1200)
-
-                // Jeda tunggu aman telemetri (/fd/ls/ & bat.bing.com) - 5-7 detik jika punchcard
-                const dwellTime = punchCard
+                // Jeda tunggu aman telemetri (/fd/ls/ & bat.bing.com)
+                const rawDwell = punchCard
                     ? this.bot.utils.randomDelay(5000, 7000)
                     : this.bot.utils.randomDelay(3500, 5000)
-                await this.bot.utils.wait(dwellTime)
+                const dwellTime = Math.min(rawDwell, Math.max(0, remainingMs() - 2000))
+                if (dwellTime > 0) {
+                    await this.bot.utils.wait(dwellTime)
+                }
             } finally {
-                await tab.close().catch(() => {})
+                if (tab && !tab.isClosed()) {
+                    await runGuardedOperation({
+                        stage: 'activity-page-close',
+                        timeoutMs: 5000,
+                        remainingBudgetMs: remainingMs(),
+                        page: tab,
+                        logger: this.bot.logger,
+                        isMobile: this.bot.isMobile,
+                        operation: async () => {
+                            await tab.close({ runBeforeUnload: false }).catch(() => {})
+                        }
+                    })
+                }
             }
 
             // 3. Secondary API reinforcement jika token/hash tersedia
-            if (promotion.hash && this.bot.requestToken) {
+            if (promotion.hash && this.bot.requestToken && remainingMs() > 2000) {
                 try {
                     this.cookieHeader = this.bot.browser.func.buildCookieHeader(
                         this.bot.isMobile ? this.bot.cookies.mobile : this.bot.cookies.desktop,
@@ -326,11 +394,17 @@ export class UrlReward extends Workers {
             }
 
             // Sync fresh cookies & check updated balance
-            await this.bot.utils.wait(1500)
+            if (remainingMs() > 1000) {
+                await this.bot.utils.wait(Math.min(1500, remainingMs()))
+            }
+            let cookieTimer: NodeJS.Timeout
+            const cookieTimeoutPromise = new Promise<any[]>(resolve => {
+                cookieTimer = setTimeout(() => resolve([]), 3000)
+            })
             const freshCookies = await Promise.race([
                 page.context().cookies(),
-                new Promise<any[]>(resolve => setTimeout(() => resolve([]), 3000))
-            ]).catch(() => [])
+                cookieTimeoutPromise
+            ]).finally(() => clearTimeout(cookieTimer)).catch(() => [])
 
             if (freshCookies && freshCookies.length > 0) {
                 if (this.bot.isMobile) {
@@ -345,14 +419,41 @@ export class UrlReward extends Workers {
                 Boolean(punchCard) ||
                 (promotion.promotionType ?? '').toLowerCase() === 'punchcard' ||
                 offerIdLower.includes('punchcard')
-            let livePoints = await this.bot.browser.func.getCurrentPoints(page)
-            let realServerDelta = Math.max(0, livePoints - this.oldBalance)
 
-            // Jika realServerDelta masih 0, beri jeda singkat 1.5 detik dan re-check untuk memastikan telemetry Microsoft selesai
-            if (realServerDelta === 0) {
-                await this.bot.utils.wait(1500)
-                livePoints = await this.bot.browser.func.getCurrentPoints(page)
-                realServerDelta = Math.max(0, livePoints - this.oldBalance)
+            let livePoints = this.oldBalance
+            let realServerDelta = 0
+
+            if (remainingMs() > 2000) {
+                const verifyResult = await runGuardedOperation({
+                    stage: 'server-verification',
+                    timeoutMs: 15000,
+                    remainingBudgetMs: remainingMs(),
+                    page,
+                    logger: this.bot.logger,
+                    isMobile: this.bot.isMobile,
+                    operation: async () => {
+                        const pts = await this.bot.browser.func.getCurrentPoints(page)
+                        return pts
+                    }
+                })
+
+                if (typeof verifyResult.value === 'number') {
+                    livePoints = verifyResult.value
+                    realServerDelta = Math.max(0, livePoints - this.oldBalance)
+
+                    if (realServerDelta === 0 && remainingMs() > 2500) {
+                        await this.bot.utils.wait(1500)
+                        const recheckPts = await this.bot.browser.func.getCurrentPoints(page)
+                        livePoints = recheckPts
+                        realServerDelta = Math.max(0, livePoints - this.oldBalance)
+                    }
+                }
+            } else {
+                this.bot.logger.warn(
+                    this.bot.isMobile,
+                    'URL-REWARD',
+                    `[ACTIVITY-TIMEOUT] title="${promotion.title}" stage=server-verification recovery=verification-unavailable`
+                )
             }
 
             let calculatedDelta = 0

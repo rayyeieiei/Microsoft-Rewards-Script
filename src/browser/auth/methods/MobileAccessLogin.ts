@@ -3,6 +3,7 @@ import { randomBytes } from 'crypto'
 import { URLSearchParams } from 'url'
 
 import type { MicrosoftRewardsBot } from '../../../index'
+import { createManagedPage, sanitizeDiagnosticUrl } from '../../../runtime/BrowserOperationGuard'
 
 export class MobileAccessLogin {
     private clientId = '0000000040170455'
@@ -24,22 +25,22 @@ export class MobileAccessLogin {
         private page: Page
     ) {}
 
-    private async checkSelector(selector: string): Promise<boolean> {
-        return this.page
+    private async checkSelector(targetPage: Page, selector: string): Promise<boolean> {
+        return targetPage
             .waitForSelector(selector, { state: 'visible', timeout: 200 })
             .then(() => true)
             .catch(() => false)
     }
 
-    private async handlePasskeyPrompt(): Promise<void> {
+    private async handlePasskeyPrompt(targetPage: Page): Promise<void> {
         try {
             // Handle Passkey prompt - click secondary button to skip
-            const hasPasskeyError = await this.checkSelector(this.selectors.passKeyError)
-            const hasPasskeyVideo = await this.checkSelector(this.selectors.passKeyVideo)
+            const hasPasskeyError = await this.checkSelector(targetPage, this.selectors.passKeyError)
+            const hasPasskeyVideo = await this.checkSelector(targetPage, this.selectors.passKeyVideo)
             if (hasPasskeyError || hasPasskeyVideo) {
                 this.bot.logger.info(this.bot.isMobile, 'LOGIN-APP', 'Found Passkey prompt on OAuth page, skipping')
-                await this.bot.browser.utils.ghostClick(this.page, this.selectors.secondaryButton)
-                await this.page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
+                await this.bot.browser.utils.ghostClick(targetPage, this.selectors.secondaryButton)
+                await targetPage.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {})
             }
         } catch {
             // Ignore errors in prompt handling
@@ -47,6 +48,9 @@ export class MobileAccessLogin {
     }
 
     async get(email: string): Promise<string> {
+        let oauthPage: Page | null = null
+        const ownerUrlBefore = sanitizeDiagnosticUrl(this.page.url())
+
         try {
             const authorizeUrl = new URL(this.authUrl)
             authorizeUrl.searchParams.append('response_type', 'code')
@@ -63,11 +67,18 @@ export class MobileAccessLogin {
                 `Auth URL constructed: ${authorizeUrl.origin}${authorizeUrl.pathname}`
             )
 
-            await this.bot.browser.utils.disableFido(this.page)
+            // Isolasi proses OAuth pada halaman terkelola terpisah agar owner page tidak terganggu
+            oauthPage = await createManagedPage({
+                context: this.page.context(),
+                purpose: 'oauth-mobile-access',
+                isMobile: this.bot.isMobile
+            })
 
-            this.bot.logger.debug(this.bot.isMobile, 'LOGIN-APP', 'Navigating to OAuth authorize URL')
+            await this.bot.browser.utils.disableFido(oauthPage)
 
-            await this.page.goto(authorizeUrl.href).catch(err => {
+            this.bot.logger.debug(this.bot.isMobile, 'LOGIN-APP', 'Navigating to OAuth authorize URL in isolated page')
+
+            await oauthPage.goto(authorizeUrl.href, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(err => {
                 this.bot.logger.debug(
                     this.bot.isMobile,
                     'LOGIN-APP',
@@ -82,7 +93,12 @@ export class MobileAccessLogin {
             let lastUrl = ''
 
             while (Date.now() - start < this.maxTimeout) {
-                const currentUrl = this.page.url()
+                if (oauthPage.isClosed()) {
+                    this.bot.logger.warn(this.bot.isMobile, 'LOGIN-APP', 'OAuth page was closed prematurely')
+                    break
+                }
+
+                const currentUrl = oauthPage.url()
 
                 try {
                     const url = new URL(currentUrl)
@@ -113,7 +129,7 @@ export class MobileAccessLogin {
                     }
 
                     // Handle Passkey prompt if it appears
-                    await this.handlePasskeyPrompt()
+                    await this.handlePasskeyPrompt(oauthPage)
                 } catch (err) {
                     if (currentUrl !== lastUrl) {
                         this.bot.logger.debug(this.bot.isMobile, 'LOGIN-APP', 'Invalid URL while polling')
@@ -132,7 +148,7 @@ export class MobileAccessLogin {
                 )
 
                 try {
-                    const finalParsed = new URL(this.page.url())
+                    const finalParsed = new URL(oauthPage.url())
                     this.bot.logger.debug(
                         this.bot.isMobile,
                         'LOGIN-APP',
@@ -182,8 +198,15 @@ export class MobileAccessLogin {
             )
             return ''
         } finally {
-            this.bot.logger.debug(this.bot.isMobile, 'LOGIN-APP', 'Returning to base URL')
-            await this.page.goto(this.bot.config.baseURL, { timeout: 10000 }).catch(() => {})
+            if (oauthPage && !oauthPage.isClosed()) {
+                await oauthPage.close({ runBeforeUnload: false }).catch(() => {})
+            }
+            const ownerUrlAfter = sanitizeDiagnosticUrl(this.page.url())
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'LOGIN-APP',
+                `[OAUTH-ISOLATION] Owner page URL preserved: ${ownerUrlBefore.origin}${ownerUrlBefore.pathname} === ${ownerUrlAfter.origin}${ownerUrlAfter.pathname}`
+            )
         }
     }
 }

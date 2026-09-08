@@ -8,6 +8,7 @@ import { PasswordlessLogin } from './methods/PasswordlessLogin'
 import { TotpLogin } from './methods/Totp2FALogin'
 import { CodeLogin } from './methods/GetACodeLogin'
 import { RecoveryLogin } from './methods/RecoveryEmailLogin'
+import { promiseAny } from '../../runtime/BrowserOperationGuard'
 
 import type { Account } from '../../interface/Account'
 
@@ -30,7 +31,7 @@ type LoginState =
     | 'OTP_CODE_ENTRY'
     | 'UNKNOWN'
     | 'CHROMEWEBDATA_ERROR'
-    | 'TOO_MANY_REQUESTS' 
+    | 'TOO_MANY_REQUESTS'
 
 export class Login {
     emailLogin: EmailLogin
@@ -38,7 +39,7 @@ export class Login {
     totp2FALogin: TotpLogin
     codeLogin: CodeLogin
     recoveryLogin: RecoveryLogin
-    private loginRetryCount = 0 
+    private loginRetryCount = 0
 
     private readonly selectors = {
         primaryButton: 'button[data-testid="primaryButton"]',
@@ -194,17 +195,17 @@ export class Login {
             throw error
         }
     }
-    
+
     async getAppAccessToken(page: Page, email: string) {
         this.bot.logger.info(this.bot.isMobile, 'GET-APP-TOKEN', 'Requesting mobile access token')
         return await new MobileAccessLogin(this.bot, page).get(email)
     }
 
     private async detectCurrentState(page: Page, account?: Account): Promise<LoginState> {
-        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
+        await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {})
 
         const url = new URL(page.url())
-        
+
         if (url.hostname === 'login.live.com' && url.pathname === '/ppsecure/post.srf') {
             const pageContent = await page.content().catch(() => '')
             if (pageContent.toLowerCase().includes('too many requests')) {
@@ -229,7 +230,7 @@ export class Login {
             [this.selectors.emailEntry, 'EMAIL_INPUT'],
             [this.selectors.recoveryEmail, 'RECOVERY_EMAIL_INPUT'],
             ['#iProofEmail, input[name="proof"]', 'RECOVERY_EMAIL_INPUT'],
-            ['#idDiv_SAOTCS_Title, *:has-text("Get a code to sign in")', 'GET_A_CODE'], 
+            ['#idDiv_SAOTCS_Title, *:has-text("Get a code to sign in")', 'GET_A_CODE'],
             [this.selectors.kmsiVideo, 'KMSI_PROMPT'],
             [this.selectors.passKeyVideo, 'PASSKEY_VIDEO'],
             [this.selectors.passKeyError, 'PASSKEY_ERROR'],
@@ -250,8 +251,8 @@ export class Login {
         if (foundStates.length === 0) return 'UNKNOWN'
 
         const priorities: LoginState[] = [
-            'ACCOUNT_LOCKED', 'ERROR_ALERT', 'PASSKEY_VIDEO', 'PASSKEY_ERROR', 'KMSI_PROMPT', 
-            'PASSWORD_INPUT', 'EMAIL_INPUT', 'SIGN_IN_ANOTHER_WAY', 'SIGN_IN_ANOTHER_WAY_EMAIL', 
+            'ACCOUNT_LOCKED', 'ERROR_ALERT', 'PASSKEY_VIDEO', 'PASSKEY_ERROR', 'KMSI_PROMPT',
+            'PASSWORD_INPUT', 'EMAIL_INPUT', 'SIGN_IN_ANOTHER_WAY', 'SIGN_IN_ANOTHER_WAY_EMAIL',
             'RECOVERY_EMAIL_INPUT', 'GET_A_CODE', 'OTP_CODE_ENTRY', 'LOGIN_PASSWORDLESS', '2FA_TOTP'
         ]
 
@@ -266,10 +267,10 @@ export class Login {
         this.bot.logger.debug(this.bot.isMobile, 'HANDLE-STATE', `Processing state: ${state}`)
 
         switch (state) {
-            case 'TOO_MANY_REQUESTS': { 
+            case 'TOO_MANY_REQUESTS': {
                 const configLimit = this.bot.config.loginRateLimit
                 if (!configLimit) throw new Error('loginRateLimit config missing')
-                
+
                 this.loginRetryCount++
                 if (this.loginRetryCount > configLimit.maxAttempts) {
                     throw new Error(`Rate limit retry exhausted after ${configLimit.maxAttempts} attempts`)
@@ -294,7 +295,7 @@ export class Login {
             case 'PASSKEY_VIDEO':
             case 'PASSKEY_ERROR': {
                 this.bot.logger.warn(this.bot.isMobile, 'LOGIN-PASSKEY', 'Passkey enrollment interrupt detected! Attempting to bypass...', 'yellow')
-                
+
                 // Cek apakah ada tombol skip/cancel/next di halaman
                 const skipBtn = page.locator("#iCancel, #iSkip, #idBtn_Back, #idSIButton9, button:has-text('Skip for now'), button:has-text('Not now'), button:has-text('Cancel'), button:has-text('Next'), a#iCancel").first()
                 if (await skipBtn.count() > 0 && await skipBtn.isVisible()) {
@@ -341,7 +342,7 @@ export class Login {
                         return true;
                     }
                 }
-                
+
                 if (this.bot.config.headless === false) {
                     this.bot.logger.warn(this.bot.isMobile, 'LOGIN-PASSWORDLESS', 'Headless is FALSE. Clicking "Send Code" to let you perform manual entry...', 'yellow')
                     const submits = ['#idSubmitButton', 'input[type="submit"]', 'button[type="submit"]', '#idBtn_Back'];
@@ -373,7 +374,7 @@ export class Login {
             // 🔄 LINTER SINKRONISASI TELEMETRI: SMART RE-CHECK BATCH
             // =======================================================
             case '2FA_TOTP':
-            case 'OTP_CODE_ENTRY': { 
+            case 'OTP_CODE_ENTRY': {
                 this.bot.logger.info(this.bot.isMobile, 'LOGIN-OTP', 'OTP/2FA Code Entry screen detected. Checking fallbacks...');
                 const usePasswordBtn = page.locator('#idA_PWD, #iSignInInstead').first()
                 if (await usePasswordBtn.count() > 0 && await usePasswordBtn.isVisible()) {
@@ -381,17 +382,17 @@ export class Login {
                     await usePasswordBtn.click().catch(() => {})
                     await this.bot.utils.wait(2000)
                     return true
-                } 
+                }
 
                 if (this.bot.config.headless === false) {
                     this.bot.logger.warn(this.bot.isMobile, 'LOGIN-OTP', 'MANUAL OVERRIDE: Thread locked! Masukkan PIN/OTP langsung di layar browser...', 'yellow')
-                    
+
                     let isLoginSuccess = false;
                     // Loop interaktif memantau status transisi url per 3 detik (Maksimal 90 detik)
                     for (let i = 0; i < 30; i++) {
                         await this.bot.utils.wait(3000);
                         const currentUrl = page.url();
-                        
+
                         // Jika terdeteksi dialihkan ke dashboard, interupsi loop langsung diputus
                         if (currentUrl.includes('rewards.bing.com') || currentUrl.includes('account.microsoft.com') || currentUrl.includes('www.bing.com')) {
                             this.bot.logger.info(this.bot.isMobile, 'LOGIN-OTP', '🚀 Sukses Masuk! Bot mendeteksi sesi rewards aktif, melanjutkan task...', 'green');
@@ -416,7 +417,7 @@ export class Login {
     }
 
     private async finalizeLogin(page: Page, email: string) {
-        await page.goto(this.bot.config.baseURL, { waitUntil: 'networkidle', timeout: 10000 }).catch(() => {})
+        await page.goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {})
         await this.verifyBingSession(page)
         await this.getRewardsSession(page)
         const cookies = await page.context().cookies()
@@ -426,17 +427,27 @@ export class Login {
 
     async verifyBingSession(page: Page) {
         const url = 'https://www.bing.com/fd/auth/signin?action=interactive&provider=windows_live_id&return_url=https%3A%2F%2Fwww.bing.com%2F'
-        await page.goto(url, { waitUntil: 'networkidle', timeout: 10000 }).catch(() => {})
-        const signedIn = await page.waitForSelector(this.selectors.bingProfile, { timeout: 3000 }).then(() => true).catch(() => false)
-        if (signedIn) this.bot.logger.info(this.bot.isMobile, 'LOGIN-BING', 'Bing session verified successfully')
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {})
+        const state = await promiseAny([
+            page.waitForSelector(this.selectors.bingProfile, { timeout: 10000 }).then(() => 'signedIn'),
+            page.waitForSelector('#id_s, #id_l, #id_rh, #bnp_btn_accept', { timeout: 10000 }).then(() => 'signedIn'),
+            page.waitForSelector('#id_a', { timeout: 10000 }).then(() => 'loggedOut'),
+            page.waitForSelector('form[action*="login"], div[role="alert"]', { timeout: 10000 }).then(() => 'challenge')
+        ]).catch(() => null)
+        if (state === 'signedIn') this.bot.logger.info(this.bot.isMobile, 'LOGIN-BING', 'Bing session verified successfully')
     }
 
     private async getRewardsSession(page: Page) {
-        await page.goto(`${this.bot.config.baseURL}?_=${Date.now()}`, { waitUntil: 'networkidle', timeout: 10000 }).catch(() => {})
+        await page.goto(`${this.bot.config.baseURL}?_=${Date.now()}`, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {})
+        await promiseAny([
+            page.waitForSelector(this.selectors.requestToken, { timeout: 10000 }),
+            page.waitForSelector(this.selectors.requestTokenMeta, { timeout: 10000 }),
+            page.waitForSelector('section#dailyset, #userPoints, .user-points, #dashboard', { timeout: 10000 })
+        ]).catch(() => null)
         const html = await page.content()
         const $ = await this.bot.browser.utils.loadInCheerio(html)
         if ($('section#dailyset').length > 0) {
-            this.bot.rewardsVersion = 'modern' 
+            this.bot.rewardsVersion = 'modern'
             this.bot.logger.warn(this.bot.isMobile, 'GET-REWARD-SESSION', 'Modern Rewards dashboard detected.')
         }
         const token = $(this.selectors.requestToken).attr('value') ?? $(this.selectors.requestTokenMeta).attr('content')
