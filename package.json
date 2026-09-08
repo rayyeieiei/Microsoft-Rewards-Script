@@ -1,87 +1,88 @@
 {
-  "name": "microsoft-rewards-script",
-  "version": "3.1.4",
-  "description": "Automatically do tasks for Microsoft Rewards but in TS!",
-  "author": "Netsky",
-  "license": "GPL-3.0-or-later",
-  "bin": "./dist/index.js",
-  "pkg": {
-    "assets": [
-      "dist/**/*",
-      "package.json"
+    "name": "microsoft-rewards-script",
+    "version": "3.1.4",
+    "description": "Automatically do tasks for Microsoft Rewards but in TS!",
+    "author": "Netsky",
+    "license": "GPL-3.0-or-later",
+    "bin": "./dist/index.js",
+    "pkg": {
+        "assets": [
+            "dist/**/*",
+            "package.json"
+        ],
+        "options": [],
+        "map": {
+            "node:sqlite": "./node_sqlite.js"
+        }
+    },
+    "engines": {
+        "node": ">=24.0.0"
+    },
+    "scripts": {
+        "pre-build": "npm i && rimraf dist && npx patchright install chromium",
+        "build": "tsc",
+        "test": "node test/appOnly.test.js",
+        "start": "node ./dist/index.js",
+        "ts-start": "ts-node ./src/index.ts",
+        "dev": "ts-node ./src/index.ts -dev",
+        "build:exe": "npm run build && npx pkg . --targets node18-win-x64 --output NexusBot.exe --public --ignore-errors",
+        "build:bun": "npm run build && bun build ./dist/index.js --compile --outfile NexusBot.exe",
+        "kill-chrome-win": "powershell -Command \"Get-Process | Where-Object { $_.MainModule.FileVersionInfo.FileDescription -eq 'Google Chrome for Testing' } | ForEach-Object { Stop-Process -Id $_.Id -Force }\"",
+        "create-docker": "docker build -t microsoft-rewards-script-docker .",
+        "format": "prettier --write .",
+        "format:check": "prettier --check .",
+        "clear-diagnostics": "rimraf diagnostics",
+        "clear-sessions": "node ./scripts/main/clearSessions.js",
+        "open-session": "node ./scripts/main/browserSession.js -email",
+        "open-session:dev": "node ./scripts/main/browserSession.js -dev -email ItsNetsky@protonmail.com"
+    },
+    "keywords": [
+        "Bing Rewards",
+        "Microsoft Rewards",
+        "Bot",
+        "Script",
+        "TypeScript",
+        "Playwright",
+        "Cheerio"
     ],
-    "options": [],
-    "map": {
-      "node:sqlite": "./node_sqlite.js"
+    "devDependencies": {
+        "@tauri-apps/cli": "^2.11.2",
+        "@types/express": "^5.0.6",
+        "@types/ms": "^2.1.0",
+        "@types/node": "^24.10.1",
+        "@types/node-notifier": "^8.0.5",
+        "@types/semver": "^7.7.1",
+        "@types/socket.io": "^3.0.1",
+        "@typescript-eslint/eslint-plugin": "^8.48.0",
+        "eslint": "^9.39.1",
+        "eslint-plugin-modules-newline": "^0.0.6",
+        "pkg": "^5.8.1",
+        "prettier": "^3.7.1",
+        "rimraf": "^6.1.2",
+        "typescript": "^5.9.3"
+    },
+    "dependencies": {
+        "@types/pg": "^8.20.0",
+        "axios": "^1.13.5",
+        "axios-retry": "^4.5.0",
+        "chalk": "^4.1.2",
+        "cheerio": "^1.0.0",
+        "discord.js": "^14.26.4",
+        "express": "^5.2.1",
+        "fingerprint-generator": "^2.1.80",
+        "fingerprint-injector": "^2.1.80",
+        "ghost-cursor-playwright-port": "^1.4.3",
+        "http-proxy-agent": "^7.0.2",
+        "https-proxy-agent": "^7.0.6",
+        "ms": "^2.1.3",
+        "node-notifier": "^10.0.1",
+        "otpauth": "^9.5.0",
+        "p-queue": "^9.1.0",
+        "patchright": "^1.57.0",
+        "pg": "^8.22.0",
+        "semver": "^7.7.4",
+        "socks-proxy-agent": "^8.0.5",
+        "ts-node": "^10.9.2",
+        "zod": "^4.3.6"
     }
-  },
-  "engines": {
-    "node": ">=24.0.0"
-  },
-  "scripts": {
-    "pre-build": "npm i && rimraf dist && npx patchright install chromium",
-    "build": "tsc",
-    "start": "node ./dist/index.js",
-    "ts-start": "ts-node ./src/index.ts",
-    "dev": "ts-node ./src/index.ts -dev",
-    "build:exe": "npm run build && npx pkg . --targets node18-win-x64 --output NexusBot.exe --public --ignore-errors",
-    "build:bun": "npm run build && bun build ./dist/index.js --compile --outfile NexusBot.exe",
-    "kill-chrome-win": "powershell -Command \"Get-Process | Where-Object { $_.MainModule.FileVersionInfo.FileDescription -eq 'Google Chrome for Testing' } | ForEach-Object { Stop-Process -Id $_.Id -Force }\"",
-    "create-docker": "docker build -t microsoft-rewards-script-docker .",
-    "format": "prettier --write .",
-    "format:check": "prettier --check .",
-    "clear-diagnostics": "rimraf diagnostics",
-    "clear-sessions": "node ./scripts/main/clearSessions.js",
-    "open-session": "node ./scripts/main/browserSession.js -email",
-    "open-session:dev": "node ./scripts/main/browserSession.js -dev -email ItsNetsky@protonmail.com"
-  },
-  "keywords": [
-    "Bing Rewards",
-    "Microsoft Rewards",
-    "Bot",
-    "Script",
-    "TypeScript",
-    "Playwright",
-    "Cheerio"
-  ],
-  "devDependencies": {
-    "@tauri-apps/cli": "^2.11.2",
-    "@types/express": "^5.0.6",
-    "@types/ms": "^2.1.0",
-    "@types/node": "^24.10.1",
-    "@types/node-notifier": "^8.0.5",
-    "@types/semver": "^7.7.1",
-    "@types/socket.io": "^3.0.1",
-    "@typescript-eslint/eslint-plugin": "^8.48.0",
-    "eslint": "^9.39.1",
-    "eslint-plugin-modules-newline": "^0.0.6",
-    "pkg": "^5.8.1",
-    "prettier": "^3.7.1",
-    "rimraf": "^6.1.2",
-    "typescript": "^5.9.3"
-  },
-  "dependencies": {
-    "@types/pg": "^8.20.0",
-    "axios": "^1.13.5",
-    "axios-retry": "^4.5.0",
-    "chalk": "^4.1.2",
-    "cheerio": "^1.0.0",
-    "discord.js": "^14.26.4",
-    "express": "^5.2.1",
-    "fingerprint-generator": "^2.1.80",
-    "fingerprint-injector": "^2.1.80",
-    "ghost-cursor-playwright-port": "^1.4.3",
-    "http-proxy-agent": "^7.0.2",
-    "https-proxy-agent": "^7.0.6",
-    "ms": "^2.1.3",
-    "node-notifier": "^10.0.1",
-    "otpauth": "^9.5.0",
-    "p-queue": "^9.1.0",
-    "patchright": "^1.57.0",
-    "pg": "^8.22.0",
-    "semver": "^7.7.4",
-    "socks-proxy-agent": "^8.0.5",
-    "ts-node": "^10.9.2",
-    "zod": "^4.3.6"
-  }
 }

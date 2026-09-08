@@ -1,4 +1,13 @@
-export type NumberOrString = number | string;
+import { AppOnlyPolicy } from '../functions/activities/appOnly/AppOnlyTypes'
+
+export type NumberOrString = number | string
+
+export interface AppOnlyConfig {
+    enabled: boolean
+    defaultPolicy: AppOnlyPolicy
+    cacheTtlHours: number
+}
+
 export interface Config {
     baseURL: string
     sessionPath: string
@@ -12,6 +21,7 @@ export interface Config {
     clusters: number
     errorDiagnostics: boolean
     workers: ConfigWorkers
+    appOnlyRewards?: AppOnlyConfig
     searchOnBingLocalQueries: boolean
     globalTimeout: number | string
     searchSettings: ConfigSearchSettings
@@ -20,9 +30,9 @@ export interface Config {
     consoleLogFilter: LogFilter
     webhook: ConfigWebhook
     loginRateLimit?: {
-        delay: NumberOrString;
-        maxAttempts: number;
-    };
+        delay: NumberOrString
+        maxAttempts: number
+    }
 }
 
 export type QueryEngine = 'google' | 'wikipedia' | 'reddit' | 'local'

@@ -18,6 +18,17 @@ export interface AccountDashboardStatus {
     lastUpdate: string
 }
 
+export interface AppOnlyManualRequiredEvent {
+    type: 'app-only-manual-required'
+    accountKey: string
+    offerId: string
+    title: string
+    expectedPoints: number
+    expiresAt?: string
+    state: 'manual-required'
+    detectedAt?: string
+}
+
 export interface DashboardState {
     currentIP: string
     proxyMode: boolean
@@ -28,6 +39,7 @@ export interface DashboardState {
     startTime: number
     loadedAccounts: string[]
     accounts: Record<string, AccountDashboardStatus>
+    manualQuests?: Record<string, AppOnlyManualRequiredEvent[]>
 }
 
 export let dashboardState: DashboardState = {
@@ -39,8 +51,29 @@ export let dashboardState: DashboardState = {
     isRunning: false,
     startTime: 0,
     loadedAccounts: [],
-    accounts: {}
+    accounts: {},
+    manualQuests: {}
 }
+
+logEmitter.on('app-only-manual-required', (event: AppOnlyManualRequiredEvent) => {
+    if (!dashboardState.manualQuests) {
+        dashboardState.manualQuests = {}
+    }
+    const acc = event.accountKey || 'unknown'
+    if (!dashboardState.manualQuests[acc]) {
+        dashboardState.manualQuests[acc] = []
+    }
+    const existingIdx = dashboardState.manualQuests[acc].findIndex(q => q.offerId === event.offerId)
+    const recordWithDate: AppOnlyManualRequiredEvent = {
+        ...event,
+        detectedAt: event.detectedAt || new Date().toLocaleTimeString()
+    }
+    if (existingIdx !== -1) {
+        dashboardState.manualQuests[acc][existingIdx] = recordWithDate
+    } else {
+        dashboardState.manualQuests[acc].push(recordWithDate)
+    }
+})
 
 export function updateDashboardAccount(email: string, update: Partial<AccountDashboardStatus>) {
     if (!dashboardState.accounts[email]) {
@@ -729,7 +762,7 @@ export class DashboardServer {
     constructor(private port: number = 4000) {}
 
     private parseJsonBody(req: http.IncomingMessage): Promise<any> {
-        return new Promise((resolve) => {
+        return new Promise(resolve => {
             let body = ''
             req.on('data', chunk => {
                 body += chunk.toString()
@@ -773,7 +806,9 @@ export class DashboardServer {
                                             collectedPoints: acc.collectedPoints,
                                             desktopProgress: acc.desktopProgress,
                                             mobileProgress: acc.mobileProgress,
-                                            lastUpdate: acc.lastUpdate ? new Date(acc.lastUpdate).toLocaleTimeString() : new Date().toLocaleTimeString()
+                                            lastUpdate: acc.lastUpdate
+                                                ? new Date(acc.lastUpdate).toLocaleTimeString()
+                                                : new Date().toLocaleTimeString()
                                         }
                                     }
                                     responseData.accounts = accountsObj
@@ -788,7 +823,7 @@ export class DashboardServer {
                         res.writeHead(200, {
                             'Content-Type': 'text/event-stream',
                             'Cache-Control': 'no-cache',
-                            'Connection': 'keep-alive'
+                            Connection: 'keep-alive'
                         })
                         // Stream connection header
                         res.write('data: Nexus C2 Log stream initialized\n\n')
@@ -810,7 +845,7 @@ export class DashboardServer {
                         const body = await this.parseJsonBody(req)
                         res.writeHead(200, { 'Content-Type': 'application/json' })
                         res.end(JSON.stringify({ success: true }))
-                        
+
                         if (body && body.action === 'confirm-ip') {
                             onIpConfirmCommand()
                         } else {
@@ -839,12 +874,15 @@ export class DashboardServer {
                             const currentConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'))
                             const updatedConfig = { ...currentConfig, ...body }
                             fs.writeFileSync(configPath, JSON.stringify(updatedConfig, null, 4))
-                            
+
                             // Execute config reload callback
                             onConfigCommand()
 
                             // Emit logs to reflect update
-                            logEmitter.emit('log', `[CONFIG] Configuration updated via C2 Web UI: ${JSON.stringify(body)}`)
+                            logEmitter.emit(
+                                'log',
+                                `[CONFIG] Configuration updated via C2 Web UI: ${JSON.stringify(body)}`
+                            )
                         } catch (err) {
                             const errMsg = err instanceof Error ? err.message : String(err)
                             logEmitter.emit('log', `[ERROR] Failed to save config to config.json: ${errMsg}`)
@@ -857,7 +895,7 @@ export class DashboardServer {
                 res.end('Not Found')
             })
 
-            this.server.on('error', (err) => {
+            this.server.on('error', err => {
                 reject(err)
             })
 
@@ -868,7 +906,7 @@ export class DashboardServer {
     }
 
     public stop(): Promise<void> {
-        return new Promise((resolve) => {
+        return new Promise(resolve => {
             if (this.server) {
                 this.server.close(() => resolve())
             } else {

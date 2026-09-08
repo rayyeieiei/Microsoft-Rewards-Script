@@ -44,6 +44,15 @@ const WebhookSchema = z.object({
     webhookLogFilter: LogFilterSchema
 })
 
+// App-Only Policy Schema
+export const AppOnlyPolicySchema = z.enum(['skip', 'notify', 'manual-handoff'])
+
+export const AppOnlyConfigSchema = z.object({
+    enabled: z.boolean(),
+    defaultPolicy: AppOnlyPolicySchema,
+    cacheTtlHours: z.number().positive()
+})
+
 // Config
 export const ConfigSchema = z.object({
     baseURL: z.string(),
@@ -54,15 +63,17 @@ export const ConfigSchema = z.object({
     useAdbIpRotation: z.boolean().optional(),
     useGhostCursor: z.boolean().optional(),
     usePostgres: z.boolean().optional(),
-    postgresConfig: z.object({
-        host: z.string().optional(),
-        port: z.number().optional(),
-        user: z.string().optional(),
-        password: z.string().optional(),
-        database: z.string().optional(),
-        connectionString: z.string().optional(),
-        maxConnections: z.number().optional()
-    }).optional(),
+    postgresConfig: z
+        .object({
+            host: z.string().optional(),
+            port: z.number().optional(),
+            user: z.string().optional(),
+            password: z.string().optional(),
+            database: z.string().optional(),
+            connectionString: z.string().optional(),
+            maxConnections: z.number().optional()
+        })
+        .optional(),
     clusters: z.number().int().nonnegative(),
     errorDiagnostics: z.boolean(),
     workers: z.object({
@@ -71,15 +82,20 @@ export const ConfigSchema = z.object({
         doMorePromotions: z.boolean(),
         doPunchCards: z.boolean(),
         doAppPromotions: z.boolean(),
+        doAppOnlyRewards: z.boolean().optional(),
+        doWindowsAppRewards: z.boolean().optional(),
         doDesktopSearch: z.boolean(),
         doMobileSearch: z.boolean(),
         doDailyCheckIn: z.boolean(),
         doReadToEarn: z.boolean()
     }),
-    loginRateLimit: z.object({ 
-        delay: NumberOrString,
-        maxAttempts: z.number().int().positive()
-    }).optional(),
+    appOnlyRewards: AppOnlyConfigSchema.optional(),
+    loginRateLimit: z
+        .object({
+            delay: NumberOrString,
+            maxAttempts: z.number().int().positive()
+        })
+        .optional(),
     searchOnBingLocalQueries: z.boolean(),
     globalTimeout: NumberOrString,
     searchSettings: z.object({
@@ -127,7 +143,8 @@ export const AccountSchema = z.object({
     saveFingerprint: z.object({
         mobile: z.boolean(),
         desktop: z.boolean()
-    })
+    }),
+    appOnlyPolicy: AppOnlyPolicySchema.optional()
 })
 
 export function validateConfig(data: unknown): Config {

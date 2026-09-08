@@ -29,6 +29,11 @@
         "doDailyCheckIn": true,
         "doReadToEarn": true
     },
+    "appOnlyRewards": {
+        "enabled": true,
+        "defaultPolicy": "skip",
+        "cacheTtlHours": 24
+    },
     "searchOnBingLocalQueries": false,
     "globalTimeout": "30sec",
     "searchSettings": {

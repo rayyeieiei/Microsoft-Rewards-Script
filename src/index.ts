@@ -22,11 +22,11 @@ import { SearchManager } from './functions/SearchManager'
 import { HttpProxyAgent } from 'http-proxy-agent'
 import { HttpsProxyAgent } from 'https-proxy-agent'
 import { DynamicOutboundProxy } from './util/DynamicOutboundProxy'
-import { 
-    DashboardServer, 
-    updateDashboardAccount, 
-    updateDashboardGlobal, 
-    registerControlCallback, 
+import {
+    DashboardServer,
+    updateDashboardAccount,
+    updateDashboardGlobal,
+    registerControlCallback,
     registerConfigCallback,
     registerIpConfirmCallback
 } from './util/DashboardServer'
@@ -43,9 +43,9 @@ import type { AppDashboardData } from './interface/AppDashBoardData'
 let manualIpConfirmResolver: (() => void) | null = null
 
 function waitForUserConfirmation(): Promise<void> {
-    return new Promise((resolve) => {
+    return new Promise(resolve => {
         manualIpConfirmResolver = resolve
-        
+
         const rl = readline.createInterface({
             input: process.stdin,
             output: process.stdout
@@ -109,7 +109,7 @@ interface UserData {
 
 export class MicrosoftRewardsBot {
     public logger: Logger
-    public config: any 
+    public config: any
     public utils: Utils
     public activities: Activities = new Activities(this)
     public browser: { func: BrowserFunc; utils: BrowserUtils }
@@ -123,7 +123,7 @@ export class MicrosoftRewardsBot {
     public cookies: { mobile: Cookie[]; desktop: Cookie[] }
     public fingerprint!: BrowserFingerprintWithHeaders
     public accounts: Account[] = [] // DIUBAH JADI PUBLIC AGAR DISCORDBOT AMAN
-    public workers: Workers          // DIUBAH JADI PUBLIC AGAR SEARCHMANAGER AMAN
+    public workers: Workers // DIUBAH JADI PUBLIC AGAR SEARCHMANAGER AMAN
     public localProxy: DynamicOutboundProxy | null = null
     public localProxyPort = 0
     public activeAccount: Account | null = null
@@ -229,16 +229,16 @@ export class MicrosoftRewardsBot {
             if (this.localProxy) {
                 await this.localProxy.ensureWifiConnected()
             }
-            await dns.lookup('bing.com');
+            await dns.lookup('bing.com')
             const config: any = { timeout: 5000 }
             if (localProxyPort) {
                 config.httpAgent = new HttpProxyAgent(`http://127.0.0.1:${localProxyPort}`)
                 config.httpsAgent = new HttpsProxyAgent(`http://127.0.0.1:${localProxyPort}`)
             }
-            const res = await axios.get('https://ident.me', config);
-            return res.data.trim();
+            const res = await axios.get('https://ident.me', config)
+            return res.data.trim()
         } catch {
-            return 'UNKNOWN_IP';
+            return 'UNKNOWN_IP'
         }
     }
 
@@ -258,7 +258,7 @@ export class MicrosoftRewardsBot {
         if (this.config.useLocalDashboard && (cluster.isPrimary || !cluster.isWorker) && !this.dashboardServerActive) {
             this.dashboardServerActive = true
             const dashboardServer = new DashboardServer(4000)
-            await dashboardServer.start().catch((err) => {
+            await dashboardServer.start().catch(err => {
                 this.logger.error('main', 'DASHBOARD-ERROR', `Failed to start dashboard: ${err.message}`)
             })
             this.logger.info('main', 'DASHBOARD', `Local dashboard server started at http://localhost:4000`, 'green')
@@ -272,9 +272,9 @@ export class MicrosoftRewardsBot {
                 isRunning: false,
                 startTime: 0
             })
-            
+
             // Register control callbacks
-            registerControlCallback(async (cmd) => {
+            registerControlCallback(async cmd => {
                 if (cmd.action === 'start') {
                     if (this.isRunning) {
                         this.logger.warn('main', 'C2-CONTROL', 'Bot is already running!')
@@ -284,7 +284,7 @@ export class MicrosoftRewardsBot {
                     this.isRunning = true
                     this.stopRequested = false
                     this.updateDashboardGlobal({ isRunning: true, startTime: Date.now() })
-                    
+
                     try {
                         await this.run()
                     } catch (err) {
@@ -315,17 +315,25 @@ export class MicrosoftRewardsBot {
                         this.logger.error('main', 'C2-CONTROL', `Account with email ${cmd.email} not found!`)
                         return
                     }
-                    
-                    this.logger.info('main', 'C2-CONTROL', `Starting execution for single account: ${targetAcc.email}...`)
+
+                    this.logger.info(
+                        'main',
+                        'C2-CONTROL',
+                        `Starting execution for single account: ${targetAcc.email}...`
+                    )
                     this.isRunning = true
                     this.stopRequested = false
                     this.updateDashboardGlobal({ isRunning: true, startTime: Date.now() })
-                    
+
                     try {
                         await this.runTasks([targetAcc], Date.now())
                     } catch (err) {
                         const errMsg = err instanceof Error ? err.message : String(err)
-                        this.logger.error('main', 'C2-CONTROL-ERROR', `Execution failed for ${targetAcc.email}: ${errMsg}`)
+                        this.logger.error(
+                            'main',
+                            'C2-CONTROL-ERROR',
+                            `Execution failed for ${targetAcc.email}: ${errMsg}`
+                        )
                     } finally {
                         this.isRunning = false
                         this.updateDashboardGlobal({ isRunning: false, startTime: 0 })
@@ -361,7 +369,12 @@ export class MicrosoftRewardsBot {
             process.on('SIGTERM', stopDashboard)
             process.on('exit', stopDashboard)
 
-            this.logger.info('main', 'C2-STANDBY', 'Command & Control Active. Waiting for commands via Web UI...', 'cyan')
+            this.logger.info(
+                'main',
+                'C2-STANDBY',
+                'Command & Control Active. Waiting for commands via Web UI...',
+                'cyan'
+            )
             return
         }
 
@@ -396,30 +409,38 @@ export class MicrosoftRewardsBot {
             const worker = cluster.fork()
             worker.send?.({ chunk, runStartTime })
 
-            worker.on('message', (msg: { __ipcLog?: IpcLog; __stats?: AccountStats[]; __dashboardUpdate?: { email: string; update: any }; __dashboardGlobal?: any }) => {
-                if (msg.__stats) {
-                    allAccountStats.push(...msg.__stats)
-                }
-                if (msg.__dashboardUpdate) {
-                    updateDashboardAccount(msg.__dashboardUpdate.email, msg.__dashboardUpdate.update)
-                }
-                if (msg.__dashboardGlobal) {
-                    updateDashboardGlobal(msg.__dashboardGlobal)
-                }
-
-                const log = msg.__ipcLog
-                if (log && typeof log.content === 'string') {
-                    const { webhook } = this.config
-                    const { content, level } = log
-
-                    if (webhook.discord?.enabled && webhook.discord.url) {
-                        sendDiscord(webhook.discord.url, content, level)
+            worker.on(
+                'message',
+                (msg: {
+                    __ipcLog?: IpcLog
+                    __stats?: AccountStats[]
+                    __dashboardUpdate?: { email: string; update: any }
+                    __dashboardGlobal?: any
+                }) => {
+                    if (msg.__stats) {
+                        allAccountStats.push(...msg.__stats)
                     }
-                    if (webhook.ntfy?.enabled && webhook.ntfy.url) {
-                        sendNtfy(webhook.ntfy, content, level)
+                    if (msg.__dashboardUpdate) {
+                        updateDashboardAccount(msg.__dashboardUpdate.email, msg.__dashboardUpdate.update)
+                    }
+                    if (msg.__dashboardGlobal) {
+                        updateDashboardGlobal(msg.__dashboardGlobal)
+                    }
+
+                    const log = msg.__ipcLog
+                    if (log && typeof log.content === 'string') {
+                        const { webhook } = this.config
+                        const { content, level } = log
+
+                        if (webhook.discord?.enabled && webhook.discord.url) {
+                            sendDiscord(webhook.discord.url, content, level)
+                        }
+                        if (webhook.ntfy?.enabled && webhook.ntfy.url) {
+                            sendNtfy(webhook.ntfy, content, level)
+                        }
                     }
                 }
-            })
+            )
 
             if (accountChunks.indexOf(chunk) !== accountChunks.length - 1) {
                 await this.utils.wait(5000)
@@ -479,7 +500,11 @@ export class MicrosoftRewardsBot {
                 await flushAllWebhooks()
                 process.exit(0)
             } catch (error) {
-                this.logger.error('main', 'CLUSTER-WORKER-ERROR', `Worker task crash: ${error instanceof Error ? error.message : String(error)}`)
+                this.logger.error(
+                    'main',
+                    'CLUSTER-WORKER-ERROR',
+                    `Worker task crash: ${error instanceof Error ? error.message : String(error)}`
+                )
                 await flushAllWebhooks()
                 process.exit(1)
             }
@@ -531,14 +556,23 @@ export class MicrosoftRewardsBot {
             })
 
             try {
-                const randomStartDelay = Math.floor(Math.random() * (60000 - 10000 + 1)) + 10000;
-                this.logger.info('main', 'STEALTH', `Menunggu ${(randomStartDelay / 1000).toFixed(0)} detik sebelum buka browser biar keliatan natural...`, 'cyan')
+                const randomStartDelay = Math.floor(Math.random() * (60000 - 10000 + 1)) + 10000
+                this.logger.info(
+                    'main',
+                    'STEALTH',
+                    `Menunggu ${(randomStartDelay / 1000).toFixed(0)} detik sebelum buka browser biar keliatan natural...`,
+                    'cyan'
+                )
                 this.updateDashboardAccount(accountEmail, { status: 'Stealth Delay' })
-                await this.utils.wait(randomStartDelay);
+                await this.utils.wait(randomStartDelay)
 
-                this.logger.info('main', 'ACCOUNT-START', `[ACCOUNT-START] Starting workflow for: ${accountEmail} | geoLocale: ${account.geoLocale}`)
+                this.logger.info(
+                    'main',
+                    'ACCOUNT-START',
+                    `[ACCOUNT-START] Starting workflow for: ${accountEmail} | geoLocale: ${account.geoLocale}`
+                )
                 this.updateDashboardAccount(accountEmail, { status: 'Starting Browser' })
-                this.axios = new AxiosClient(account.proxy, this.localProxyPort, (bytes) => this.trackBandwidth(bytes))
+                this.axios = new AxiosClient(account.proxy, this.localProxyPort, bytes => this.trackBandwidth(bytes))
 
                 const result = await this.Main(account).catch(error => {
                     const errMsg = error instanceof Error ? error.message : String(error)
@@ -559,13 +593,27 @@ export class MicrosoftRewardsBot {
                     const accountFinalPoints = accountInitialPoints + collectedPoints
 
                     accountStats.push({
-                        email: accountEmail, initialPoints: accountInitialPoints, finalPoints: accountFinalPoints,
-                        collectedPoints: collectedPoints, duration: parseFloat(durationSeconds),
-                        bandwidthMb: parseFloat(mbConsumed), success: true
+                        email: accountEmail,
+                        initialPoints: accountInitialPoints,
+                        finalPoints: accountFinalPoints,
+                        collectedPoints: collectedPoints,
+                        duration: parseFloat(durationSeconds),
+                        bandwidthMb: parseFloat(mbConsumed),
+                        success: true
                     })
 
-                    this.logger.info('main', 'ACCOUNT-FINISH', `[ACCOUNT-FINISH] Completed workflow for: ${accountEmail} | Total: +${collectedPoints} | Old: ${accountInitialPoints} → New: ${accountFinalPoints} | Duration: ${durationSeconds}s`, 'green')
-                    this.logger.info('main', 'DATA-SAVER', `[DATA-SAVER] Quota: ${mbConsumed} MB consumed | ${blockedCount} heavy assets blocked (~${estimatedSavedMb} MB saved) | Limit: < 20 MB [PASS - ${percentQuota}% of budget]`, 'cyan')
+                    this.logger.info(
+                        'main',
+                        'ACCOUNT-FINISH',
+                        `[ACCOUNT-FINISH] Completed workflow for: ${accountEmail} | Total: +${collectedPoints} | Old: ${accountInitialPoints} → New: ${accountFinalPoints} | Duration: ${durationSeconds}s`,
+                        'green'
+                    )
+                    this.logger.info(
+                        'main',
+                        'DATA-SAVER',
+                        `[DATA-SAVER] Quota: ${mbConsumed} MB consumed | ${blockedCount} heavy assets blocked (~${estimatedSavedMb} MB saved) | Limit: < 20 MB [PASS - ${percentQuota}% of budget]`,
+                        'cyan'
+                    )
                     this.updateDashboardAccount(accountEmail, {
                         status: 'Completed',
                         collectedPoints: collectedPoints,
@@ -573,9 +621,14 @@ export class MicrosoftRewardsBot {
                     })
                 } else {
                     accountStats.push({
-                        email: accountEmail, initialPoints: 0, finalPoints: 0, collectedPoints: 0,
-                        duration: parseFloat(durationSeconds), bandwidthMb: parseFloat(mbConsumed),
-                        success: false, error: 'Flow failed'
+                        email: accountEmail,
+                        initialPoints: 0,
+                        finalPoints: 0,
+                        collectedPoints: 0,
+                        duration: parseFloat(durationSeconds),
+                        bandwidthMb: parseFloat(mbConsumed),
+                        success: false,
+                        error: 'Flow failed'
                     })
                     this.updateDashboardAccount(accountEmail, {
                         status: 'Failed',
@@ -588,8 +641,13 @@ export class MicrosoftRewardsBot {
                 const errMsg = error instanceof Error ? error.message : String(error)
                 this.logger.error('main', 'ACCOUNT-ERROR', `${accountEmail}: ${errMsg}`)
                 accountStats.push({
-                    email: accountEmail, initialPoints: 0, finalPoints: 0, collectedPoints: 0,
-                    duration: parseFloat(durationSeconds), success: false, error: errMsg
+                    email: accountEmail,
+                    initialPoints: 0,
+                    finalPoints: 0,
+                    collectedPoints: 0,
+                    duration: parseFloat(durationSeconds),
+                    success: false,
+                    error: errMsg
                 })
                 this.updateDashboardAccount(accountEmail, {
                     status: 'Failed',
@@ -600,7 +658,7 @@ export class MicrosoftRewardsBot {
             }
 
             processedCount++
-            
+
             // =======================================================
             // 🤖 AUTO-ROTATE DENGAN PROTECTION LOOP + DATA SAVER CLI
             // =======================================================
@@ -615,53 +673,105 @@ export class MicrosoftRewardsBot {
                         break
                     }
 
-                    this.logger.warn('main', 'IP-INTERCEPTOR', '=======================================================', 'yellow')
-                    this.logger.warn('main', 'IP-INTERCEPTOR', `🔥 BATCH [${processedCount / 2}] SELESAI! ROTASI IP ${isManual ? 'MANUAL (LAN / HOTSPOT)' : 'AUTO (ADB AIRPLANE MODE)'} DIMULAI... 🔥`, 'yellow')
+                    this.logger.warn(
+                        'main',
+                        'IP-INTERCEPTOR',
+                        '=======================================================',
+                        'yellow'
+                    )
+                    this.logger.warn(
+                        'main',
+                        'IP-INTERCEPTOR',
+                        `🔥 BATCH [${processedCount / 2}] SELESAI! ROTASI IP ${isManual ? 'MANUAL (LAN / HOTSPOT)' : 'AUTO (ADB AIRPLANE MODE)'} DIMULAI... 🔥`,
+                        'yellow'
+                    )
                     this.logger.warn('main', 'IP-INTERCEPTOR', `IP Saat Ini: [ ${oldIp} ]`, 'yellow')
-                    this.logger.warn('main', 'IP-INTERCEPTOR', '=======================================================', 'yellow')
+                    this.logger.warn(
+                        'main',
+                        'IP-INTERCEPTOR',
+                        '=======================================================',
+                        'yellow'
+                    )
 
                     try {
                         if (isManual) {
                             try {
-                                require('child_process').exec(`powershell -c (New-Object Media.SoundPlayer "C:\\Windows\\Media\\notify.wav").PlaySync();`);
+                                require('child_process').exec(
+                                    `powershell -c (New-Object Media.SoundPlayer "C:\\Windows\\Media\\notify.wav").PlaySync();`
+                                )
                             } catch {}
 
-                            this.logger.info('main', 'IP-INTERCEPTOR', '📌 SILAKAN MATIKAN & NYALAKAN MODE PESAWAT / HOTSPOT DI HP ANDA.', 'cyan')
-                            this.logger.info('main', 'IP-INTERCEPTOR', '👉 Tekan [ENTER] di terminal atau klik [Confirm IP Rotated] di Web UI setelah selesai...', 'cyan')
+                            this.logger.info(
+                                'main',
+                                'IP-INTERCEPTOR',
+                                '📌 SILAKAN MATIKAN & NYALAKAN MODE PESAWAT / HOTSPOT DI HP ANDA.',
+                                'cyan'
+                            )
+                            this.logger.info(
+                                'main',
+                                'IP-INTERCEPTOR',
+                                '👉 Tekan [ENTER] di terminal atau klik [Confirm IP Rotated] di Web UI setelah selesai...',
+                                'cyan'
+                            )
 
                             await waitForUserConfirmation()
 
                             this.logger.info('main', 'IP-INTERCEPTOR', 'Memeriksa perubahan IP publik baru...')
                         } else {
-                            const execSync = require('child_process').execSync;
-                            this.logger.info('main', 'IP-INTERCEPTOR', 'ADB -> Mengaktifkan Mode Pesawat...');
-                            execSync('adb shell cmd connectivity airplane-mode enable');
-                            await this.utils.wait(5000);
+                            const execSync = require('child_process').execSync
+                            this.logger.info('main', 'IP-INTERCEPTOR', 'ADB -> Mengaktifkan Mode Pesawat...')
+                            execSync('adb shell cmd connectivity airplane-mode enable')
+                            await this.utils.wait(5000)
 
-                            this.logger.info('main', 'IP-INTERCEPTOR', 'ADB -> Mematikan Mode Pesawat (Mencari Sinyal Baru)...');
-                            execSync('adb shell cmd connectivity airplane-mode disable');
-                            
-                            this.logger.info('main', 'IP-INTERCEPTOR', 'Menunggu 12 detik agar interface sinyal stabil...');
-                            await this.utils.wait(12000);
+                            this.logger.info(
+                                'main',
+                                'IP-INTERCEPTOR',
+                                'ADB -> Mematikan Mode Pesawat (Mencari Sinyal Baru)...'
+                            )
+                            execSync('adb shell cmd connectivity airplane-mode disable')
+
+                            this.logger.info(
+                                'main',
+                                'IP-INTERCEPTOR',
+                                'Menunggu 12 detik agar interface sinyal stabil...'
+                            )
+                            await this.utils.wait(12000)
                         }
-                        
+
                         const checkNewIp = await this.getCurrentIP(this.localProxyPort || undefined)
 
                         if (checkNewIp !== oldIp && checkNewIp !== 'UNKNOWN_IP') {
                             currentIpAddress = checkNewIp
                             ipChanged = true
-                            this.logger.info('main', 'IP-INTERCEPTOR', `🚀 SUKSES! IP Baru Terdeteksi: [ ${currentIpAddress} ]`, 'green')
+                            this.logger.info(
+                                'main',
+                                'IP-INTERCEPTOR',
+                                `🚀 SUKSES! IP Baru Terdeteksi: [ ${currentIpAddress} ]`,
+                                'green'
+                            )
                             this.updateDashboardGlobal({ currentIP: currentIpAddress })
                             await this.utils.wait(3000)
                         } else {
-                            this.logger.error('main', 'IP-INTERCEPTOR', `❌ GAGAL! IP masih kembar [ ${checkNewIp} ]. Silakan coba matikan/nyalakan ulang hotspot...`, 'red')
+                            this.logger.error(
+                                'main',
+                                'IP-INTERCEPTOR',
+                                `❌ GAGAL! IP masih kembar [ ${checkNewIp} ]. Silakan coba matikan/nyalakan ulang hotspot...`,
+                                'red'
+                            )
                             try {
-                                require('child_process').exec(`powershell -c (New-Object Media.SoundPlayer "C:\\Windows\\Media\\notify.wav").PlaySync();`);
+                                require('child_process').exec(
+                                    `powershell -c (New-Object Media.SoundPlayer "C:\\Windows\\Media\\notify.wav").PlaySync();`
+                                )
                             } catch {}
                             await this.utils.wait(3000)
                         }
                     } catch (adbError) {
-                        this.logger.error('main', 'IP-INTERCEPTOR', `🚨 Jalur Jaringan Lemot/IP Glitch: ${adbError}`, 'red')
+                        this.logger.error(
+                            'main',
+                            'IP-INTERCEPTOR',
+                            `🚨 Jalur Jaringan Lemot/IP Glitch: ${adbError}`,
+                            'red'
+                        )
                         await this.utils.wait(3000)
                     }
                 }
@@ -674,9 +784,16 @@ export class MicrosoftRewardsBot {
             const totalFinal = accountStats.reduce((sum, s) => sum + s.finalPoints, 0)
             const totalDuration = ((Date.now() - runStartTime) / 1000 / 60).toFixed(1)
             const totalBandwidth = accountStats.reduce((sum, s) => sum + (s.bandwidthMb ?? 0), 0).toFixed(2)
-            const avgBandwidth = (accountStats.length > 0 ? (parseFloat(totalBandwidth) / accountStats.length) : 0).toFixed(2)
+            const avgBandwidth = (
+                accountStats.length > 0 ? parseFloat(totalBandwidth) / accountStats.length : 0
+            ).toFixed(2)
 
-            this.logger.info('main', 'RUN-END', `Completed all accounts | Accounts: ${accountStats.length} | Points: +${totalCollected} | Bandwidth: ${totalBandwidth} MB total (avg ${avgBandwidth} MB/acc) | Old: ${totalInitial} → New: ${totalFinal} | Runtime: ${totalDuration}min`, 'green')
+            this.logger.info(
+                'main',
+                'RUN-END',
+                `Completed all accounts | Accounts: ${accountStats.length} | Points: +${totalCollected} | Bandwidth: ${totalBandwidth} MB total (avg ${avgBandwidth} MB/acc) | Old: ${totalInitial} → New: ${totalFinal} | Runtime: ${totalDuration}min`,
+                'green'
+            )
             await flushAllWebhooks()
             if (this.localProxy) {
                 await this.localProxy.stop()
@@ -715,11 +832,17 @@ export class MicrosoftRewardsBot {
                 try {
                     this.accessToken = await this.login.getAppAccessToken(this.mainMobilePage, accountEmail)
                 } catch (error) {
-                    this.logger.error('main', 'FLOW', `Failed to get mobile access token: ${error instanceof Error ? error.message : String(error)}`)
+                    this.logger.error(
+                        'main',
+                        'FLOW',
+                        `Failed to get mobile access token: ${error instanceof Error ? error.message : String(error)}`
+                    )
                 }
 
                 // Pastikan browser sudah mendarat di Dashboard Rewards & sinkronisasi cookies aktif
-                await this.mainMobilePage.goto(this.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
+                await this.mainMobilePage
+                    .goto(this.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 15000 })
+                    .catch(() => {})
                 await this.login.verifyBingSession(this.mainMobilePage)
                 await this.utils.wait(2000)
 
@@ -732,18 +855,26 @@ export class MicrosoftRewardsBot {
                 } catch {}
 
                 const detectedCountry = (appData?.response?.profile?.attributes?.country || 'ID').toUpperCase()
-                this.userData.geoLocale = account.geoLocale === 'auto' ? detectedCountry : account.geoLocale.toLowerCase()
+                this.userData.geoLocale =
+                    account.geoLocale === 'auto' ? detectedCountry : account.geoLocale.toLowerCase()
 
                 const data: DashboardData = await this.browser.func.getDashboardData()
-                
+
                 this.userData.initialPoints = data.userStatus.availablePoints
                 this.userData.currentPoints = data.userStatus.availablePoints
                 const initialPoints = this.userData.initialPoints ?? 0
 
-                const pcProg = data.userStatus.counters.pcSearch?.[0] ? `${data.userStatus.counters.pcSearch[0].pointProgress}/${data.userStatus.counters.pcSearch[0].pointProgressMax}` : '0/0'
-                const edgeProg = data.userStatus.counters.pcSearch?.[1] && data.userStatus.counters.pcSearch[1].pointProgressMax > 0 ? ` (+${data.userStatus.counters.pcSearch[1].pointProgress}/${data.userStatus.counters.pcSearch[1].pointProgressMax} Edge)` : ''
+                const pcProg = data.userStatus.counters.pcSearch?.[0]
+                    ? `${data.userStatus.counters.pcSearch[0].pointProgress}/${data.userStatus.counters.pcSearch[0].pointProgressMax}`
+                    : '0/0'
+                const edgeProg =
+                    data.userStatus.counters.pcSearch?.[1] && data.userStatus.counters.pcSearch[1].pointProgressMax > 0
+                        ? ` (+${data.userStatus.counters.pcSearch[1].pointProgress}/${data.userStatus.counters.pcSearch[1].pointProgressMax} Edge)`
+                        : ''
                 const desktopProgress = `${pcProg}${edgeProg}`
-                const mobileProgress = data.userStatus.counters.mobileSearch?.[0] ? `${data.userStatus.counters.mobileSearch[0].pointProgress}/${data.userStatus.counters.mobileSearch[0].pointProgressMax}` : '0/0'
+                const mobileProgress = data.userStatus.counters.mobileSearch?.[0]
+                    ? `${data.userStatus.counters.mobileSearch[0].pointProgress}/${data.userStatus.counters.mobileSearch[0].pointProgressMax}`
+                    : '0/0'
 
                 this.updateDashboardAccount(accountEmail, {
                     initialPoints,
@@ -753,7 +884,11 @@ export class MicrosoftRewardsBot {
                 })
 
                 const browserEarnable = await this.browser.func.getBrowserEarnablePoints()
-                this.logger.info('main', 'POINTS', `Earnable today | Mobile: ${browserEarnable.mobileSearchPoints} | Desktop: ${browserEarnable.desktopSearchPoints} | Daily Set: ${browserEarnable.dailySetPoints} | More: ${browserEarnable.morePromotionsPoints} | Total: ${browserEarnable.totalEarnablePoints} | ${accountEmail}`)
+                this.logger.info(
+                    'main',
+                    'POINTS',
+                    `Earnable today | Mobile: ${browserEarnable.mobileSearchPoints} | Desktop: ${browserEarnable.desktopSearchPoints} | Daily Set: ${browserEarnable.dailySetPoints} | More: ${browserEarnable.morePromotionsPoints} | Total: ${browserEarnable.totalEarnablePoints} | ${accountEmail}`
+                )
 
                 if (this.mainMobilePage) {
                     await this.workers.doClaimPendingPoints(this.mainMobilePage)
@@ -798,9 +933,15 @@ export class MicrosoftRewardsBot {
                     await this.workers.doPunchCards(data, this.mainMobilePage)
                 }
 
-                if (((this.config.workers.doWindowsAppRewards ?? this.config.workers.doAppOnlyRewards) ?? true) && data) {
-                    this.updateDashboardAccount(accountEmail, { status: 'Windows App Rewards' })
-                    await this.activities.doWindowsAppRewards(data, this.mainMobilePage)
+                const isAppOnlyEnabled =
+                    this.config.appOnlyRewards?.enabled ??
+                    this.config.workers.doWindowsAppRewards ??
+                    this.config.workers.doAppOnlyRewards ??
+                    true
+
+                if (isAppOnlyEnabled && data) {
+                    this.updateDashboardAccount(accountEmail, { status: 'App-Only Observer' })
+                    await this.activities.observeAppOnlyRewards(data)
                 }
 
                 if (this.mainMobilePage) {
@@ -812,10 +953,17 @@ export class MicrosoftRewardsBot {
                 const missingSearchPoints = this.browser.func.missingSearchPoints(searchPoints)
 
                 // update search progress before search loop
-                const startPcProg = searchPoints.pcSearch?.[0] ? `${searchPoints.pcSearch[0].pointProgress}/${searchPoints.pcSearch[0].pointProgressMax}` : '0/0'
-                const startEdgeProg = searchPoints.pcSearch?.[1] && searchPoints.pcSearch[1].pointProgressMax > 0 ? ` (+${searchPoints.pcSearch[1].pointProgress}/${searchPoints.pcSearch[1].pointProgressMax} Edge)` : ''
+                const startPcProg = searchPoints.pcSearch?.[0]
+                    ? `${searchPoints.pcSearch[0].pointProgress}/${searchPoints.pcSearch[0].pointProgressMax}`
+                    : '0/0'
+                const startEdgeProg =
+                    searchPoints.pcSearch?.[1] && searchPoints.pcSearch[1].pointProgressMax > 0
+                        ? ` (+${searchPoints.pcSearch[1].pointProgress}/${searchPoints.pcSearch[1].pointProgressMax} Edge)`
+                        : ''
                 const startDesktopProgress = `${startPcProg}${startEdgeProg}`
-                const startMobileProgress = searchPoints.mobileSearch?.[0] ? `${searchPoints.mobileSearch[0].pointProgress}/${searchPoints.mobileSearch[0].pointProgressMax}` : '0/0'
+                const startMobileProgress = searchPoints.mobileSearch?.[0]
+                    ? `${searchPoints.mobileSearch[0].pointProgress}/${searchPoints.mobileSearch[0].pointProgressMax}`
+                    : '0/0'
 
                 this.updateDashboardAccount(accountEmail, {
                     desktopProgress: startDesktopProgress,
@@ -824,17 +972,24 @@ export class MicrosoftRewardsBot {
 
                 this.cookies.mobile = await initialContext.cookies()
 
-                const { mobilePoints, desktopPoints } = await this.searchManager.doSearches(data, missingSearchPoints, mobileSession, account, accountEmail)
+                const { mobilePoints, desktopPoints } = await this.searchManager.doSearches(
+                    data,
+                    missingSearchPoints,
+                    mobileSession,
+                    account,
+                    accountEmail
+                )
 
                 // Post-Search Re-Evaluation: Re-fetch dashboard data to claim punchcards completed by searches (e.g. 4-day search challenges) and any remaining pending points!
                 try {
                     const postSearchData = await this.browser.func.getDashboardData().catch(() => null)
                     if (postSearchData) {
-                        const activePage = (this.mainMobilePage && !this.mainMobilePage.isClosed()) 
-                            ? this.mainMobilePage 
-                            : (this.mainDesktopPage && !this.mainDesktopPage.isClosed()) 
-                                ? this.mainDesktopPage 
-                                : null
+                        const activePage =
+                            this.mainMobilePage && !this.mainMobilePage.isClosed()
+                                ? this.mainMobilePage
+                                : this.mainDesktopPage && !this.mainDesktopPage.isClosed()
+                                  ? this.mainDesktopPage
+                                  : null
 
                         if (activePage) {
                             if (this.config.workers.doDailySet) {
@@ -862,7 +1017,11 @@ export class MicrosoftRewardsBot {
                 const finalPoints = await this.browser.func.getCurrentPoints()
                 const collectedPoints = finalPoints - initialPoints
 
-                this.logger.info('main', 'FLOW', `Collected: +${collectedPoints} | Mobile: +${mobilePoints} | Desktop: +${desktopPoints} | ${accountEmail}`)
+                this.logger.info(
+                    'main',
+                    'FLOW',
+                    `Collected: +${collectedPoints} | Mobile: +${mobilePoints} | Desktop: +${desktopPoints} | ${accountEmail}`
+                )
 
                 return { initialPoints, collectedPoints: collectedPoints || 0 }
             })
@@ -887,7 +1046,9 @@ async function main(): Promise<void> {
     checkNodeVersion()
     const rewardsBot = new MicrosoftRewardsBot()
 
-    process.on('beforeExit', () => { void flushAllWebhooks() })
+    process.on('beforeExit', () => {
+        void flushAllWebhooks()
+    })
     process.on('SIGINT', async () => {
         rewardsBot.logger.warn('main', 'PROCESS', 'SIGINT received, flushing and exiting...')
         await flushAllWebhooks()

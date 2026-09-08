@@ -1,3 +1,5 @@
+import { AppOnlyPolicy } from '../functions/activities/appOnly/AppOnlyTypes'
+
 export interface Account {
     email: string
     password: string
@@ -7,7 +9,8 @@ export interface Account {
     langCode: 'en' | string
     proxy: AccountProxy
     saveFingerprint: ConfigSaveFingerprint
-    currentPoints?: number;
+    currentPoints?: number
+    appOnlyPolicy?: AppOnlyPolicy
 }
 
 export interface AccountProxy {

@@ -13,33 +13,47 @@ import { ClaimBonusPoints } from './activities/api/ClaimBonusPoints' // 👈 SUN
 import { SearchOnBing } from './activities/browser/SearchOnBing'
 import { Search } from './activities/browser/Search'
 
-import type { BasePromotion, DashboardData, FindClippyPromotion, PunchCard, PurplePromotionalItem } from '../interface/DashboardData'
+import type {
+    BasePromotion,
+    DashboardData,
+    FindClippyPromotion,
+    PunchCard,
+    PurplePromotionalItem
+} from '../interface/DashboardData'
 import type { Promotion } from '../interface/AppDashBoardData'
 
 export default class Activities {
     constructor(private bot: MicrosoftRewardsBot) {}
 
-    doSearch = async (data: DashboardData, page: Page, isMobile: boolean) => await new Search(this.bot).doSearch(data, page, isMobile)
-    
-    doSearchOnBing = async (promotion: BasePromotion, page: Page) => await new SearchOnBing(this.bot).doSearchOnBing(promotion, page)
+    doSearch = async (data: DashboardData, page: Page, isMobile: boolean) =>
+        await new Search(this.bot).doSearch(data, page, isMobile)
+
+    doSearchOnBing = async (promotion: BasePromotion, page: Page) =>
+        await new SearchOnBing(this.bot).doSearchOnBing(promotion, page)
 
     doUrlReward = async (promotion: BasePromotion, page: Page, punchCard?: PunchCard) => {
         await new UrlReward(this.bot).doUrlReward(promotion, page, punchCard)
     }
 
-   doQuiz = async (promotion: BasePromotion) => {
-        await new Quiz(this.bot).doQuiz(promotion) 
+    doQuiz = async (promotion: BasePromotion) => {
+        await new Quiz(this.bot).doQuiz(promotion)
     }
 
     doFindClippy = async (promotion: FindClippyPromotion) => await new FindClippy(this.bot).doFindClippy(promotion)
 
-    doDoubleSearchPoints = async (promotion: PurplePromotionalItem) => await new DoubleSearchPoints(this.bot).doDoubleSearchPoints(promotion)
+    doDoubleSearchPoints = async (promotion: PurplePromotionalItem) =>
+        await new DoubleSearchPoints(this.bot).doDoubleSearchPoints(promotion)
 
     doAppReward = async (promotion: Promotion) => await new AppReward(this.bot).doAppReward(promotion)
 
-    doAppOnlyRewards = async (data: DashboardData, page?: Page) => await new WindowsAppRewards(this.bot).doWindowsAppRewards(data, page)
+    observeAppOnlyRewards = async (data: DashboardData) =>
+        await new WindowsAppRewards(this.bot).doWindowsAppRewards(data)
 
-    doWindowsAppRewards = async (data: DashboardData, page?: Page) => await new WindowsAppRewards(this.bot).doWindowsAppRewards(data, page)
+    doAppOnlyRewards = async (data: DashboardData, page?: Page) =>
+        await new WindowsAppRewards(this.bot).doWindowsAppRewards(data, page)
+
+    doWindowsAppRewards = async (data: DashboardData, page?: Page) =>
+        await new WindowsAppRewards(this.bot).doWindowsAppRewards(data, page)
 
     doReadToEarn = async () => await new ReadToEarn(this.bot).doReadToEarn()
 
