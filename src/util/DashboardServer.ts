@@ -415,6 +415,19 @@ const htmlPage = `<!DOCTYPE html>
         .highlight-blue { color: #3b82f6; }
         .highlight-amber { color: #f59e0b; }
         .highlight-red { color: #ef4444; }
+
+        .quest-badge {
+            display: inline-block;
+            padding: 0.15rem 0.5rem;
+            border-radius: 6px;
+            font-size: 0.7rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        .quest-onboarding { background-color: #1e1b4b; color: #a5b4fc; border: 1px solid #4338ca; }
+        .quest-app-only { background-color: #1e293b; color: #38bdf8; border: 1px solid #0284c7; }
+        .quest-punch-card { background-color: #3b0764; color: #e879f9; border: 1px solid #a855f7; }
+        .quest-legacy { background-color: #3f3f46; color: #d4d4d8; border: 1px solid #71717a; }
     </style>
 </head>
 <body>
@@ -448,7 +461,7 @@ const htmlPage = `<!DOCTYPE html>
     </div>
 
     <div class="main-layout">
-        <!-- Left Column: Accounts Table -->
+        <!-- Left Column: Accounts & Manual Queue -->
         <div>
             <div class="table-container">
                 <table>
@@ -469,6 +482,35 @@ const htmlPage = `<!DOCTYPE html>
                         </tr>
                     </tbody>
                 </table>
+            </div>
+
+            <!-- Manual Action Required & Onboarding Queue -->
+            <div class="panel" style="margin-top: 1.5rem; margin-bottom: 0;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+                    <div class="panel-title" style="margin-bottom: 0;">
+                        Manual Quests & Onboarding Queue
+                        <span id="manual-quests-badge" class="status-badge status-pending" style="margin-left: 0.5rem; display: none;">0 Pending</span>
+                    </div>
+                </div>
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Account</th>
+                                <th>Type</th>
+                                <th>Task</th>
+                                <th>Points</th>
+                                <th>Status</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="manual-quests-body">
+                            <tr>
+                                <td colspan="6" style="text-align: center; color: #64748b;">No manual quests currently queued.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
             </div>
 
             <!-- Terminal output window -->
@@ -540,11 +582,11 @@ const htmlPage = `<!DOCTYPE html>
         let isBotRunning = false;
 
         function getStatusClass(status) {
-            const s = status.toLowerCase();
+            const s = (status || '').toLowerCase();
             if (s.includes('pending')) return 'status-pending';
             if (s.includes('stealth')) return 'status-stealth';
-            if (s.includes('login') || s.includes('auth')) return 'status-login';
-            if (s.includes('completed') || s.includes('done')) return 'status-done';
+            if (s.includes('login') || s.includes('auth') || s.includes('manual')) return 'status-login';
+            if (s.includes('completed') || s.includes('done') || s.includes('verified')) return 'status-done';
             if (s.includes('error') || s.includes('failed') || s.includes('locked')) return 'status-error';
             return 'status-running';
         }
@@ -685,20 +727,79 @@ const htmlPage = `<!DOCTYPE html>
                 const tbody = document.getElementById('accounts-table-body');
                 if (accountsArray.length === 0) {
                     tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #64748b;">No accounts loaded yet.</td></tr>';
-                    return;
+                } else {
+                    tbody.innerHTML = accountsArray.map(acc => {
+                        return '<tr>' +
+                            '<td><strong>' + acc.email + '</strong></td>' +
+                            '<td><span class="status-badge ' + getStatusClass(acc.status) + '">' + acc.status + '</span></td>' +
+                            '<td>' + (acc.initialPoints || 0) + '</td>' +
+                            '<td class="' + (acc.collectedPoints > 0 ? 'highlight-green' : '') + '">+' + (acc.collectedPoints || 0) + '</td>' +
+                            '<td>' + (acc.desktopProgress || '0/0') + '</td>' +
+                            '<td>' + (acc.mobileProgress || '0/0') + '</td>' +
+                            '<td><span style="font-size: 0.875rem; color: #64748b;">' + acc.lastUpdate + '</span></td>' +
+                            '</tr>';
+                    }).join('');
                 }
 
-                tbody.innerHTML = accountsArray.map(acc => {
-                    return '<tr>' +
-                        '<td><strong>' + acc.email + '</strong></td>' +
-                        '<td><span class="status-badge ' + getStatusClass(acc.status) + '">' + acc.status + '</span></td>' +
-                        '<td>' + (acc.initialPoints || 0) + '</td>' +
-                        '<td class="' + (acc.collectedPoints > 0 ? 'highlight-green' : '') + '">+' + (acc.collectedPoints || 0) + '</td>' +
-                        '<td>' + (acc.desktopProgress || '0/0') + '</td>' +
-                        '<td>' + (acc.mobileProgress || '0/0') + '</td>' +
-                        '<td><span style="font-size: 0.875rem; color: #64748b;">' + acc.lastUpdate + '</span></td>' +
-                        '</tr>';
-                }).join('');
+                // Update Manual Quests & Onboarding Queue
+                const manualQuestsContainer = data.manualQuests || {};
+                const allManualQuests = [];
+                for (const [displayKey, list] of Object.entries(manualQuestsContainer)) {
+                    if (Array.isArray(list)) {
+                        allManualQuests.push(...list);
+                    }
+                }
+
+                const manualBody = document.getElementById('manual-quests-body');
+                const manualBadge = document.getElementById('manual-quests-badge');
+
+                const pendingQuests = allManualQuests.filter(q => q.state === 'manual-required' || q.state === 'detected' || q.state === 'verify-pending');
+
+                if (manualBadge) {
+                    if (pendingQuests.length > 0) {
+                        manualBadge.style.display = 'inline-block';
+                        manualBadge.className = 'status-badge status-login';
+                        manualBadge.innerText = pendingQuests.length + ' Pending';
+                    } else {
+                        manualBadge.style.display = 'none';
+                    }
+                }
+
+                if (manualBody) {
+                    if (allManualQuests.length === 0) {
+                        manualBody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #64748b;">No manual quests currently queued.</td></tr>';
+                    } else {
+                        manualBody.innerHTML = allManualQuests.map(q => {
+                            let kindClass = 'quest-legacy';
+                            let kindLabel = q.questKind;
+                            if (q.questKind === 'new-account-onboarding') {
+                                kindClass = 'quest-onboarding';
+                                kindLabel = 'Onboarding';
+                            } else if (q.questKind === 'app-only') {
+                                kindClass = 'quest-app-only';
+                                kindLabel = 'App-Only';
+                            } else if (q.questKind === 'punch-card') {
+                                kindClass = 'quest-punch-card';
+                                kindLabel = 'Punch Card';
+                            }
+
+                            let linkHtml = '<span style="color:#64748b;">-</span>';
+                            if (q.destination && q.destination.origin && q.destination.path) {
+                                const fullUrl = q.destination.origin + q.destination.path;
+                                linkHtml = '<a href="' + fullUrl + '" target="_blank" rel="noopener noreferrer" style="color:#38bdf8; text-decoration:none; font-size:0.8rem; font-weight:600;">Open ↗</a>';
+                            }
+
+                            return '<tr>' +
+                                '<td><strong>' + (q.displayAccount || '-') + '</strong></td>' +
+                                '<td><span class="quest-badge ' + kindClass + '">' + kindLabel + '</span></td>' +
+                                '<td>' + (q.title || q.offerId) + '</td>' +
+                                '<td class="highlight-green">+' + (q.expectedPoints || 0) + '</td>' +
+                                '<td><span class="status-badge ' + getStatusClass(q.state) + '">' + q.state + '</span></td>' +
+                                '<td>' + linkHtml + '</td>' +
+                                '</tr>';
+                        }).join('');
+                    }
+                }
 
             } catch (err) {
                 console.error('Error fetching dashboard status:', err);
