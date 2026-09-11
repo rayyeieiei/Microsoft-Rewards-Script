@@ -5,6 +5,7 @@ import { runAppOnlyObserverTests } from './appOnlyObserver.test'
 import { runRedactionTests } from './redaction.test'
 import { runDataSaverTests } from './dataSaver.test'
 import { runBrowserOperationGuardTests } from './browserOperationGuard.test'
+import { runNewAccountOnboardingTests } from './newAccountOnboarding.test'
 
 async function runAll() {
     console.log('🧪 Starting Full Test Suite Execution...\n')
@@ -28,6 +29,9 @@ async function runAll() {
     console.log('')
 
     await runBrowserOperationGuardTests()
+    console.log('')
+
+    await runNewAccountOnboardingTests()
     console.log('')
 
     console.log('🎉 ALL TESTS IN SUITE PASSED SUCCESSFULLY!')

@@ -1,6 +1,7 @@
 import { AppOnlyPolicy } from '../functions/activities/appOnly/AppOnlyTypes'
 
 export interface Account {
+    id?: string
     email: string
     password: string
     totpSecret?: string

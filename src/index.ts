@@ -31,7 +31,9 @@ import {
     registerIpConfirmCallback,
     registerManualQuestProvider
 } from './util/DashboardServer'
-import { ManualQuestQueue } from './functions/activities/appOnly/AppOnlyQuestObserver'
+import { ManualQuestQueue } from './runtime/manual/ManualQuestQueue'
+import { resolveAccountIdentity, validateUniqueAccountIdentities } from './runtime/identity/AccountIdentity'
+import { OnboardingEvidence } from './functions/onboarding/NewAccountOnboardingTypes'
 import { redactAccountKey } from './util/Redaction'
 import { DataSaverManager, mapResourceTypeToCategory } from './util/DataSaver'
 import { Database } from './util/Database'
@@ -117,7 +119,8 @@ export class MicrosoftRewardsBot {
     public logger: Logger
     public config: any
     public utils: Utils
-    public activities: Activities = new Activities(this)
+    public manualQuestQueue: ManualQuestQueue
+    public activities: Activities
     public browser: { func: BrowserFunc; utils: BrowserUtils }
 
     public mainMobilePage!: Page
@@ -184,6 +187,15 @@ export class MicrosoftRewardsBot {
             utils: new BrowserUtils(this)
         }
         this.config = loadConfig()
+        this.manualQuestQueue = new ManualQuestQueue({
+            storagePath: `${process.cwd()}/browser/manual_quests.json`,
+            logger: {
+                info: msg => this.logger.info(this.isMobile, 'QUEUE', msg),
+                warn: msg => this.logger.warn(this.isMobile, 'QUEUE', msg),
+                debug: msg => this.logger.debug(this.isMobile, 'QUEUE', msg)
+            }
+        })
+        this.activities = new Activities(this)
         this.activeWorkers = this.config.clusters
         this.exitedWorkers = []
     }
@@ -255,6 +267,8 @@ export class MicrosoftRewardsBot {
 
     async initialize(): Promise<void> {
         this.accounts = loadAccounts()
+        validateUniqueAccountIdentities(this.accounts)
+        await this.manualQuestQueue.load()
         await Database.getInstance().initialize()
         this.updateDashboardGlobal({
             loadedAccounts: this.accounts.map(a => a.email)
@@ -274,7 +288,7 @@ export class MicrosoftRewardsBot {
             })
             this.logger.info('main', 'DASHBOARD', `Local dashboard server started at http://localhost:4000`, 'green')
 
-            registerManualQuestProvider(() => ManualQuestQueue.getInstance().getSanitizedSnapshot())
+            registerManualQuestProvider(() => this.manualQuestQueue.getSanitizedSnapshot())
 
             // Update initial dashboard state
             this.updateDashboardGlobal({
@@ -951,6 +965,18 @@ export class MicrosoftRewardsBot {
                     `Earnable today | Mobile: ${browserEarnable.mobileSearchPoints} | Desktop: ${browserEarnable.desktopSearchPoints} | Daily Set: ${browserEarnable.dailySetPoints} | More: ${browserEarnable.morePromotionsPoints} | Total: ${browserEarnable.totalEarnablePoints} | ${redactAccountKey(accountEmail)}`
                 )
 
+                const accountIdentity = resolveAccountIdentity(this.activeAccount || { email: accountEmail })
+
+                // Hook: Onboarding Detector and Observer (before doDailySet)
+                const onboardingCfg = this.config.newAccountOnboarding
+                const isOnboardingEnabled = onboardingCfg?.enabled && onboardingCfg.mode !== 'disabled'
+                let onboardingBefore: OnboardingEvidence | null = null
+
+                if (isOnboardingEnabled && data) {
+                    onboardingBefore = this.activities.detectOnboarding(data, Date.now())
+                    await this.activities.observeOnboarding(onboardingBefore, accountIdentity)
+                }
+
                 const isAppOnlyEnabled =
                     this.config.appOnlyRewards?.enabled ??
                     this.config.workers.doWindowsAppRewards ??
@@ -1006,9 +1032,28 @@ export class MicrosoftRewardsBot {
                     await this.activities.doReadToEarn()
                 }
 
-                if (this.config.workers.doPunchCards && data && this.mainMobilePage) {
+                // Conditional refresh for Onboarding Verification:
+                // Only refresh if onboarding is enabled, campaign was detected/active, and there are incomplete tasks to verify!
+                const shouldVerifyOnboarding =
+                    isOnboardingEnabled &&
+                    onboardingBefore &&
+                    (onboardingBefore.state === 'detected' || onboardingBefore.state === 'active') &&
+                    onboardingBefore.tasks.some(t => !t.complete)
+
+                let refreshedDashboard: DashboardData | null = null
+                if (shouldVerifyOnboarding) {
+                    refreshedDashboard = await this.browser.func.getDashboardData()
+                    await this.activities.verifyOnboarding({
+                        identity: accountIdentity,
+                        before: onboardingBefore!,
+                        afterDashboard: refreshedDashboard
+                    })
+                }
+
+                const punchCardData = refreshedDashboard || data
+                if (this.config.workers.doPunchCards && punchCardData && this.mainMobilePage) {
                     this.updateDashboardAccount(accountEmail, { status: 'Punch Cards' })
-                    await this.workers.doPunchCards(data, this.mainMobilePage)
+                    await this.workers.doPunchCards(punchCardData, this.mainMobilePage)
                 }
 
                 if (this.mainMobilePage) {
@@ -1142,6 +1187,8 @@ async function main(): Promise<void> {
         await rewardsBot.run()
     } catch (error) {
         rewardsBot.logger.error('main', 'MAIN-ERROR', error as Error)
+    } finally {
+        await rewardsBot.manualQuestQueue.flushPendingWrites().catch(() => {})
     }
 }
 

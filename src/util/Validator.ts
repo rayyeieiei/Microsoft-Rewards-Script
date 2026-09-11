@@ -61,6 +61,15 @@ export const PunchCardExecutionConfigSchema = z.object({
     maxChildrenPerRun: z.number().int().positive().default(1)
 })
 
+// New Account Onboarding Schema
+export const NewAccountOnboardingModeSchema = z.enum(['disabled', 'observe-only', 'observe-and-handoff'])
+
+export const NewAccountOnboardingConfigSchema = z.object({
+    enabled: z.boolean(),
+    mode: NewAccountOnboardingModeSchema.default('observe-only'),
+    retentionDays: z.number().int().positive().default(14)
+})
+
 // Config
 export const ConfigSchema = z.object({
     baseURL: z.string(),
@@ -102,6 +111,11 @@ export const ConfigSchema = z.object({
         mode: 'manual-handoff',
         maxChildrenPerRun: 1
     }),
+    newAccountOnboarding: NewAccountOnboardingConfigSchema.optional().default({
+        enabled: true,
+        mode: 'observe-only',
+        retentionDays: 14
+    }),
     loginRateLimit: z
         .object({
             delay: NumberOrString,
@@ -139,6 +153,7 @@ export const ConfigSchema = z.object({
 
 // Account
 export const AccountSchema = z.object({
+    id: z.string().optional(),
     email: z.string(),
     password: z.string(),
     totpSecret: z.string().optional(),

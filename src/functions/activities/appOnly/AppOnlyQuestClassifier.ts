@@ -1,7 +1,10 @@
-import { AppOnlyQuest, redactAccountKey } from './AppOnlyTypes'
+import { AppOnlyQuest } from './AppOnlyTypes'
+import { redactAccountKey } from '../../../util/Redaction'
 
 export interface AppOnlyClassificationInput {
-    accountKey: string
+    accountId?: string
+    displayAccount?: string
+    accountKey?: string
     offerId: string
     title?: string
     description?: string
@@ -27,7 +30,8 @@ export class AppOnlyQuestClassifier {
      * Pure functional classification without network requests or external side-effects.
      */
     public classify(input: AppOnlyClassificationInput, now = new Date()): AppOnlyQuest {
-        const safeAccountKey = redactAccountKey(input.accountKey || 'anonymous')
+        const accountId = input.accountId || (input.accountKey ? redactAccountKey(input.accountKey) : 'anonymous')
+        const displayAccount = input.displayAccount || redactAccountKey(input.accountKey || 'anonymous')
         const offerId = (input.offerId || '').trim()
         const title = (input.title || '').trim()
         const expectedPoints = Number(input.expectedPoints ?? input.pointProgressMax ?? 10)
@@ -43,7 +47,8 @@ export class AppOnlyQuestClassifier {
         // 1. Prioritas 1: Completed
         if (isComplete) {
             return {
-                accountKey: safeAccountKey,
+                accountId,
+                displayAccount,
                 offerId,
                 title,
                 expectedPoints,
@@ -62,7 +67,8 @@ export class AppOnlyQuestClassifier {
             const availDate = new Date(input.availableFrom)
             if (!isNaN(availDate.getTime()) && availDate.getTime() > now.getTime()) {
                 return {
-                    accountKey: safeAccountKey,
+                    accountId,
+                displayAccount,
                     offerId,
                     title,
                     expectedPoints,
@@ -81,7 +87,8 @@ export class AppOnlyQuestClassifier {
         const isCooldown = this.detectCooldown(input)
         if (isCooldown) {
             return {
-                accountKey: safeAccountKey,
+                accountId,
+                displayAccount,
                 offerId,
                 title,
                 expectedPoints,
@@ -101,7 +108,8 @@ export class AppOnlyQuestClassifier {
 
         if (hasExplicitAppCategory) {
             return {
-                accountKey: safeAccountKey,
+                accountId,
+                displayAccount,
                 offerId,
                 title,
                 expectedPoints,
@@ -119,7 +127,8 @@ export class AppOnlyQuestClassifier {
         const hasAppOnlyText = this.hasAppOnlyTitlePattern(title, input.description)
         if (hasAppOnlyText) {
             return {
-                accountKey: safeAccountKey,
+                accountId,
+                displayAccount,
                 offerId,
                 title,
                 expectedPoints,
@@ -138,7 +147,8 @@ export class AppOnlyQuestClassifier {
         if (hasRnoRewardParam && isLockedAttr) {
             // rnoreward alone does not prove app-only, but with locked attribute it indicates restricted reward
             return {
-                accountKey: safeAccountKey,
+                accountId,
+                displayAccount,
                 offerId,
                 title,
                 expectedPoints,
@@ -155,7 +165,8 @@ export class AppOnlyQuestClassifier {
         // 7. Prioritas 7: Generic Locked (Unknown reason)
         if (isLockedAttr) {
             return {
-                accountKey: safeAccountKey,
+                accountId,
+                displayAccount,
                 offerId,
                 title,
                 expectedPoints,
@@ -171,7 +182,8 @@ export class AppOnlyQuestClassifier {
 
         // Normal unlocked / pending task
         return {
-            accountKey: safeAccountKey,
+            accountId,
+            displayAccount,
             offerId,
             title,
             expectedPoints,

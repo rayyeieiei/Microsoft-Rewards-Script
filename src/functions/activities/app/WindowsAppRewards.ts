@@ -7,12 +7,13 @@ import { AppOnlyClassificationInput } from '../appOnly/AppOnlyQuestClassifier'
 import {
     AppOnlyDecision,
     AppOnlyPolicy,
-    AppOnlyVerificationResult,
-    ManualQuestRecord,
-    redactAccountKey
+    AppOnlyVerificationResult
 } from '../appOnly/AppOnlyTypes'
 import { resolveAppOnlyPolicy } from '../appOnly/AppOnlyPolicy'
 import { logEmitter } from '../../../util/DashboardServer'
+import { ManualQuestQueue } from '../../../runtime/manual/ManualQuestQueue'
+import { ManualQuestRecord } from '../../../runtime/manual/ManualQuestTypes'
+import { resolveAccountIdentity } from '../../../runtime/identity/AccountIdentity'
 
 export interface WindowsAppRewardResult {
     status: 'manual-required' | 'skipped' | 'already-complete'
@@ -21,7 +22,7 @@ export interface WindowsAppRewardResult {
 }
 
 /**
- * WindowsAppRewards (Refactored to Observer Flow)
+ * WindowsAppRewards (Refactored to Observer Flow with Dependency Injection)
  *
  * NOTE: Live DAPI POST and Playwright/WebView2 DOM spoofing have been completely removed.
  * This class now acts as a non-blocking observer that classifies App-Only quests,
@@ -32,10 +33,11 @@ export class WindowsAppRewards extends Workers {
     private observer: AppOnlyQuestObserver
     private verifier: AppOnlyQuestVerifier
 
-    constructor(bot: any) {
+    constructor(bot: any, queue?: ManualQuestQueue) {
         super(bot)
-        this.observer = new AppOnlyQuestObserver()
-        this.verifier = new AppOnlyQuestVerifier()
+        const q = queue || bot?.manualQuestQueue
+        this.observer = new AppOnlyQuestObserver(undefined, undefined, q)
+        this.verifier = new AppOnlyQuestVerifier(q)
     }
 
     /**
@@ -43,12 +45,13 @@ export class WindowsAppRewards extends Workers {
      * Guaranteed non-blocking and safe.
      */
     public async verifyExistingManualQuests(data: DashboardData): Promise<AppOnlyVerificationResult[]> {
-        const rawEmail = this.bot.activeAccount?.email || 'unknown'
-        const safeAccountKey = redactAccountKey(rawEmail)
+        const identity = resolveAccountIdentity(this.bot.activeAccount || { email: 'unknown' })
 
         const rawPromos = this.extractAppOnlyPromotions(data)
         const classificationInputs: AppOnlyClassificationInput[] = rawPromos.map((p: any) => ({
-            accountKey: safeAccountKey,
+            accountId: identity.accountId,
+            displayAccount: identity.displayAccount,
+            accountKey: identity.displayAccount,
             offerId: p.offerId || '',
             title: p.title || '',
             description: p.description || '',
@@ -69,7 +72,8 @@ export class WindowsAppRewards extends Workers {
         try {
             const currentPoints = Number(this.bot.userData?.currentPoints ?? 0)
             return await this.verifier.verify(classificationInputs, {
-                accountKey: safeAccountKey,
+                accountId: identity.accountId,
+                displayAccount: identity.displayAccount,
                 currentBalance: currentPoints,
                 logger: {
                     info: msg => this.bot.logger.info(this.bot.isMobile, 'APP-ONLY-VERIFY', msg),
@@ -87,8 +91,7 @@ export class WindowsAppRewards extends Workers {
      * Guaranteed non-blocking and safe for parallel searching.
      */
     public async doWindowsAppRewards(data: DashboardData, page?: Page): Promise<WindowsAppRewardResult[]> {
-        const rawEmail = this.bot.activeAccount?.email || 'unknown'
-        const safeAccountKey = redactAccountKey(rawEmail)
+        const identity = resolveAccountIdentity(this.bot.activeAccount || { email: 'unknown' })
 
         // Explicit policy resolution: account-override -> global-default -> fallback ('skip')
         const accountPolicy = (this.bot.activeAccount as any)?.appOnlyPolicy as AppOnlyPolicy | undefined
@@ -106,7 +109,7 @@ export class WindowsAppRewards extends Workers {
         this.bot.logger.debug(
             this.bot.isMobile,
             'APP-ONLY',
-            `[WINDOWS-APP] Processing App-Only quest observer for: ${safeAccountKey}`
+            `[WINDOWS-APP] Processing App-Only quest observer for: ${identity.displayAccount}`
         )
 
         // 1. Extract promotions from dashboard
@@ -150,7 +153,9 @@ export class WindowsAppRewards extends Workers {
 
         // Map promotions to pure classification inputs
         const classificationInputs: AppOnlyClassificationInput[] = rawPromos.map((p: any) => ({
-            accountKey: safeAccountKey,
+            accountId: identity.accountId,
+            displayAccount: identity.displayAccount,
+            accountKey: identity.displayAccount,
             offerId: p.offerId || '',
             title: p.title || '',
             description: p.description || '',
@@ -173,17 +178,17 @@ export class WindowsAppRewards extends Workers {
             policy: effectivePolicy,
             cacheTtlHours,
             onNotification: async quest => {
-                const logMsg = `[APP-ONLY-NOTIFY] Account=${safeAccountKey} | Quest="${quest.title}" (+${quest.expectedPoints} Pts) is App-Only locked`
+                const logMsg = `[APP-ONLY-NOTIFY] Account=${identity.displayAccount} | Quest="${quest.title}" (+${quest.expectedPoints} Pts) is App-Only locked`
                 this.bot.logger.info(this.bot.isMobile, 'APP-ONLY', logMsg, 'yellow')
                 logEmitter.emit('log', logMsg)
             },
             onManualRequired: async (record: ManualQuestRecord) => {
-                const logMsg = `[APP-ONLY-MANUAL] Account=${safeAccountKey} | Queued="${record.title}" (+${record.expectedPoints} Pts) for official app manual completion`
+                const logMsg = `[APP-ONLY-MANUAL] Account=${identity.displayAccount} | Queued="${record.title}" (+${record.expectedPoints} Pts) for official app manual completion`
                 this.bot.logger.info(this.bot.isMobile, 'APP-ONLY', logMsg, 'cyan')
                 logEmitter.emit('log', logMsg)
                 logEmitter.emit('app-only-manual-required', {
                     type: 'app-only-manual-required',
-                    accountKey: safeAccountKey,
+                    accountKey: identity.displayAccount,
                     offerId: record.offerId,
                     title: record.title,
                     expectedPoints: record.expectedPoints,

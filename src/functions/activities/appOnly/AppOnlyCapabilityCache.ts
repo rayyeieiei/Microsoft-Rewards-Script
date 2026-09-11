@@ -1,26 +1,26 @@
 import { AppOnlyCapabilityRecord } from './AppOnlyTypes'
 
 export interface AppOnlyCapabilityStore {
-    get(accountKey: string, offerId: string): Promise<AppOnlyCapabilityRecord | null>
+    get(accountId: string, offerId: string): Promise<AppOnlyCapabilityRecord | null>
     set(record: AppOnlyCapabilityRecord): Promise<void>
-    delete(accountKey: string, offerId: string): Promise<void>
+    delete(accountId: string, offerId: string): Promise<void>
     prune(now?: Date): Promise<number>
 }
 
 /**
  * In-Memory fallback implementation of AppOnlyCapabilityStore.
- * Keyed strictly per-account: `${accountKey}::${offerId}`.
+ * Keyed strictly per-account: `${accountId}::${offerId}`.
  */
 export class InMemoryCapabilityStore implements AppOnlyCapabilityStore {
     private store = new Map<string, AppOnlyCapabilityRecord>()
 
-    private makeKey(accountKey: string, offerId: string): string {
-        return `${accountKey.trim().toLowerCase()}::${offerId.trim().toLowerCase()}`
+    private makeKey(accountId: string, offerId: string): string {
+        return `${accountId.trim().toLowerCase()}::${offerId.trim().toLowerCase()}`
     }
 
-    public async get(accountKey: string, offerId: string): Promise<AppOnlyCapabilityRecord | null> {
+    public async get(accountId: string, offerId: string): Promise<AppOnlyCapabilityRecord | null> {
         try {
-            const key = this.makeKey(accountKey, offerId)
+            const key = this.makeKey(accountId, offerId)
             const record = this.store.get(key)
             if (!record) return null
 
@@ -41,16 +41,16 @@ export class InMemoryCapabilityStore implements AppOnlyCapabilityStore {
 
     public async set(record: AppOnlyCapabilityRecord): Promise<void> {
         try {
-            const key = this.makeKey(record.accountKey, record.offerId)
+            const key = this.makeKey(record.accountId, record.offerId)
             this.store.set(key, { ...record })
         } catch {
             // Fail-open: cache errors must never crash account flow
         }
     }
 
-    public async delete(accountKey: string, offerId: string): Promise<void> {
+    public async delete(accountId: string, offerId: string): Promise<void> {
         try {
-            const key = this.makeKey(accountKey, offerId)
+            const key = this.makeKey(accountId, offerId)
             this.store.delete(key)
         } catch {
             // Fail-open
@@ -83,7 +83,7 @@ export class InMemoryCapabilityStore implements AppOnlyCapabilityStore {
 
 /**
  * Manager for App-Only Capability Cache.
- * Protects accounts from repeatedly attempting locked tasks while strictly enforcing per-account boundaries.
+ * Protects accounts from repeatedly attempting locked tasks while strictly enforcing per-account boundaries using accountId.
  */
 export class AppOnlyCapabilityCache {
     private static defaultInstance: AppOnlyCapabilityCache
@@ -100,24 +100,24 @@ export class AppOnlyCapabilityCache {
         return AppOnlyCapabilityCache.defaultInstance
     }
 
-    public async getRecord(accountKey: string, offerId: string): Promise<AppOnlyCapabilityRecord | null> {
-        if (!accountKey || !offerId) return null
+    public async getRecord(accountId: string, offerId: string): Promise<AppOnlyCapabilityRecord | null> {
+        if (!accountId || !offerId) return null
         try {
-            return await this.store.get(accountKey, offerId)
+            return await this.store.get(accountId, offerId)
         } catch {
             return null
         }
     }
 
     public async recordLocked(
-        accountKey: string,
+        accountId: string,
         offerId: string,
         lockReason: AppOnlyCapabilityRecord['classification'],
         confidence: AppOnlyCapabilityRecord['confidence'],
         ttlHours = 24,
         expiresAtCandidate?: string
     ): Promise<void> {
-        if (!accountKey || !offerId) return
+        if (!accountId || !offerId) return
         try {
             const now = new Date()
             const ttlMs = Math.max(1, ttlHours) * 60 * 60 * 1000
@@ -131,10 +131,10 @@ export class AppOnlyCapabilityCache {
                 }
             }
 
-            const existing = await this.store.get(accountKey, offerId)
+            const existing = await this.store.get(accountId, offerId)
 
             const record: AppOnlyCapabilityRecord = {
-                accountKey,
+                accountId,
                 offerId,
                 classification: lockReason,
                 confidence,
@@ -150,11 +150,11 @@ export class AppOnlyCapabilityCache {
         }
     }
 
-    public async recordCompleted(accountKey: string, offerId: string): Promise<void> {
-        if (!accountKey || !offerId) return
+    public async recordCompleted(accountId: string, offerId: string): Promise<void> {
+        if (!accountId || !offerId) return
         try {
             // Invalidate locked cache entry so that it does not block future queries
-            await this.store.delete(accountKey, offerId)
+            await this.store.delete(accountId, offerId)
         } catch {
             // Fail-open
         }

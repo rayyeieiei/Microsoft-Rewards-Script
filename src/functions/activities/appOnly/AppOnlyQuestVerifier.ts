@@ -1,10 +1,13 @@
-import { AppOnlyVerificationResult, redactAccountKey } from './AppOnlyTypes'
-import { ManualQuestQueue } from './AppOnlyQuestObserver'
+import { AppOnlyVerificationResult } from './AppOnlyTypes'
 import { AppOnlyCapabilityCache } from './AppOnlyCapabilityCache'
 import { AppOnlyClassificationInput } from './AppOnlyQuestClassifier'
+import { ManualQuestQueue } from '../../../runtime/manual/ManualQuestQueue'
+import { redactAccountKey } from '../../../util/Redaction'
 
 export interface AppOnlyVerifierOptions {
-    accountKey: string
+    accountId?: string
+    displayAccount?: string
+    accountKey?: string
     currentBalance?: number
     previousBalance?: number
     logger?: {
@@ -19,7 +22,7 @@ export class AppOnlyQuestVerifier {
     private cache: AppOnlyCapabilityCache
 
     constructor(queue?: ManualQuestQueue, cache?: AppOnlyCapabilityCache) {
-        this.queue = queue || ManualQuestQueue.getInstance()
+        this.queue = queue || new ManualQuestQueue()
         this.cache = cache || AppOnlyCapabilityCache.getInstance()
     }
 
@@ -33,8 +36,8 @@ export class AppOnlyQuestVerifier {
         now = new Date()
     ): Promise<AppOnlyVerificationResult[]> {
         const results: AppOnlyVerificationResult[] = []
-        const safeAccount = redactAccountKey(options.accountKey)
-        const pendingQuests = this.queue.getPendingForAccount(safeAccount)
+        const accountId = options.accountId || (options.accountKey ? redactAccountKey(options.accountKey) : 'unknown')
+        const pendingQuests = this.queue.getPendingForAccount(accountId, 'app-only')
 
         if (!pendingQuests.length) {
             options.logger?.debug?.('[APP-ONLY-VERIFY] pendingLoaded=0 completed=0 stillPending=0 expired=0')
@@ -61,7 +64,7 @@ export class AppOnlyQuestVerifier {
             if (quest.expiresAt) {
                 const expTime = new Date(quest.expiresAt).getTime()
                 if (!isNaN(expTime) && expTime <= nowTime) {
-                    this.queue.updateState(safeAccount, offerId, 'expired')
+                    await this.queue.updateState(accountId, 'app-only', offerId, 'expired')
                     expiredCount++
                     results.push({
                         offerId,
@@ -96,9 +99,9 @@ export class AppOnlyQuestVerifier {
             if (isServerComplete) {
                 completedCount++
                 const delta = baselineDelta > 0 ? baselineDelta : quest.expectedPoints
-                this.queue.updateState(safeAccount, offerId, 'verified-complete', delta)
+                await this.queue.updateState(accountId, 'app-only', offerId, 'verified-complete', delta)
                 // Invalidate negative cache upon completion
-                await this.cache.recordCompleted(safeAccount, offerId)
+                await this.cache.recordCompleted(accountId, offerId)
 
                 results.push({
                     offerId,
@@ -111,7 +114,7 @@ export class AppOnlyQuestVerifier {
                 options.logger?.info?.(`[APP-ONLY-VERIFY] offerId=${offerId} serverComplete=true balanceDelta=${delta}`)
             } else {
                 stillPendingCount++
-                this.queue.updateState(safeAccount, offerId, 'manual-required')
+                await this.queue.updateState(accountId, 'app-only', offerId, 'manual-required')
                 results.push({
                     offerId,
                     complete: false,

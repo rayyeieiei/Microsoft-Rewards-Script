@@ -34,6 +34,11 @@
         "defaultPolicy": "skip",
         "cacheTtlHours": 24
     },
+    "newAccountOnboarding": {
+        "enabled": true,
+        "mode": "observe-only",
+        "retentionDays": 14
+    },
     "searchOnBingLocalQueries": false,
     "globalTimeout": "30sec",
     "searchSettings": {

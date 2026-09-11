@@ -11,16 +11,9 @@ export type QuestLockReason =
 
 export type ClassificationConfidence = 'high' | 'medium' | 'low'
 
-export type ManualQuestState =
-    | 'detected'
-    | 'manual-required'
-    | 'verify-pending'
-    | 'verified-complete'
-    | 'expired'
-    | 'skipped'
-
 export interface AppOnlyQuest {
-    accountKey: string
+    accountId: string
+    displayAccount: string
     offerId: string
     title: string
     expectedPoints: number
@@ -41,7 +34,7 @@ export interface AppOnlyDecision {
 }
 
 export interface AppOnlyCapabilityRecord {
-    accountKey: string
+    accountId: string
     offerId: string
     classification: QuestLockReason
     confidence: ClassificationConfidence
@@ -51,14 +44,6 @@ export interface AppOnlyCapabilityRecord {
     serverState: 'locked' | 'complete' | 'expired'
 }
 
-export interface ManualQuestRecord extends AppOnlyQuest {
-    state: ManualQuestState
-    queuedAt: string
-    detectedAt?: string
-    completedAt?: string
-    verifiedBalanceDelta?: number
-}
-
 export interface AppOnlyVerificationResult {
     offerId: string
     complete: boolean
@@ -66,8 +51,5 @@ export interface AppOnlyVerificationResult {
     source: 'dashboard' | 'app-dashboard'
     verifiedAt: string
 }
-
-import { redactAccountKey } from '../../../util/Redaction'
-export { redactAccountKey }
 
 export * from '../ActivitySemantics'

@@ -4,9 +4,9 @@ import type { DashboardData, PunchCard, BasePromotion, FindClippyPromotion } fro
 import type { AppDashboardData } from '../interface/AppDashBoardData'
 import type { PunchCardExecutionMode } from '../interface/Config'
 import { Database } from '../util/Database'
-import { redactAccountKey } from '../util/Redaction'
 import { resolveUrlRewardAction } from './UrlRewardActionResolver'
-import { ManualQuestQueue } from './activities/appOnly/AppOnlyQuestObserver'
+import { ManualQuestQueue } from '../runtime/manual/ManualQuestQueue'
+import { resolveAccountIdentity } from '../runtime/identity/AccountIdentity'
 import {
     ActivityExecutionResult,
     ActivityBatchSummary,
@@ -1244,22 +1244,27 @@ export class Workers {
                             `[PUNCHCARD] Queued for manual handoff | offerId=${targetChildOfferId} title="${stepTitle}"`
                         )
                         try {
-                            const accKey =
-                                this.bot.accountScope?.accountKey ||
-                                redactAccountKey(this.bot.userData.userName || 'unknown')
-                            ManualQuestQueue.getInstance().enqueue({
-                                accountKey: accKey,
-                                offerId: targetChildOfferId,
-                                title: stepTitle,
-                                expectedPoints: activeChild.pointProgressMax ?? 10,
-                                complete: false,
-                                locked: false,
-                                lockReason: 'unknown',
-                                confidence: 'high',
-                                observedAt: new Date().toISOString(),
-                                state: 'manual-required',
-                                queuedAt: new Date().toISOString()
-                            })
+                            const identity = resolveAccountIdentity(
+                                this.bot.activeAccount || { email: this.bot.userData.userName || 'unknown' }
+                            )
+                            const queue = (this.bot as any).manualQuestQueue as ManualQuestQueue | undefined
+                            if (queue) {
+                                await queue.enqueue({
+                                    accountId: identity.accountId,
+                                    displayAccount: identity.displayAccount,
+                                    questKind: 'punch-card',
+                                    offerId: targetChildOfferId,
+                                    title: stepTitle,
+                                    expectedPoints: activeChild.pointProgressMax ?? 10,
+                                    complete: false,
+                                    locked: false,
+                                    lockReason: 'unknown',
+                                    confidence: 'high',
+                                    observedAt: new Date().toISOString(),
+                                    state: 'manual-required',
+                                    queuedAt: new Date().toISOString()
+                                })
+                            }
                         } catch {}
 
                         this.bot.logger.info(
@@ -1461,22 +1466,27 @@ export class Workers {
                         `[PUNCHCARD] Queued for manual handoff | offerId=${offerId} title="${stepTitle}"`
                     )
                     try {
-                        const accKey =
-                            this.bot.accountScope?.accountKey ||
-                            redactAccountKey(this.bot.userData.userName || 'unknown')
-                        ManualQuestQueue.getInstance().enqueue({
-                            accountKey: accKey,
-                            offerId,
-                            title: stepTitle,
-                            expectedPoints: card.parentPromotion.pointProgressMax ?? 10,
-                            complete: false,
-                            locked: false,
-                            lockReason: 'unknown',
-                            confidence: 'high',
-                            observedAt: new Date().toISOString(),
-                            state: 'manual-required',
-                            queuedAt: new Date().toISOString()
-                        })
+                        const identity = resolveAccountIdentity(
+                            this.bot.activeAccount || { email: this.bot.userData.userName || 'unknown' }
+                        )
+                        const queue = (this.bot as any).manualQuestQueue as ManualQuestQueue | undefined
+                        if (queue) {
+                            await queue.enqueue({
+                                accountId: identity.accountId,
+                                displayAccount: identity.displayAccount,
+                                questKind: 'punch-card',
+                                offerId,
+                                title: stepTitle,
+                                expectedPoints: card.parentPromotion.pointProgressMax ?? 10,
+                                complete: false,
+                                locked: false,
+                                lockReason: 'unknown',
+                                confidence: 'high',
+                                observedAt: new Date().toISOString(),
+                                state: 'manual-required',
+                                queuedAt: new Date().toISOString()
+                            })
+                        }
                     } catch {}
 
                     this.bot.logger.info(

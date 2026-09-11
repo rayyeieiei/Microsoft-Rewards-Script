@@ -6,8 +6,9 @@ import {
     AppOnlyCapabilityCache,
     InMemoryCapabilityStore
 } from '../src/functions/activities/appOnly/AppOnlyCapabilityCache'
-import { AppOnlyQuestObserver, ManualQuestQueue } from '../src/functions/activities/appOnly/AppOnlyQuestObserver'
-import { ManualQuestRecord } from '../src/functions/activities/appOnly/AppOnlyTypes'
+import { AppOnlyQuestObserver } from '../src/functions/activities/appOnly/AppOnlyQuestObserver'
+import { ManualQuestQueue } from '../src/runtime/manual/ManualQuestQueue'
+import { ManualQuestRecord } from '../src/runtime/manual/ManualQuestTypes'
 import { resolveAppOnlyPolicy } from '../src/functions/activities/appOnly/AppOnlyPolicy'
 import { validateAccounts } from '../src/util/Validator'
 
@@ -131,10 +132,12 @@ export async function runAppOnlyObserverTests() {
         try {
             if (fs.existsSync(testQueueFile)) fs.unlinkSync(testQueueFile)
         } catch {}
-        const queue = new ManualQuestQueue(testQueueFile)
+        const queue = new ManualQuestQueue({ storagePath: testQueueFile })
 
         const record: ManualQuestRecord = {
-            accountKey: 'manual@test.com',
+            accountId: 'acc_manual_test_1',
+            displayAccount: 'man***@test.com',
+            questKind: 'app-only',
             offerId: 'offer_manual_1',
             title: 'Manual Task',
             expectedPoints: 10,
@@ -147,15 +150,15 @@ export async function runAppOnlyObserverTests() {
             queuedAt: new Date().toISOString()
         }
 
-        queue.enqueue(record)
-        assert.strictEqual(queue.getPendingForAccount('manual@test.com').length, 1)
+        await queue.enqueue(record)
+        assert.strictEqual(queue.getPendingForAccount('acc_manual_test_1', 'app-only').length, 1)
 
         // Duplicate enqueue must update, not duplicate
-        queue.enqueue({ ...record, expectedPoints: 20 })
-        assert.strictEqual(queue.getPendingForAccount('manual@test.com').length, 1)
+        await queue.enqueue({ ...record, expectedPoints: 20 })
+        assert.strictEqual(queue.getPendingForAccount('acc_manual_test_1', 'app-only').length, 1)
 
-        queue.updateState('manual@test.com', 'offer_manual_1', 'verified-complete', 10)
-        assert.strictEqual(queue.getPendingForAccount('manual@test.com').length, 0)
+        await queue.updateState('acc_manual_test_1', 'app-only', 'offer_manual_1', 'verified-complete', 10)
+        assert.strictEqual(queue.getPendingForAccount('acc_manual_test_1', 'app-only').length, 0)
 
         try {
             if (fs.existsSync(testQueueFile)) fs.unlinkSync(testQueueFile)
@@ -169,10 +172,12 @@ export async function runAppOnlyObserverTests() {
         try {
             if (fs.existsSync(testQueueFile)) fs.unlinkSync(testQueueFile)
         } catch {}
-        const queue = new ManualQuestQueue(testQueueFile)
+        const queue = new ManualQuestQueue({ storagePath: testQueueFile })
 
-        queue.enqueue({
-            accountKey: 'baryyaja@gmail.com',
+        await queue.enqueue({
+            accountId: 'acc_c2_test_1',
+            displayAccount: 'bar***@gmail.com',
+            questKind: 'app-only',
             offerId: 'offer_c2_test',
             title: 'C2 Test Task',
             expectedPoints: 10,
@@ -189,7 +194,8 @@ export async function runAppOnlyObserverTests() {
         const jsonStr = JSON.stringify(snapshot)
 
         assert.strictEqual(jsonStr.includes('baryyaja@gmail.com'), false, 'Full email must be redacted')
-        assert.ok(jsonStr.includes('bar***@gmail.com'), 'Redacted accountKey must be present')
+        assert.strictEqual(jsonStr.includes('acc_c2_test_1'), false, 'Internal accountId must NOT be exposed in snapshot')
+        assert.ok(jsonStr.includes('bar***@gmail.com'), 'Redacted displayAccount must be present')
         assert.strictEqual(jsonStr.includes('password'), false)
         assert.strictEqual(jsonStr.includes('token'), false)
         assert.strictEqual(jsonStr.includes('cookie'), false)

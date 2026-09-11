@@ -15,6 +15,14 @@ export interface PunchCardExecutionConfig {
     maxChildrenPerRun: number
 }
 
+export type NewAccountOnboardingMode = 'disabled' | 'observe-only' | 'observe-and-handoff'
+
+export interface NewAccountOnboardingConfig {
+    enabled: boolean
+    mode: NewAccountOnboardingMode
+    retentionDays: number
+}
+
 export interface Config {
     baseURL: string
     sessionPath: string
@@ -30,6 +38,7 @@ export interface Config {
     workers: ConfigWorkers
     appOnlyRewards?: AppOnlyConfig
     punchCardExecution?: PunchCardExecutionConfig
+    newAccountOnboarding?: NewAccountOnboardingConfig
     searchOnBingLocalQueries: boolean
     globalTimeout: number | string
     searchSettings: ConfigSearchSettings
