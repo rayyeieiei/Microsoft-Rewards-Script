@@ -1,35 +1,23 @@
 import rebrowser, { BrowserContext } from 'patchright'
-import { newInjectedContext } from 'fingerprint-injector'
-import { BrowserFingerprintWithHeaders, FingerprintGenerator } from 'fingerprint-generator'
-
 import type { MicrosoftRewardsBot } from '../index'
-import { loadSessionData, saveFingerprintData } from '../util/Load'
-import { UserAgentManager } from './UserAgent'
-
+import { loadSessionData } from '../util/Load'
+import { BrowserEnvironmentPolicy } from '../runtime/environment/BrowserEnvironmentPolicy'
 import type { Account, AccountProxy } from '../interface/Account'
 
-/* Test Stuff
-https://abrahamjuliot.github.io/creepjs/
-https://botcheck.luminati.io/
-https://fv.pro/
-https://pixelscan.net/
-https://www.browserscan.net/
-*/
-
-interface BrowserCreationResult {
+export interface BrowserCreationResult {
     context: BrowserContext
-    fingerprint: BrowserFingerprintWithHeaders
+    fingerprint?: any
 }
 
 class Browser {
     private readonly bot: MicrosoftRewardsBot
+    public isHealthy = true
+    private currentBrowser: any = null
+
     private static readonly BROWSER_ARGS = [
         '--no-sandbox',
         '--mute-audio',
         '--disable-setuid-sandbox',
-        '--ignore-certificate-errors',
-        '--ignore-certificate-errors-spki-list',
-        '--ignore-ssl-errors',
         '--no-first-run',
         '--no-default-browser-check',
         '--disable-web-authentication-ui',
@@ -47,9 +35,6 @@ class Browser {
         '--disable-breakpad',
         '--disable-component-extensions-with-background-pages'
     ] as const
-
-    public isHealthy = true
-    private currentBrowser: any = null
 
     constructor(bot: MicrosoftRewardsBot) {
         this.bot = bot
@@ -86,7 +71,7 @@ class Browser {
     }
 
     async createBrowser(account: Account): Promise<BrowserCreationResult> {
-        let browser: any // Menggunakan variabel penampung utama yang bisa diakses di semua blok bawah
+        let browser: any
 
         try {
             let proxyConfig: any = undefined
@@ -106,8 +91,8 @@ class Browser {
             }
 
             browser = await rebrowser.chromium.launch({
-                headless: this.bot.config.headless === true, // Memastikan bertipe data boolean murni
-                channel: this.bot.config.headless ? undefined : 'chrome', // FIX: Jika false, paksa pakai Chrome biasa (bukan headless-shell) agar jendelanya nongol
+                headless: this.bot.config.headless === true,
+                channel: this.bot.config.headless ? undefined : 'chrome',
                 args: [...Browser.BROWSER_ARGS],
                 proxy: proxyConfig
             } as any)
@@ -130,15 +115,11 @@ class Browser {
                 this.bot.isMobile
             )
 
-            const fingerprint = sessionData.fingerprint ?? (await this.generateFingerprint(this.bot.isMobile))
+            // Resolve clean environment profile & context options (strict TLS, zero synthetic spoofing)
+            const profile = BrowserEnvironmentPolicy.resolveProfile(this.bot.isMobile ? 'mobile' : 'desktop')
+            const contextOptions = BrowserEnvironmentPolicy.toContextOptions(profile)
 
-            const context = await newInjectedContext(browser as any, {
-                fingerprint,
-                newContextOptions: {
-                    permissions: [],
-                    ignoreHTTPSErrors: true
-                }
-            })
+            const context = await browser.newContext(contextOptions)
 
             await context.addInitScript(() => {
                 Object.defineProperty(navigator, 'credentials', {
@@ -164,7 +145,7 @@ class Browser {
             await context.addCookies(cleanCookies)
 
             // ==================== ULTRA DATA SAVER (HEMAT KUOTA 80%-90%) ====================
-            await (context as unknown as BrowserContext).route('**/*', route => {
+            const routeHandler = (route: any) => {
                 const req = route.request()
                 const type = req.resourceType()
                 const url = req.url().toLowerCase()
@@ -208,10 +189,9 @@ class Browser {
 
                 // Izinkan document HTML, scripts penting Rewards, telemetri event Microsoft, XHR/Fetch API, dan CSS
                 return route.continue().catch(() => {})
-            })
+            }
 
-            // Tracking bandwidth (kuota) real-time dari setiap response jaringan Chromium
-            ;(context as unknown as BrowserContext).on('response', async response => {
+            const responseListener = async (response: any) => {
                 try {
                     const resourceType = response.request().resourceType()
                     const s = await response
@@ -228,37 +208,26 @@ class Browser {
                         }
                     }
                 } catch {}
-            })
-
-            if (
-                (account.saveFingerprint.mobile && this.bot.isMobile) ||
-                (account.saveFingerprint.desktop && !this.bot.isMobile)
-            ) {
-                await saveFingerprintData(this.bot.config.sessionPath, account.email, this.bot.isMobile, fingerprint)
             }
 
+            await (context as unknown as BrowserContext).route('**/*', routeHandler)
+            ;(context as unknown as BrowserContext).on('response', responseListener)
+
+            // Register handlers with exact references on active AccountScope for precise unrouting
+            if (this.bot.accountScope) {
+                this.bot.accountScope.registerRouteHandler(context, '**/*', routeHandler)
+                this.bot.accountScope.registerResponseListener(context, responseListener)
+            }
+
+            const screen = profile.screen
+            const viewport = screen ? `${screen.viewport.width}x${screen.viewport.height}` : 'unknown'
             this.bot.logger.info(
                 this.bot.isMobile,
                 'BROWSER',
-                `Created browser with User-Agent: "${fingerprint.fingerprint.navigator.userAgent}"`
+                `Browser context created with native environment | viewport=${viewport} mobile=${this.bot.isMobile}`
             )
 
-            const fp = fingerprint.fingerprint
-            const screen = fp?.screen
-            const nav = fp?.navigator
-            const ua = nav?.userAgent || ''
-            const uaMajorMatch = ua.match(/(?:Chrome|EdgA?|Version)\/(\d+)/i)
-            const uaMajor = uaMajorMatch ? uaMajorMatch[1] : 'unknown'
-            const platform = nav?.userAgentData?.platform || (this.bot.isMobile ? 'Android' : 'Windows')
-            const viewport = screen ? `${screen.width}x${screen.height}` : 'unknown'
-
-            this.bot.logger.debug(
-                this.bot.isMobile,
-                'BROWSER-FINGERPRINT',
-                `platform=${platform} mobile=${this.bot.isMobile} viewport=${viewport} uaMajor=${uaMajor}`
-            )
-
-            return { context: context as unknown as BrowserContext, fingerprint }
+            return { context: context as unknown as BrowserContext }
         } catch (error) {
             if (browser) {
                 await browser.close().catch(() => {})
@@ -275,19 +244,6 @@ class Browser {
         } catch {
             return `${proxy.url}:${proxy.port}`
         }
-    }
-
-    async generateFingerprint(isMobile: boolean) {
-        const fingerPrintData = new FingerprintGenerator().getFingerprint({
-            devices: isMobile ? ['mobile'] : ['desktop'],
-            operatingSystems: isMobile ? ['android', 'ios'] : ['windows', 'linux'],
-            browsers: [{ name: 'edge' }]
-        })
-
-        const userAgentManager = new UserAgentManager(this.bot)
-        const updatedFingerPrintData = await userAgentManager.updateFingerprintUserAgent(fingerPrintData, isMobile)
-
-        return updatedFingerPrintData
     }
 }
 

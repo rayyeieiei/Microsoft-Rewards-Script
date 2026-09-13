@@ -1,5 +1,4 @@
 import type { BrowserContext } from 'patchright'
-import type { BrowserFingerprintWithHeaders } from 'fingerprint-generator'
 import { MicrosoftRewardsBot, executionContext } from '../index'
 import type { DashboardData } from '../interface/DashboardData'
 import type { Account } from '../interface/Account'
@@ -7,7 +6,7 @@ import { redactAccountKey } from '../util/Redaction'
 
 interface BrowserSession {
     context: BrowserContext
-    fingerprint: BrowserFingerprintWithHeaders
+    fingerprint?: any
 }
 
 interface MissingSearchPoints {

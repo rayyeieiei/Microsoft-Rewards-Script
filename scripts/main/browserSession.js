@@ -1,6 +1,5 @@
 import fs from 'fs'
 import { chromium } from 'patchright'
-import { newInjectedContext } from 'fingerprint-injector'
 import {
     getDirname,
     getProjectRoot,
@@ -127,25 +126,18 @@ async function main() {
         ]
     })
 
-    let context
-    if (fingerprint) {
-        context = await newInjectedContext(browser, { fingerprint })
+    const context = await browser.newContext({
+        viewport: isMobile ? { width: 375, height: 667 } : { width: 1366, height: 768 }
+    })
 
-        await context.addInitScript(() => {
-            Object.defineProperty(navigator, 'credentials', {
-                value: {
-                    create: () => Promise.reject(new Error('WebAuthn disabled')),
-                    get: () => Promise.reject(new Error('WebAuthn disabled'))
-                }
-            })
+    await context.addInitScript(() => {
+        Object.defineProperty(navigator, 'credentials', {
+            value: {
+                create: () => Promise.reject(new Error('WebAuthn disabled')),
+                get: () => Promise.reject(new Error('WebAuthn disabled'))
+            }
         })
-
-        log('SUCCESS', 'Fingerprint injected into browser context')
-    } else {
-        context = await browser.newContext({
-            viewport: isMobile ? { width: 375, height: 667 } : { width: 1366, height: 768 }
-        })
-    }
+    })
 
     if (cookies.length) {
         await context.addCookies(cookies)

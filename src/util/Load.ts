@@ -1,5 +1,4 @@
 import type { Cookie } from 'patchright'
-import type { BrowserFingerprintWithHeaders } from 'fingerprint-generator'
 import fs from 'fs'
 import path from 'path'
 
@@ -63,7 +62,7 @@ export async function loadSessionData(sessionPath: string, email: string, saveFi
         }
         const fingerprintFileName = isMobile ? 'session_fingerprint_mobile.json' : 'session_fingerprint_desktop.json'
         const fingerprintFile = path.join(process.cwd(), 'browser', sessionPath, email, fingerprintFileName)
-        let fingerprint!: BrowserFingerprintWithHeaders
+        let fingerprint: any = null
         const shouldLoadFingerprint = isMobile ? saveFingerprint.mobile : saveFingerprint.desktop
         if (shouldLoadFingerprint && fs.existsSync(fingerprintFile)) {
             fingerprint = JSON.parse(await fs.promises.readFile(fingerprintFile, 'utf-8'))
@@ -83,7 +82,7 @@ export async function saveSessionData(sessionPath: string, cookies: Cookie[], em
     } catch (error) { throw new Error(error as string) }
 }
 
-export async function saveFingerprintData(sessionPath: string, email: string, isMobile: boolean, fingerpint: BrowserFingerprintWithHeaders): Promise<string> {
+export async function saveFingerprintData(sessionPath: string, email: string, isMobile: boolean, fingerpint: any): Promise<string> {
     try {
         // 🔥 FIX: Amanin folder penyimpanan fingerprint
         const sessionDir = path.join(process.cwd(), 'browser', sessionPath, email)

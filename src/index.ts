@@ -3,7 +3,6 @@ import cluster, { Worker } from 'cluster'
 import type { BrowserContext, Cookie, Page } from 'patchright'
 import axios from 'axios'
 import pkg from '../package.json'
-import type { BrowserFingerprintWithHeaders } from 'fingerprint-generator'
 import dns from 'node:dns/promises' // 🚀 UNTUK CEK KONEKSI HEMAT KUOTA
 
 import Browser from './browser/Browser'
@@ -77,7 +76,7 @@ interface ExecutionContext {
 
 interface BrowserSession {
     context: BrowserContext
-    fingerprint: BrowserFingerprintWithHeaders
+    fingerprint?: any
 }
 
 interface AccountStats {
@@ -138,7 +137,7 @@ export class MicrosoftRewardsBot {
     }
     public requestToken = ''
     public cookies: { mobile: Cookie[]; desktop: Cookie[] }
-    public fingerprint!: BrowserFingerprintWithHeaders
+    public fingerprint?: any
     public accounts: Account[] = [] // DIUBAH JADI PUBLIC AGAR DISCORDBOT AMAN
     public workers: Workers // DIUBAH JADI PUBLIC AGAR SEARCHMANAGER AMAN
     public localProxy: DynamicOutboundProxy | null = null

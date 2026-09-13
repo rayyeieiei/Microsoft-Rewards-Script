@@ -1,6 +1,7 @@
 import assert from 'assert'
 import path from 'path'
 import { AccountScope } from '../src/runtime/AccountScope'
+import { BrowserEnvironmentPolicy } from '../src/runtime/environment/BrowserEnvironmentPolicy'
 import { ResolvedActionSecret } from '../src/functions/UrlRewardActionResolver'
 import type { Account, AccountProxy } from '../src/interface/Account'
 
@@ -352,5 +353,154 @@ export async function runBrowserEnvironmentIsolationTests(): Promise<void> {
         assert.strictEqual(scopeDisposed, true, 'Scope must be disposed in finally block')
         assert.strictEqual(releasedScope, null, 'fakeBot.accountScope must be set to null in finally block')
         console.log('✅ Test 8 Passed: Orchestrator finally release invariant')
+    }
+
+    // Test 9: BrowserEnvironmentPolicy Profile Resolution & Validation
+    {
+        const mobileProfile = BrowserEnvironmentPolicy.resolveProfile('mobile')
+        assert.strictEqual(mobileProfile.contextKind, 'mobile')
+        assert.strictEqual(mobileProfile.source, 'project-config')
+        assert.strictEqual(mobileProfile.screen?.viewport.width, 375)
+        assert.strictEqual(mobileProfile.screen?.viewport.height, 667)
+        assert.strictEqual(mobileProfile.screen?.isMobile, true)
+        assert.strictEqual(mobileProfile.screen?.hasTouch, true)
+
+        const desktopProfile = BrowserEnvironmentPolicy.resolveProfile('desktop')
+        assert.strictEqual(desktopProfile.contextKind, 'desktop')
+        assert.strictEqual(desktopProfile.source, 'project-config')
+        assert.strictEqual(desktopProfile.screen?.viewport.width, 1280)
+        assert.strictEqual(desktopProfile.screen?.viewport.height, 720)
+        assert.strictEqual(desktopProfile.screen?.isMobile, false)
+        assert.strictEqual(desktopProfile.screen?.hasTouch, false)
+
+        const validRes = BrowserEnvironmentPolicy.validateProfile(mobileProfile)
+        assert.strictEqual(validRes.valid, true)
+        assert.strictEqual(validRes.errors.length, 0)
+
+        // Invalid profile checks
+        const invalidProfile: any = {
+            schemaVersion: 2,
+            contextKind: 'tablet',
+            source: 'custom',
+            screen: { viewport: { width: -10, height: 0 } }
+        }
+        const invalidRes = BrowserEnvironmentPolicy.validateProfile(invalidProfile)
+        assert.strictEqual(invalidRes.valid, false)
+        assert.ok(invalidRes.errors.length >= 3)
+        console.log('✅ Test 9 Passed: BrowserEnvironmentPolicy profile resolution & schema validation')
+    }
+
+    // Test 10: Strict TLS Invariant & Absence of sec-ch-ua HTTP Headers
+    {
+        const mobileProfile = BrowserEnvironmentPolicy.resolveProfile('mobile')
+        const contextOptions = BrowserEnvironmentPolicy.toContextOptions(mobileProfile)
+
+        // TLS security must be strictly enforced
+        assert.strictEqual(contextOptions.ignoreHTTPSErrors, false, 'TLS errors must never be ignored')
+
+        // Absolutely NO extraHTTPHeaders containing sec-ch-ua
+        if (contextOptions.extraHTTPHeaders) {
+            const headers = contextOptions.extraHTTPHeaders
+            for (const headerKey of Object.keys(headers)) {
+                assert.strictEqual(headerKey.toLowerCase().includes('sec-ch-ua'), false)
+            }
+        }
+
+        console.log('✅ Test 10 Passed: Strict TLS invariant & zero sec-ch-ua header spoofing')
+    }
+
+    // Test 11: Static Codebase Audit for Zero Fingerprint Spoofing Packages in src/
+    {
+        const fs = await import('fs')
+        const srcDir = path.join(process.cwd(), 'src')
+
+        function scanFiles(dir: string, fileList: string[] = []): string[] {
+            const files = fs.readdirSync(dir)
+            for (const f of files) {
+                const fullPath = path.join(dir, f)
+                if (fs.statSync(fullPath).isDirectory()) {
+                    scanFiles(fullPath, fileList)
+                } else if (f.endsWith('.ts') || f.endsWith('.js')) {
+                    fileList.push(fullPath)
+                }
+            }
+            return fileList
+        }
+
+        const sourceFiles = scanFiles(srcDir)
+        const forbiddenPackages = ['fingerprint-injector', 'fingerprint-generator']
+
+        for (const file of sourceFiles) {
+            const content = fs.readFileSync(file, 'utf-8')
+            for (const pkgName of forbiddenPackages) {
+                assert.strictEqual(
+                    content.includes(`'${pkgName}'`) || content.includes(`"${pkgName}"`),
+                    false,
+                    `Forbidden package '${pkgName}' found in ${path.relative(process.cwd(), file)}`
+                )
+            }
+        }
+
+        console.log('✅ Test 11 Passed: Static codebase audit confirms 0 fingerprint spoofing packages in src/')
+    }
+
+    // Test 12: Real Playwright Integration Test - Cross-Context Isolation
+    {
+        const rebrowser = (await import('patchright')).default
+        let browser: any = null
+
+        try {
+            browser = await rebrowser.chromium.launch({
+                headless: true,
+                args: ['--no-sandbox', '--disable-setuid-sandbox']
+            })
+
+            const mobileProfile = BrowserEnvironmentPolicy.resolveProfile('mobile')
+            const desktopProfile = BrowserEnvironmentPolicy.resolveProfile('desktop')
+
+            const contextA = await browser.newContext(BrowserEnvironmentPolicy.toContextOptions(mobileProfile))
+            const contextB = await browser.newContext(BrowserEnvironmentPolicy.toContextOptions(desktopProfile))
+
+            // Context A and Context B must be separate instances
+            assert.notStrictEqual(contextA, contextB)
+
+            // Add cookie to Context A
+            await contextA.addCookies([
+                {
+                    name: 'test_token',
+                    value: 'account_A_cookie_value',
+                    domain: '.bing.com',
+                    path: '/'
+                }
+            ])
+
+            // Context B cookies must be empty (strictly isolated)
+            const cookiesB = await contextB.cookies('https://bing.com')
+            assert.strictEqual(cookiesB.length, 0, 'Context B must not receive cookies from Context A')
+
+            const cookiesA = await contextA.cookies('https://bing.com')
+            assert.strictEqual(cookiesA.length, 1)
+            assert.strictEqual(cookiesA[0].value, 'account_A_cookie_value')
+
+            // Pages in Context A & B have isolated viewports
+            const pageA = await contextA.newPage()
+            const pageB = await contextB.newPage()
+
+            const vpA = pageA.viewportSize()
+            const vpB = pageB.viewportSize()
+            assert.strictEqual(vpA?.width, 375)
+            assert.strictEqual(vpB?.width, 1280)
+
+            await pageA.close()
+            await pageB.close()
+            await contextA.close()
+            await contextB.close()
+
+            console.log('✅ Test 12 Passed: Real Playwright integration verifies cross-context isolation & clean teardown')
+        } finally {
+            if (browser) {
+                await browser.close().catch(() => {})
+            }
+        }
     }
 }
