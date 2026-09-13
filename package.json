@@ -69,8 +69,6 @@
         "cheerio": "^1.0.0",
         "discord.js": "^14.26.4",
         "express": "^5.2.1",
-        "fingerprint-generator": "^2.1.80",
-        "fingerprint-injector": "^2.1.80",
         "ghost-cursor-playwright-port": "^1.4.3",
         "http-proxy-agent": "^7.0.2",
         "https-proxy-agent": "^7.0.6",
