@@ -413,6 +413,8 @@ export class SearchManager {
         this.bot.logger.debug('main', 'SEARCH-DESKTOP-LOGIN', 'Browser created, new page')
 
         this.bot.mainDesktopPage = await session.context.newPage()
+        this.bot.accountScope?.setContext('desktop', session.context)
+        this.bot.accountScope?.trackPage(this.bot.mainDesktopPage)
         this.bot.logger.info(
             'main',
             'SEARCH-DESKTOP-LOGIN',

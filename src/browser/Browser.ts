@@ -48,8 +48,41 @@ class Browser {
         '--disable-component-extensions-with-background-pages'
     ] as const
 
+    public isHealthy = true
+    private currentBrowser: any = null
+
     constructor(bot: MicrosoftRewardsBot) {
         this.bot = bot
+    }
+
+    public getCurrentBrowserProcess(): any {
+        return this.currentBrowser
+    }
+
+    public async recycleBrowser(): Promise<void> {
+        this.isHealthy = false
+        if (this.currentBrowser) {
+            try {
+                await Promise.race([
+                    this.currentBrowser.close(),
+                    new Promise((_, reject) =>
+                        setTimeout(() => reject(new Error('Browser recycle timeout')), 3000)
+                    )
+                ])
+            } catch {
+                try {
+                    const proc = this.currentBrowser.process?.()
+                    if (proc && !proc.killed && typeof proc.kill === 'function') {
+                        proc.kill('SIGKILL')
+                    }
+                } catch {}
+            } finally {
+                this.currentBrowser = null
+                this.isHealthy = true
+            }
+        } else {
+            this.isHealthy = true
+        }
     }
 
     async createBrowser(account: Account): Promise<BrowserCreationResult> {
@@ -78,6 +111,9 @@ class Browser {
                 args: [...Browser.BROWSER_ARGS],
                 proxy: proxyConfig
             } as any)
+
+            this.currentBrowser = browser
+            this.isHealthy = true
 
             this.bot.logger.info(this.bot.isMobile, 'BROWSER', 'Browser launched successfully')
         } catch (error) {

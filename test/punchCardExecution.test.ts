@@ -21,7 +21,7 @@ export async function runPunchCardExecutionTests() {
     {
         const logged: string[] = []
         let clickCount = 0
-        const mockScope = new AccountScope('bar***@gmail.com', 'run_test_1')
+        const mockScope = AccountScope.createForTesting('bar***@gmail.com', 'run_test_1')
         const mockWorkers = new Workers({
             isMobile: false,
             userData: { userName: 'baryyaja', currentPoints: 100 },
@@ -79,7 +79,7 @@ export async function runPunchCardExecutionTests() {
     {
         const logged: string[] = []
         let clickCount = 0
-        const mockScope = new AccountScope('bar***@gmail.com', 'run_test_2')
+        const mockScope = AccountScope.createForTesting('bar***@gmail.com', 'run_test_2')
         const mockWorkers = new Workers({
             isMobile: false,
             userData: { userName: 'baryyaja', currentPoints: 100 },
@@ -157,8 +157,8 @@ export async function runPunchCardExecutionTests() {
 
     // Test 4: Account scope mismatch rejects action
     {
-        const scopeA = new AccountScope('acc_a***@gmail.com', 'run_test_4', 'scope_A')
-        const scopeB = new AccountScope('acc_b***@gmail.com', 'run_test_4', 'scope_B')
+        const scopeA = AccountScope.createForTesting('acc_a***@gmail.com', 'run_test_4', 'scope_A')
+        const scopeB = AccountScope.createForTesting('acc_b***@gmail.com', 'run_test_4', 'scope_B')
 
         const secretA = new ResolvedActionSecret({
             accountScopeId: scopeA.id,
@@ -183,7 +183,7 @@ export async function runPunchCardExecutionTests() {
 
     // Test 5: Disposal wipes all secrets and action references
     {
-        const scope = new AccountScope('dispose***@gmail.com', 'run_test_5')
+        const scope = AccountScope.createForTesting('dispose***@gmail.com', 'run_test_5')
         const secret = new ResolvedActionSecret({
             accountScopeId: scope.id,
             offerId: 'offer_leak_test',
@@ -234,7 +234,7 @@ export async function runPunchCardExecutionTests() {
     // Test 7: CAPTCHA / bot warning triggers kill switch (executionAborted=true)
     {
         const logged: string[] = []
-        const mockScope = new AccountScope('bar***@gmail.com', 'run_test_7')
+        const mockScope = AccountScope.createForTesting('bar***@gmail.com', 'run_test_7')
         const mockWorkers = new Workers({
             isMobile: false,
             userData: { userName: 'baryyaja', currentPoints: 100 },
@@ -325,7 +325,7 @@ export async function runPunchCardExecutionTests() {
     {
         const logged: string[] = []
         let clickExecuted = false
-        const mockScope = new AccountScope('bar***@gmail.com', 'run_test_9')
+        const mockScope = AccountScope.createForTesting('bar***@gmail.com', 'run_test_9')
 
         // Default config without explicit opt-in
         const mockWorkers = new Workers({
@@ -368,7 +368,7 @@ export async function runPunchCardExecutionTests() {
     // Test 10: Max 1 mutation attempt per child per run
     {
         let executionCount = 0
-        const mockScope = new AccountScope('bar***@gmail.com', 'run_test_10')
+        const mockScope = AccountScope.createForTesting('bar***@gmail.com', 'run_test_10')
         const mockWorkers = new Workers({
             isMobile: false,
             userData: { userName: 'baryyaja', currentPoints: 100 },
@@ -456,7 +456,7 @@ export async function runPunchCardExecutionTests() {
     {
         const logged: string[] = []
         let clickCount = 0
-        const mockScope = new AccountScope('bar***@gmail.com', 'run_test_13')
+        const mockScope = AccountScope.createForTesting('bar***@gmail.com', 'run_test_13')
         const mockWorkers = new Workers({
             isMobile: false,
             userData: { userName: 'baryyaja', currentPoints: 100 },
@@ -502,7 +502,7 @@ export async function runPunchCardExecutionTests() {
     // Test 14: Locked child produces 0 action and 0 navigation
     {
         let clickCount = 0
-        const mockScope = new AccountScope('bar***@gmail.com', 'run_test_14')
+        const mockScope = AccountScope.createForTesting('bar***@gmail.com', 'run_test_14')
         const mockWorkers = new Workers({
             isMobile: false,
             userData: { userName: 'baryyaja', currentPoints: 100 },

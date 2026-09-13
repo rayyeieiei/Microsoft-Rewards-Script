@@ -223,7 +223,7 @@ export async function runPunchCardTests() {
             }
         }
 
-        const mockScope = new AccountScope('test***@gmail.com', 'run_test_5')
+        const mockScope = AccountScope.createForTesting('test***@gmail.com', 'run_test_5')
         const mockWorkers = new Workers({
             isMobile: false,
             userData: { userName: 'testuser', currentPoints: 100 },
@@ -257,7 +257,7 @@ export async function runPunchCardTests() {
     // Test 6: Maximum one child executed per parent per run
     {
         const executedOffers: string[] = []
-        const mockScope = new AccountScope('test***@gmail.com', 'run_test_6')
+        const mockScope = AccountScope.createForTesting('test***@gmail.com', 'run_test_6')
         const mockWorkers = new Workers({
             isMobile: false,
             userData: { userName: 'testuser', currentPoints: 100 },
@@ -312,7 +312,7 @@ export async function runPunchCardTests() {
     // Test 7: Locked child is never executed
     {
         const executedOffers: string[] = []
-        const mockScope = new AccountScope('test***@gmail.com', 'run_test_7')
+        const mockScope = AccountScope.createForTesting('test***@gmail.com', 'run_test_7')
         const mockWorkers = new Workers({
             isMobile: false,
             userData: { userName: 'testuser', currentPoints: 100 },

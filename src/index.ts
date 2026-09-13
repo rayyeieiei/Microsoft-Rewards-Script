@@ -127,7 +127,15 @@ export class MicrosoftRewardsBot {
     public mainDesktopPage!: Page
     public userData: UserData
     public rewardsVersion: 'legacy' | 'modern' = 'legacy'
-    public accessToken = ''
+    public get accessToken(): string {
+        return this.accountScope ? this.accountScope.getDapiToken() : ''
+    }
+    public set accessToken(token: string) {
+        if (!this.accountScope) {
+            throw new Error('[FATAL-SCOPE] Cannot set DAPI access token: no active AccountScope')
+        }
+        this.accountScope.setDapiToken(token)
+    }
     public requestToken = ''
     public cookies: { mobile: Cookie[]; desktop: Cookie[] }
     public fingerprint!: BrowserFingerprintWithHeaders
@@ -144,7 +152,7 @@ export class MicrosoftRewardsBot {
 
     private activeWorkers: number
     private exitedWorkers: number[]
-    private browserFactory: Browser = new Browser(this)
+    public browserFactory: Browser = new Browser(this)
     private login = new Login(this)
     private searchManager: SearchManager
     public axios!: AxiosClient
@@ -215,7 +223,9 @@ export class MicrosoftRewardsBot {
             blockedRequests: 0
         }
         this.rewardsVersion = 'legacy'
-        this.accessToken = ''
+        if (this.accountScope) {
+            this.accountScope.clearDapiToken()
+        }
         this.requestToken = ''
         this.cookies = { mobile: [], desktop: [] }
         this.fingerprint = undefined as any
@@ -571,8 +581,12 @@ export class MicrosoftRewardsBot {
             this.resetAccountState()
             const accountStartTime = Date.now()
             const accountEmail = account.email
-            const redactedEmail = redactAccountKey(accountEmail)
-            this.accountScope = new AccountScope(redactedEmail, this.runId)
+            const scope = await AccountScope.create({
+                account,
+                bot: this,
+                runId: this.runId
+            })
+            this.accountScope = scope
             this.userData.userName = this.utils.getEmailUsername(accountEmail)
             this.activeAccount = account
 
@@ -605,7 +619,7 @@ export class MicrosoftRewardsBot {
                 DataSaverManager.getInstance().beginAccountQuota(accountEmail)
                 this.axios = new AxiosClient(account.proxy, this.localProxyPort, bytes => this.trackBandwidth(bytes))
 
-                const result = await this.Main(account).catch(error => {
+                const result = await this.Main(account, scope).catch(error => {
                     const errMsg = error instanceof Error ? error.message : String(error)
                     void this.logger.error(
                         true,
@@ -708,9 +722,11 @@ export class MicrosoftRewardsBot {
                     error: errMsg
                 })
             } finally {
-                if (this.accountScope) {
-                    await this.accountScope.dispose().catch(() => {})
-                    this.accountScope = null
+                if (scope) {
+                    await scope.dispose().catch(() => {})
+                    if (this.accountScope === scope) {
+                        this.accountScope = null
+                    }
                 }
                 DataSaverManager.getInstance().resetAccountQuota(accountEmail)
                 this.resetAccountState()
@@ -866,12 +882,14 @@ export class MicrosoftRewardsBot {
         return accountStats
     }
 
-    async Main(account: Account): Promise<{ initialPoints: number; collectedPoints: number }> {
+    async Main(account: Account, scope?: AccountScope): Promise<{ initialPoints: number; collectedPoints: number }> {
         const accountEmail = account.email
         this.logger.info('main', 'FLOW', `Starting session for ${redactAccountKey(accountEmail)}`)
 
         // Zero Leakage: Reset token and completed offers set for clean per-account isolation
-        this.accessToken = ''
+        if (this.accountScope) {
+            this.accountScope.clearDapiToken()
+        }
         this.activeAccount = account
         this.workers?.completedOffersInSession?.clear()
 
@@ -882,12 +900,14 @@ export class MicrosoftRewardsBot {
             return await executionContext.run({ isMobile: true, account }, async () => {
                 mobileSession = await this.browserFactory.createBrowser(account)
                 const initialContext: BrowserContext = mobileSession.context
+                this.accountScope?.setContext('mobile', initialContext)
                 this.mainMobilePage = await createManagedPage({
                     context: initialContext,
                     accountScope: accountEmail,
                     purpose: 'main-mobile-owner',
                     isMobile: true
                 })
+                this.accountScope?.trackPage(this.mainMobilePage)
 
                 this.logger.info('main', 'BROWSER', `Mobile Browser started | ${redactAccountKey(accountEmail)}`)
 
@@ -1138,7 +1158,9 @@ export class MicrosoftRewardsBot {
                 return { initialPoints, collectedPoints: collectedPoints || 0 }
             })
         } finally {
-            this.accessToken = ''
+            if (this.accountScope) {
+                this.accountScope.clearDapiToken()
+            }
             this.workers?.completedOffersInSession?.clear()
 
             if (mobileSession && !mobileContextClosed) {

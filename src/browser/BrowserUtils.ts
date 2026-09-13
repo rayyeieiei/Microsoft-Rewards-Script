@@ -225,7 +225,11 @@ export default class BrowserUtils {
                 await page.waitForSelector(selector, { timeout: 1500 }).catch(() => {})
 
                 try {
-                    const cursor = createCursor(page as any)
+                    let cursor = this.bot.accountScope?.getCursor(page)
+                    if (!cursor) {
+                        cursor = createCursor(page as any)
+                        this.bot.accountScope?.bindCursor(page, cursor)
+                    }
                     await Promise.race([
                         cursor.click(selector, options),
                         new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2500))
