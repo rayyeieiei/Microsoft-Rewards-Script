@@ -24,3 +24,7 @@ src/config.json
 *.log
 *.sqlite
 node_sqlite.js
+DAFTAR-AKUN-BANNED*
+
+# Standalone Lite Repo folder
+Microsoft-Rewards-Script - Lite/
