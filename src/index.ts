@@ -39,6 +39,12 @@ import { Database } from './util/Database'
 import { AccountScope } from './runtime/AccountScope'
 import { createManagedPage, recoverOwnerPage } from './runtime/BrowserOperationGuard'
 import readline from 'readline'
+import crypto from 'crypto'
+import {
+    validateOwnershipPolicy,
+    createSanitizedDiagnosticDto,
+    OwnershipEnforcementMode
+} from './runtime/identity/AccountOwnershipIdentity'
 
 import type { Account } from './interface/Account'
 import AxiosClient from './util/Axios'
@@ -148,6 +154,7 @@ export class MicrosoftRewardsBot {
     public isRunning = false
     public stopRequested = false
     private dashboardServerActive = false
+    private sessionSecret: string = crypto.randomBytes(32).toString('hex')
 
     private activeWorkers: number
     private exitedWorkers: number[]
@@ -276,6 +283,40 @@ export class MicrosoftRewardsBot {
 
     async initialize(): Promise<void> {
         this.accounts = loadAccounts()
+
+        const enforcementMode: OwnershipEnforcementMode = this.config.identityPolicy?.enforcementMode || 'report-only'
+        if (!this.config.identityPolicy) {
+            this.logger.warn(
+                'main',
+                'OWNERSHIP-POLICY',
+                '⚠️ No identityPolicy configured in config.json. Running in "report-only" compatibility mode.',
+                'yellow'
+            )
+        }
+
+        const policySummary = validateOwnershipPolicy(this.accounts, enforcementMode)
+        const sanitizedDto = createSanitizedDiagnosticDto(policySummary, enforcementMode, this.sessionSecret)
+        this.logger.info(
+            'main',
+            'OWNERSHIP-POLICY',
+            `Ownership policy initialized | mode=${enforcementMode} | total=${sanitizedDto.totalAccounts} | valid=${sanitizedDto.validAccounts} | blocked=${sanitizedDto.blockedAccounts}`
+        )
+
+        if (enforcementMode === 'block-invalid' && policySummary.blockedAccounts > 0) {
+            throw new Error(
+                `[FATAL-OWNERSHIP] Policy enforcement failed in 'block-invalid' mode: ${policySummary.blockedAccounts} account(s) are invalid or violate participant/household limits.`
+            )
+        }
+
+        if (enforcementMode === 'report-only' && policySummary.blockedAccounts > 0) {
+            this.logger.warn(
+                'main',
+                'OWNERSHIP-POLICY',
+                `[MIGRATION-REPORT] ${policySummary.blockedAccounts} account(s) have missing or invalid identity metadata. Review accounts.json.`,
+                'yellow'
+            )
+        }
+
         validateUniqueAccountIdentities(this.accounts)
         await this.manualQuestQueue.load()
         await Database.getInstance().initialize()

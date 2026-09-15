@@ -3,6 +3,7 @@ import path from 'path'
 import type { PunchCardAttemptRecord } from '../functions/activities/ActivitySemantics'
 import { ResolvedActionSecret } from '../functions/UrlRewardActionResolver'
 import { resolveAccountIdentity } from './identity/AccountIdentity'
+import type { AccountOwnershipIdentity } from './identity/AccountOwnershipIdentity'
 import type {
     AccountScopeCreateOptions,
     StorageStatePaths
@@ -15,6 +16,7 @@ export class AccountScope {
     public readonly runId: string
     public readonly accountKey: string
     public readonly accountId: string
+    public readonly identity: Readonly<AccountOwnershipIdentity>
     public readonly storagePaths: StorageStatePaths
     public readonly bot?: MicrosoftRewardsBot
     public readonly abortController: AbortController = new AbortController()
@@ -42,6 +44,7 @@ export class AccountScope {
         id: string,
         accountId: string,
         storagePaths: StorageStatePaths,
+        ownershipIdentity: AccountOwnershipIdentity,
         bot?: MicrosoftRewardsBot
     ) {
         this.accountKey = accountKey
@@ -49,6 +52,11 @@ export class AccountScope {
         this.id = id
         this.accountId = accountId
         this.storagePaths = storagePaths
+        this.identity = Object.freeze({
+            accountId: ownershipIdentity.accountId,
+            participantId: ownershipIdentity.participantId,
+            householdId: ownershipIdentity.householdId
+        })
         this.bot = bot
     }
 
@@ -81,12 +89,19 @@ export class AccountScope {
             desktopPath
         }
 
+        const ownershipIdentity: AccountOwnershipIdentity = {
+            accountId: identity.accountId,
+            participantId: options.account.participantId?.trim() || 'unassigned-participant',
+            householdId: options.account.householdId?.trim() || 'unassigned-household'
+        }
+
         const scope = new AccountScope(
             identity.displayAccount,
             runId,
             scopeId,
             identity.accountId,
             storagePaths,
+            ownershipIdentity,
             options.bot
         )
 
@@ -99,13 +114,14 @@ export class AccountScope {
     public static createForTesting(
         accountKey: string,
         runId?: string,
-        customScopeId?: string
+        customScopeId?: string,
+        customOwnership?: Partial<AccountOwnershipIdentity>
     ): AccountScope {
         const resolvedRunId = runId || `run_test_${Date.now()}`
         const scopeId =
             customScopeId ||
             `scope_test_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`
-        const accountId = crypto.createHash('sha256').update(accountKey).digest('hex')
+        const accountId = customOwnership?.accountId || crypto.createHash('sha256').update(accountKey).digest('hex')
         const storageKey = crypto
             .createHash('sha256')
             .update(accountId)
@@ -120,12 +136,19 @@ export class AccountScope {
             desktopPath: path.join(sessionDir, `${storageKey}.desktop.storageState.json`)
         }
 
+        const ownershipIdentity: AccountOwnershipIdentity = {
+            accountId,
+            participantId: customOwnership?.participantId || 'test-participant-id',
+            householdId: customOwnership?.householdId || 'test-household-id'
+        }
+
         return new AccountScope(
             accountKey,
             resolvedRunId,
             scopeId,
             accountId,
-            storagePaths
+            storagePaths,
+            ownershipIdentity
         )
     }
 

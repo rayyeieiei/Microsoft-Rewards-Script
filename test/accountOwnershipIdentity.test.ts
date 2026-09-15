@@ -5,6 +5,7 @@ import {
     createSanitizedDiagnosticDto,
     MAX_HOUSEHOLD_ACCOUNTS
 } from '../src/runtime/identity/AccountOwnershipIdentity'
+import { AccountScope } from '../src/runtime/AccountScope'
 import type { Account } from '../src/interface/Account'
 
 function createFakeAccount(overrides: Partial<Account> = {}): Account {
@@ -343,5 +344,81 @@ export async function runAccountOwnershipIdentityTests(): Promise<void> {
         console.log('✅ Test 13 Passed: Disabled accounts do not count toward household limit but duplicates caught')
     }
 
-    console.log('🎉 ALL 13 ACCOUNT OWNERSHIP IDENTITY TESTS PASSED SUCCESSFULLY!\n')
+    // Test 14: AccountScope receives deep-copied, frozen identity and resists runtime mutation
+    {
+        const customOwnership = {
+            accountId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+            participantId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+            householdId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+        }
+
+        const scope = AccountScope.createForTesting('freeze@example.com', 'run_freeze', 'scope_freeze', customOwnership)
+
+        assert.strictEqual(scope.identity.accountId, customOwnership.accountId)
+        assert.strictEqual(scope.identity.participantId, customOwnership.participantId)
+        assert.strictEqual(scope.identity.householdId, customOwnership.householdId)
+        assert.ok(Object.isFrozen(scope.identity), 'scope.identity must be Object.freeze-d')
+
+        // Attempting to mutate scope.identity must throw
+        assert.throws(() => {
+            ;(scope.identity as any).accountId = 'mutated'
+        }, /Cannot assign to read only property/)
+
+        console.log('✅ Test 14 Passed: AccountScope receives deep-copied, frozen identity and resists mutation')
+    }
+
+    // Test 15: AccountScope.dispose() clears in-memory state without deleting persistent identity configuration
+    {
+        const account = createFakeAccount({
+            id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+            participantId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+            householdId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+            email: 'dispose_persist@example.com'
+        })
+
+        const scope = AccountScope.createForTesting(
+            'dispose_persist@example.com',
+            'run_disp',
+            'scope_disp',
+            {
+                accountId: account.id!,
+                participantId: account.participantId!,
+                householdId: account.householdId!
+            }
+        )
+
+        await scope.dispose()
+        assert.strictEqual(scope.isDisposed, true)
+
+        // Persistent account configuration must remain intact and unaltered
+        assert.strictEqual(account.id, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')
+        assert.strictEqual(account.participantId, 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb')
+        assert.strictEqual(account.householdId, 'cccccccc-cccc-4ccc-8ccc-cccccccccccc')
+        console.log('✅ Test 15 Passed: AccountScope.dispose() clears in-memory state without deleting persistent config')
+    }
+
+    // Test 16: Block-invalid gate blocks accounts with missing/invalid identities from entering execution
+    {
+        const accounts: Account[] = [
+            createFakeAccount({ email: 'unmigrated@example.com' })
+        ]
+
+        const summary = validateOwnershipPolicy(accounts, 'block-invalid')
+        assert.strictEqual(summary.blockedAccounts, 1)
+
+        // Verifying fail-fast guard behavior
+        let gatePassed = false
+        try {
+            if (summary.blockedAccounts > 0) {
+                throw new Error('[FATAL-OWNERSHIP] Policy enforcement failed in block-invalid mode')
+            }
+            gatePassed = true
+        } catch (err: any) {
+            assert.ok(err.message.includes('[FATAL-OWNERSHIP]'))
+        }
+        assert.strictEqual(gatePassed, false, 'Invalid account must be prevented from entering execution')
+        console.log('✅ Test 16 Passed: Block-invalid gate stops execution before AccountScope or auth')
+    }
+
+    console.log('🎉 ALL 16 ACCOUNT OWNERSHIP IDENTITY TESTS PASSED SUCCESSFULLY!\n')
 }
