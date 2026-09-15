@@ -76,6 +76,21 @@ export const IdentityPolicySchema = z
     })
     .optional()
 
+export const NetworkRecoverySchema = z.object({
+    enabled: z.boolean(),
+    mode: z.enum(['disabled', 'manual', 'adb']),
+    trigger: z.enum(['connectivity-failure', 'operator-request']).default('connectivity-failure'),
+    adbSerial: z.string().optional(),
+    maxAttempts: z.number().int().positive().default(2),
+    commandTimeoutMs: z.number().int().positive().default(5000),
+    disconnectTimeoutMs: z.number().int().positive().default(5000),
+    reconnectTimeoutMs: z.number().int().positive().default(10000),
+    verificationIntervalMs: z.number().int().positive().default(3000),
+    operatorTimeoutMs: z.number().int().positive().default(120000),
+    reassertUsbTethering: z.boolean().default(false),
+    totalBudgetMs: z.number().int().positive().default(120000)
+})
+
 // Config
 export const ConfigSchema = z.object({
     baseURL: z.string(),
@@ -87,6 +102,7 @@ export const ConfigSchema = z.object({
     useGhostCursor: z.boolean().optional(),
     usePostgres: z.boolean().optional(),
     identityPolicy: IdentityPolicySchema,
+    networkRecovery: NetworkRecoverySchema.optional(),
     postgresConfig: z
         .object({
             host: z.string().optional(),

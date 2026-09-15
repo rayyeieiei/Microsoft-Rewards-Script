@@ -38,7 +38,6 @@ import { DataSaverManager, mapResourceTypeToCategory } from './util/DataSaver'
 import { Database } from './util/Database'
 import { AccountScope } from './runtime/AccountScope'
 import { createManagedPage, recoverOwnerPage } from './runtime/BrowserOperationGuard'
-import readline from 'readline'
 import crypto from 'crypto'
 import {
     validateOwnershipPolicy,
@@ -70,28 +69,6 @@ import { sendDiscord, flushDiscordQueue } from './logging/Discord'
 import { sendNtfy, flushNtfyQueue } from './logging/Ntfy'
 import type { DashboardData } from './interface/DashboardData'
 import type { AppDashboardData } from './interface/AppDashBoardData'
-
-let manualIpConfirmResolver: (() => void) | null = null
-
-function waitForUserConfirmation(): Promise<void> {
-    return new Promise(resolve => {
-        manualIpConfirmResolver = resolve
-
-        const rl = readline.createInterface({
-            input: process.stdin,
-            output: process.stdout
-        })
-
-        rl.question('', () => {
-            rl.close()
-            if (manualIpConfirmResolver) {
-                const res = manualIpConfirmResolver
-                manualIpConfirmResolver = null
-                res()
-            }
-        })
-    })
-}
 
 interface ExecutionContext {
     isMobile: boolean
@@ -560,12 +537,11 @@ export class MicrosoftRewardsBot {
                 this.logger.info('main', 'C2-CONFIG', 'Configuration reloaded and applied successfully.')
             })
 
-            // Register IP confirm callback
+            // Register IP confirm callback for dashboard button
             registerIpConfirmCallback(() => {
-                if (manualIpConfirmResolver) {
-                    const res = manualIpConfirmResolver
-                    manualIpConfirmResolver = null
-                    res()
+                const reqId = this.manualNetworkRecoveryAdapter?.getCurrentRequestId()
+                if (reqId) {
+                    this.manualNetworkRecoveryAdapter?.resolveManual(reqId, 'resume')
                 }
             })
 
@@ -926,124 +902,6 @@ export class MicrosoftRewardsBot {
             }
 
             processedCount++
-
-            // =======================================================
-            // 🤖 AUTO-ROTATE DENGAN PROTECTION LOOP + DATA SAVER CLI
-            // =======================================================
-            if (processedCount % 2 === 0 && processedCount < accounts.length) {
-                let ipChanged = false
-                const oldIp = currentIpAddress
-                const isManual = this.config.useDynamicWifiProxy || !this.config.useAdbIpRotation
-
-                while (!ipChanged) {
-                    if (this.stopRequested) {
-                        this.logger.warn('main', 'IP-INTERCEPTOR', 'IP rotation aborted due to user stop request.')
-                        break
-                    }
-
-                    this.logger.warn(
-                        'main',
-                        'IP-INTERCEPTOR',
-                        '=======================================================',
-                        'yellow'
-                    )
-                    this.logger.warn(
-                        'main',
-                        'IP-INTERCEPTOR',
-                        `🔥 BATCH [${processedCount / 2}] SELESAI! ROTASI IP ${isManual ? 'MANUAL (LAN / HOTSPOT)' : 'AUTO (ADB AIRPLANE MODE)'} DIMULAI... 🔥`,
-                        'yellow'
-                    )
-                    this.logger.warn('main', 'IP-INTERCEPTOR', `IP Saat Ini: [ ${oldIp} ]`, 'yellow')
-                    this.logger.warn(
-                        'main',
-                        'IP-INTERCEPTOR',
-                        '=======================================================',
-                        'yellow'
-                    )
-
-                    try {
-                        if (isManual) {
-                            try {
-                                require('child_process').exec(
-                                    `powershell -c (New-Object Media.SoundPlayer "C:\\Windows\\Media\\notify.wav").PlaySync();`
-                                )
-                            } catch {}
-
-                            this.logger.info(
-                                'main',
-                                'IP-INTERCEPTOR',
-                                '📌 SILAKAN MATIKAN & NYALAKAN MODE PESAWAT / HOTSPOT DI HP ANDA.',
-                                'cyan'
-                            )
-                            this.logger.info(
-                                'main',
-                                'IP-INTERCEPTOR',
-                                '👉 Tekan [ENTER] di terminal atau klik [Confirm IP Rotated] di Web UI setelah selesai...',
-                                'cyan'
-                            )
-
-                            await waitForUserConfirmation()
-
-                            this.logger.info('main', 'IP-INTERCEPTOR', 'Memeriksa perubahan IP publik baru...')
-                        } else {
-                            const execSync = require('child_process').execSync
-                            this.logger.info('main', 'IP-INTERCEPTOR', 'ADB -> Mengaktifkan Mode Pesawat...')
-                            execSync('adb shell cmd connectivity airplane-mode enable')
-                            await this.utils.wait(5000)
-
-                            this.logger.info(
-                                'main',
-                                'IP-INTERCEPTOR',
-                                'ADB -> Mematikan Mode Pesawat (Mencari Sinyal Baru)...'
-                            )
-                            execSync('adb shell cmd connectivity airplane-mode disable')
-
-                            this.logger.info(
-                                'main',
-                                'IP-INTERCEPTOR',
-                                'Menunggu 12 detik agar interface sinyal stabil...'
-                            )
-                            await this.utils.wait(12000)
-                        }
-
-                        const checkNewIp = await this.getCurrentIP(this.localProxyPort || undefined)
-
-                        if (checkNewIp !== oldIp && checkNewIp !== 'UNKNOWN_IP') {
-                            currentIpAddress = checkNewIp
-                            ipChanged = true
-                            this.logger.info(
-                                'main',
-                                'IP-INTERCEPTOR',
-                                `🚀 SUKSES! IP Baru Terdeteksi: [ ${currentIpAddress} ]`,
-                                'green'
-                            )
-                            this.updateDashboardGlobal({ currentIP: currentIpAddress })
-                            await this.utils.wait(3000)
-                        } else {
-                            this.logger.error(
-                                'main',
-                                'IP-INTERCEPTOR',
-                                `❌ GAGAL! IP masih kembar [ ${checkNewIp} ]. Silakan coba matikan/nyalakan ulang hotspot...`,
-                                'red'
-                            )
-                            try {
-                                require('child_process').exec(
-                                    `powershell -c (New-Object Media.SoundPlayer "C:\\Windows\\Media\\notify.wav").PlaySync();`
-                                )
-                            } catch {}
-                            await this.utils.wait(3000)
-                        }
-                    } catch (adbError) {
-                        this.logger.error(
-                            'main',
-                            'IP-INTERCEPTOR',
-                            `🚨 Jalur Jaringan Lemot/IP Glitch: ${adbError}`,
-                            'red'
-                        )
-                        await this.utils.wait(3000)
-                    }
-                }
-            }
         }
 
         if (this.config.clusters <= 1 && cluster.isPrimary) {

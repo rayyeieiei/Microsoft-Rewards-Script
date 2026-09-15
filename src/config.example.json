@@ -39,6 +39,23 @@
         "mode": "observe-only",
         "retentionDays": 14
     },
+    "identityPolicy": {
+        "enforcementMode": "block-invalid"
+    },
+    "networkRecovery": {
+        "enabled": false,
+        "mode": "adb",
+        "trigger": "connectivity-failure",
+        "adbSerial": "",
+        "maxAttempts": 2,
+        "commandTimeoutMs": 5000,
+        "disconnectTimeoutMs": 5000,
+        "reconnectTimeoutMs": 10000,
+        "verificationIntervalMs": 3000,
+        "operatorTimeoutMs": 120000,
+        "reassertUsbTethering": false,
+        "totalBudgetMs": 120000
+    },
     "searchOnBingLocalQueries": false,
     "globalTimeout": "30sec",
     "searchSettings": {
