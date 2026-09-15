@@ -7,9 +7,13 @@ import { runDataSaverTests } from './dataSaver.test'
 import { runBrowserOperationGuardTests } from './browserOperationGuard.test'
 import { runNewAccountOnboardingTests } from './newAccountOnboarding.test'
 import { runBrowserEnvironmentIsolationTests } from './browserEnvironmentIsolation.test'
+import { runAccountOwnershipIdentityTests } from './accountOwnershipIdentity.test'
 
 async function runAll() {
     console.log('🧪 Starting Full Test Suite Execution...\n')
+
+    await runAccountOwnershipIdentityTests()
+    console.log('')
 
     await runPunchCardTests()
     console.log('')

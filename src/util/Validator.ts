@@ -70,6 +70,12 @@ export const NewAccountOnboardingConfigSchema = z.object({
     retentionDays: z.number().int().positive().default(14)
 })
 
+export const IdentityPolicySchema = z
+    .object({
+        enforcementMode: z.enum(['report-only', 'block-invalid'])
+    })
+    .optional()
+
 // Config
 export const ConfigSchema = z.object({
     baseURL: z.string(),
@@ -80,6 +86,7 @@ export const ConfigSchema = z.object({
     useAdbIpRotation: z.boolean().optional(),
     useGhostCursor: z.boolean().optional(),
     usePostgres: z.boolean().optional(),
+    identityPolicy: IdentityPolicySchema,
     postgresConfig: z
         .object({
             host: z.string().optional(),
@@ -154,6 +161,9 @@ export const ConfigSchema = z.object({
 // Account
 export const AccountSchema = z.object({
     id: z.string().optional(),
+    participantId: z.string().optional(),
+    householdId: z.string().optional(),
+    enabled: z.boolean().optional(),
     email: z.string(),
     password: z.string(),
     totpSecret: z.string().optional(),

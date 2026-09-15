@@ -2,6 +2,9 @@ import { AppOnlyPolicy } from '../functions/activities/appOnly/AppOnlyTypes'
 
 export interface Account {
     id?: string
+    participantId?: string
+    householdId?: string
+    enabled?: boolean
     email: string
     password: string
     totpSecret?: string

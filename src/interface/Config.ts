@@ -23,6 +23,12 @@ export interface NewAccountOnboardingConfig {
     retentionDays: number
 }
 
+export type OwnershipEnforcementMode = 'report-only' | 'block-invalid'
+
+export interface IdentityPolicyConfig {
+    enforcementMode: OwnershipEnforcementMode
+}
+
 export interface Config {
     baseURL: string
     sessionPath: string
@@ -39,6 +45,7 @@ export interface Config {
     appOnlyRewards?: AppOnlyConfig
     punchCardExecution?: PunchCardExecutionConfig
     newAccountOnboarding?: NewAccountOnboardingConfig
+    identityPolicy?: IdentityPolicyConfig
     searchOnBingLocalQueries: boolean
     globalTimeout: number | string
     searchSettings: ConfigSearchSettings
