@@ -8,11 +8,15 @@ import { runBrowserOperationGuardTests } from './browserOperationGuard.test'
 import { runNewAccountOnboardingTests } from './newAccountOnboarding.test'
 import { runBrowserEnvironmentIsolationTests } from './browserEnvironmentIsolation.test'
 import { runAccountOwnershipIdentityTests } from './accountOwnershipIdentity.test'
+import { runNetworkRecoveryTests } from './networkRecovery.test'
 
 async function runAll() {
     console.log('🧪 Starting Full Test Suite Execution...\n')
 
     await runAccountOwnershipIdentityTests()
+    console.log('')
+
+    await runNetworkRecoveryTests()
     console.log('')
 
     await runPunchCardTests()
