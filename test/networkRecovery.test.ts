@@ -1,7 +1,15 @@
 import assert from 'assert'
+import fs from 'fs'
+import path from 'path'
+import os from 'os'
 import {
     NetworkRecoveryController
 } from '../src/runtime/network/NetworkRecoveryController'
+import {
+    AdbNetworkRecoveryAdapter,
+    type SubprocessRunner
+} from '../src/runtime/network/AdbNetworkRecoveryAdapter'
+import { DeviceLockManager } from '../src/runtime/network/DeviceLockManager'
 import type {
     NetworkRecoveryAdapter,
     NetworkRecoveryPolicy,
@@ -217,5 +225,244 @@ export async function runNetworkRecoveryTests(): Promise<void> {
         console.log('✅ Test 7 Passed: AbortSignal halts recovery state machine cleanly')
     }
 
-    console.log('🎉 ALL 7 NETWORK RECOVERY CORE TESTS PASSED SUCCESSFULLY!\n')
+    // Test 8: ADB binary unavailable fails during preflight
+    {
+        const mockRunner: SubprocessRunner = async () => {
+            throw new Error('spawn adb ENOENT')
+        }
+        const adapter = new AdbNetworkRecoveryAdapter({
+            policy: createDefaultPolicy(),
+            runner: mockRunner
+        })
+        let err: any = null
+        try {
+            await adapter.preflight()
+        } catch (e) {
+            err = e
+        }
+        assert.ok(err, 'Preflight must fail if adb is unavailable')
+        assert.ok(
+            err.message.includes('ADB binary unavailable'),
+            `Expected error message to mention unavailable binary, got: ${err.message}`
+        )
+        console.log('✅ Test 8 Passed: ADB unavailable fails during preflight')
+    }
+
+    // Test 9: Unauthorized device fails closed
+    {
+        const mockRunner: SubprocessRunner = async (_file, args) => {
+            if (args[0] === 'version') {
+                return { stdout: 'Android Debug Bridge version 1.0.41', stderr: '' }
+            }
+            if (args[0] === 'devices') {
+                return { stdout: 'List of devices attached\nemulator-5554\tunauthorized\n', stderr: '' }
+            }
+            return { stdout: '', stderr: '' }
+        }
+        const adapter = new AdbNetworkRecoveryAdapter({
+            policy: createDefaultPolicy(),
+            runner: mockRunner
+        })
+        let err: any = null
+        try {
+            await adapter.preflight()
+        } catch (e) {
+            err = e
+        }
+        assert.ok(err, 'Preflight must fail if device is unauthorized')
+        assert.ok(
+            err.message.includes('Device unauthorized'),
+            `Expected unauthorized error, got: ${err.message}`
+        )
+        console.log('✅ Test 9 Passed: Unauthorized device fails closed during preflight')
+    }
+
+    // Test 10: Multiple devices without explicit adbSerial fail closed
+    {
+        const mockRunner: SubprocessRunner = async (_file, args) => {
+            if (args[0] === 'version') {
+                return { stdout: 'Android Debug Bridge version 1.0.41', stderr: '' }
+            }
+            if (args[0] === 'devices') {
+                return {
+                    stdout: 'List of devices attached\ndevice_one\tdevice\ndevice_two\tdevice\n',
+                    stderr: ''
+                }
+            }
+            return { stdout: '', stderr: '' }
+        }
+        const adapter = new AdbNetworkRecoveryAdapter({
+            policy: createDefaultPolicy({ adbSerial: undefined }),
+            runner: mockRunner
+        })
+        let err: any = null
+        try {
+            await adapter.preflight()
+        } catch (e) {
+            err = e
+        }
+        assert.ok(err, 'Preflight must fail if multiple devices exist without explicit serial')
+        assert.ok(
+            err.message.includes('Multiple devices attached'),
+            `Expected multiple devices error, got: ${err.message}`
+        )
+        console.log('✅ Test 10 Passed: Multiple devices without explicit serial fail closed')
+    }
+
+    // Test 11: Explicit serial executes discrete argument array with ['-s', serial, ...]
+    {
+        const recordedCommands: Array<{ file: string; args: string[] }> = []
+        const mockRunner: SubprocessRunner = async (file, args) => {
+            recordedCommands.push({ file, args: [...args] })
+            if (args[0] === 'version') {
+                return { stdout: 'Android Debug Bridge version 1.0.41', stderr: '' }
+            }
+            if (args[0] === 'devices') {
+                return {
+                    stdout: 'List of devices attached\nTARGET_PHONE_01\tdevice\n',
+                    stderr: ''
+                }
+            }
+            return { stdout: '', stderr: '' }
+        }
+        const tempLockDir = path.join(os.tmpdir(), `test-lock-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+        const lockManager = new DeviceLockManager(tempLockDir)
+        const adapter = new AdbNetworkRecoveryAdapter({
+            policy: createDefaultPolicy({ adbSerial: 'TARGET_PHONE_01' }),
+            runner: mockRunner,
+            lockManager
+        })
+
+        await adapter.preflight()
+        await adapter.executeDisconnect()
+        await adapter.executeReconnect()
+        await adapter.dispose()
+
+        // Verify serial argument was passed as discrete array elements
+        const disconnectCmd = recordedCommands.find(c => c.args.includes('enable'))
+        assert.ok(disconnectCmd, 'Disconnect command must be executed')
+        assert.deepStrictEqual(
+            disconnectCmd.args.slice(0, 2),
+            ['-s', 'TARGET_PHONE_01'],
+            'Args must start with -s and explicit serial as discrete arguments'
+        )
+
+        const reconnectCmd = recordedCommands.find(c => c.args.includes('disable'))
+        assert.ok(reconnectCmd, 'Reconnect command must be executed')
+        assert.deepStrictEqual(
+            reconnectCmd.args.slice(0, 2),
+            ['-s', 'TARGET_PHONE_01'],
+            'Args must start with -s and explicit serial as discrete arguments'
+        )
+
+        try {
+            fs.rmSync(tempLockDir, { recursive: true, force: true })
+        } catch {}
+        console.log('✅ Test 11 Passed: Explicit serial executes discrete argument array with -s')
+    }
+
+    // Test 12: SubprocessRunner command timeout kills child and rejects with timeout
+    {
+        const start = Date.now()
+        let err: any = null
+        try {
+            // Run a harmless Node.js sleep command with a 150ms timeout
+            await AdbNetworkRecoveryAdapter.defaultRunner(
+                process.execPath,
+                ['-e', 'setTimeout(() => {}, 10000)'],
+                { timeout: 150, maxBuffer: 1024 }
+            )
+        } catch (e) {
+            err = e
+        }
+        const duration = Date.now() - start
+        assert.ok(err, 'defaultRunner must reject on timeout')
+        assert.ok(err.message.includes('timed out'), `Expected timed out message, got: ${err.message}`)
+        assert.strictEqual(err.code, 'ETIMEDOUT')
+        assert.ok(duration < 2000, `Duration (${duration}ms) should be close to 150ms timeout`)
+        console.log('✅ Test 12 Passed: SubprocessRunner command timeout terminates child and rejects with timeout')
+    }
+
+    // Test 13: Device lock prevents two instances from acquiring the same device lock
+    {
+        const tempLockDir = path.join(os.tmpdir(), `test-lock-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+        const lockManager1 = new DeviceLockManager(tempLockDir)
+        const lockManager2 = new DeviceLockManager(tempLockDir)
+
+        const acquired1 = lockManager1.acquire('SHARED_DEVICE_01')
+        assert.strictEqual(acquired1, true, 'First lock manager must acquire lock')
+
+        const acquired2 = lockManager2.acquire('SHARED_DEVICE_01')
+        assert.strictEqual(acquired2, false, 'Second lock manager must be rejected for same device')
+
+        lockManager1.release()
+
+        const acquired2AfterRelease = lockManager2.acquire('SHARED_DEVICE_01')
+        assert.strictEqual(acquired2AfterRelease, true, 'Second manager can acquire after first releases')
+
+        lockManager2.release()
+        try {
+            fs.rmSync(tempLockDir, { recursive: true, force: true })
+        } catch {}
+        console.log('✅ Test 13 Passed: Device lock exclusivity and clean release verified')
+    }
+
+    // Test 14: Stale PID in device lock file is recovered cleanly
+    {
+        const tempLockDir = path.join(os.tmpdir(), `test-lock-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+        fs.mkdirSync(tempLockDir, { recursive: true })
+
+        const serial = 'STALE_DEVICE_TEST'
+        const lockKey = DeviceLockManager.getLockKey(serial)
+        const lockPath = path.join(tempLockDir, `${lockKey}.lock`)
+
+        // Write a fake lock file pointing to a dead PID (e.g. 99999999)
+        const deadPid = 99999999
+        fs.writeFileSync(
+            lockPath,
+            JSON.stringify({ pid: deadPid, createdAt: Date.now() - 60000 }),
+            'utf-8'
+        )
+
+        const lockManager = new DeviceLockManager(tempLockDir)
+        // Verify isProcessAlive returns false for deadPid
+        assert.strictEqual(lockManager.isProcessAlive(deadPid), false)
+
+        const acquired = lockManager.acquire(serial)
+        assert.strictEqual(acquired, true, 'Must safely reclaim stale PID lock')
+
+        // Verify lock file now has current process PID
+        const content = JSON.parse(fs.readFileSync(lockPath, 'utf-8'))
+        assert.strictEqual(content.pid, process.pid)
+
+        lockManager.release()
+        try {
+            fs.rmSync(tempLockDir, { recursive: true, force: true })
+        } catch {}
+        console.log('✅ Test 14 Passed: Stale PID lock recovered cleanly')
+    }
+
+    // Test 15: Invalid serial format with shell injection characters is rejected immediately
+    {
+        let err: any = null
+        try {
+            new AdbNetworkRecoveryAdapter({
+                policy: createDefaultPolicy({ adbSerial: 'device; rm -rf /' })
+            })
+        } catch (e) {
+            err = e
+        }
+        assert.ok(err, 'Must reject invalid serial with shell metacharacters')
+        assert.ok(err.message.includes('[ADB-SECURITY]'), `Expected security error, got: ${err.message}`)
+        console.log('✅ Test 15 Passed: Invalid serial with shell characters rejected immediately')
+    }
+
+    console.log('🎉 ALL 15 NETWORK RECOVERY TESTS PASSED SUCCESSFULLY!\n')
+}
+
+if (require.main === module) {
+    runNetworkRecoveryTests().catch(err => {
+        console.error('❌ Network recovery tests failed:', err)
+        process.exit(1)
+    })
 }
