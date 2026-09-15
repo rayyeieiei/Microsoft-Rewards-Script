@@ -45,6 +45,24 @@ import {
     createSanitizedDiagnosticDto,
     OwnershipEnforcementMode
 } from './runtime/identity/AccountOwnershipIdentity'
+import {
+    NetworkRecoveryController
+} from './runtime/network/NetworkRecoveryController'
+import {
+    AdbNetworkRecoveryAdapter
+} from './runtime/network/AdbNetworkRecoveryAdapter'
+import {
+    ManualNetworkRecoveryAdapter
+} from './runtime/network/ManualNetworkRecoveryAdapter'
+import {
+    DefaultNetworkConnectivityProbe
+} from './runtime/network/NetworkConnectivityProbe'
+import type {
+    NetworkRecoveryPolicy,
+    NetworkRecoveryResult,
+    NetworkRecoveryTrigger
+} from './runtime/network/NetworkRecoveryTypes'
+import { registerNetworkRecoveryResolver } from './util/DashboardServer'
 
 import type { Account } from './interface/Account'
 import AxiosClient from './util/Axios'
@@ -155,6 +173,8 @@ export class MicrosoftRewardsBot {
     public stopRequested = false
     private dashboardServerActive = false
     private sessionSecret: string = crypto.randomBytes(32).toString('hex')
+    public networkRecoveryController?: NetworkRecoveryController
+    public manualNetworkRecoveryAdapter?: ManualNetworkRecoveryAdapter
 
     private activeWorkers: number
     private exitedWorkers: number[]
@@ -258,6 +278,61 @@ export class MicrosoftRewardsBot {
         }
     }
 
+    public async requestNetworkRecovery(
+        trigger: NetworkRecoveryTrigger = 'connectivity-failure'
+    ): Promise<NetworkRecoveryResult> {
+        if (cluster.isWorker && process.send) {
+            return new Promise(resolve => {
+                const correlationId = crypto.randomBytes(8).toString('hex')
+                let timer: NodeJS.Timeout | null = null
+
+                const onMessage = (msg: any) => {
+                    if (
+                        msg?.__networkRecoveryResponse &&
+                        msg.__networkRecoveryResponse.correlationId === correlationId
+                    ) {
+                        process.removeListener('message', onMessage)
+                        if (timer) clearTimeout(timer)
+                        resolve(msg.__networkRecoveryResponse.result)
+                    }
+                }
+                process.on('message', onMessage)
+
+                const timeoutMs = (this.config.networkRecovery?.totalBudgetMs ?? 120000) + 5000
+                timer = setTimeout(() => {
+                    process.removeListener('message', onMessage)
+                    resolve({
+                        status: 'failed',
+                        trigger,
+                        attempts: 0,
+                        durationMs: timeoutMs,
+                        finalStage: 'failed',
+                        airplaneModeKnowledge: 'possibly-enabled',
+                        restorationAttempted: false,
+                        restorationSucceeded: false
+                    })
+                }, timeoutMs)
+
+                process.send!({
+                    __networkRecoveryRequest: { correlationId, trigger }
+                })
+            })
+        } else if (this.networkRecoveryController) {
+            return this.networkRecoveryController.recover(trigger)
+        } else {
+            return {
+                status: 'not-required',
+                trigger,
+                attempts: 0,
+                durationMs: 0,
+                finalStage: 'idle',
+                airplaneModeKnowledge: 'confirmed-disabled',
+                restorationAttempted: false,
+                restorationSucceeded: false
+            }
+        }
+    }
+
     get isMobile(): boolean {
         return getCurrentContext().isMobile
     }
@@ -320,6 +395,62 @@ export class MicrosoftRewardsBot {
         validateUniqueAccountIdentities(this.accounts)
         await this.manualQuestQueue.load()
         await Database.getInstance().initialize()
+
+        const recoveryConfig = this.config.networkRecovery
+        if (recoveryConfig && recoveryConfig.enabled && recoveryConfig.mode !== 'disabled') {
+            const policy: NetworkRecoveryPolicy = {
+                enabled: recoveryConfig.enabled,
+                mode: recoveryConfig.mode,
+                trigger: recoveryConfig.trigger || 'connectivity-failure',
+                maxAttempts: recoveryConfig.maxAttempts ?? 2,
+                commandTimeoutMs: recoveryConfig.commandTimeoutMs ?? 5000,
+                disconnectTimeoutMs: recoveryConfig.disconnectTimeoutMs ?? 5000,
+                reconnectTimeoutMs: recoveryConfig.reconnectTimeoutMs ?? 10000,
+                verificationIntervalMs: recoveryConfig.verificationIntervalMs ?? 3000,
+                operatorTimeoutMs: recoveryConfig.operatorTimeoutMs ?? 120000,
+                adbSerial: recoveryConfig.adbSerial,
+                reassertUsbTethering: recoveryConfig.reassertUsbTethering ?? false,
+                totalBudgetMs: recoveryConfig.totalBudgetMs ?? 120000
+            }
+
+            const probe = new DefaultNetworkConnectivityProbe()
+            let adapter
+            if (policy.mode === 'adb') {
+                adapter = new AdbNetworkRecoveryAdapter({ policy })
+            } else {
+                adapter = new ManualNetworkRecoveryAdapter({
+                    policy,
+                    logger: {
+                        info: msg => this.logger.info(false, 'NET-RECOVERY', msg),
+                        warn: msg => this.logger.warn(false, 'NET-RECOVERY', msg),
+                        error: msg => this.logger.error(false, 'NET-RECOVERY', msg)
+                    }
+                })
+                this.manualNetworkRecoveryAdapter = adapter
+                registerNetworkRecoveryResolver((requestId, action) => {
+                    return this.manualNetworkRecoveryAdapter?.resolveManual(requestId, action) ?? false
+                })
+            }
+
+            this.networkRecoveryController = new NetworkRecoveryController({
+                policy,
+                adapter,
+                probe,
+                logger: {
+                    info: msg => this.logger.info(false, 'NET-RECOVERY', msg),
+                    warn: msg => this.logger.warn(false, 'NET-RECOVERY', msg),
+                    error: msg => this.logger.error(false, 'NET-RECOVERY', msg)
+                }
+            })
+
+            this.logger.info(
+                'main',
+                'NET-RECOVERY',
+                `Network recovery subsystem initialized | mode=${policy.mode} | trigger=${policy.trigger} | maxAttempts=${policy.maxAttempts}`,
+                'green'
+            )
+        }
+
         this.updateDashboardGlobal({
             loadedAccounts: this.accounts.map(a => a.email)
         })
@@ -488,11 +619,12 @@ export class MicrosoftRewardsBot {
 
             worker.on(
                 'message',
-                (msg: {
+                async (msg: {
                     __ipcLog?: IpcLog
                     __stats?: AccountStats[]
                     __dashboardUpdate?: { email: string; update: any }
                     __dashboardGlobal?: any
+                    __networkRecoveryRequest?: { correlationId: string; trigger: NetworkRecoveryTrigger }
                 }) => {
                     if (msg.__stats) {
                         allAccountStats.push(...msg.__stats)
@@ -502,6 +634,27 @@ export class MicrosoftRewardsBot {
                     }
                     if (msg.__dashboardGlobal) {
                         updateDashboardGlobal(msg.__dashboardGlobal)
+                    }
+                    if (msg.__networkRecoveryRequest) {
+                        const { correlationId, trigger } = msg.__networkRecoveryRequest
+                        let result: NetworkRecoveryResult
+                        if (this.networkRecoveryController) {
+                            result = await this.networkRecoveryController.recover(trigger)
+                        } else {
+                            result = {
+                                status: 'not-required',
+                                trigger,
+                                attempts: 0,
+                                durationMs: 0,
+                                finalStage: 'idle',
+                                airplaneModeKnowledge: 'confirmed-disabled',
+                                restorationAttempted: false,
+                                restorationSucceeded: false
+                            }
+                        }
+                        worker.send?.({
+                            __networkRecoveryResponse: { correlationId, result }
+                        })
                     }
 
                     const log = msg.__ipcLog

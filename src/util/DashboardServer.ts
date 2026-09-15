@@ -119,6 +119,13 @@ export function registerIpConfirmCallback(callback: () => void) {
     onIpConfirmCommand = callback
 }
 
+export type NetworkRecoveryResolver = (requestId: string, action?: 'resume' | 'abort') => boolean
+let networkRecoveryResolver: NetworkRecoveryResolver | null = null
+
+export function registerNetworkRecoveryResolver(resolver: NetworkRecoveryResolver) {
+    networkRecoveryResolver = resolver
+}
+
 export type ManualQuestProvider = () => Record<string, any[]>
 let manualQuestProvider: ManualQuestProvider | null = null
 
@@ -959,8 +966,13 @@ export class DashboardServer {
                         res.writeHead(200, { 'Content-Type': 'application/json' })
                         res.end(JSON.stringify({ success: true }))
 
-                        if (body && body.action === 'confirm-ip') {
-                            onIpConfirmCommand()
+                        if (body && (body.action === 'resolve-network-recovery' || body.action === 'confirm-ip')) {
+                            if (networkRecoveryResolver && body.requestId) {
+                                networkRecoveryResolver(body.requestId, body.status || 'resume')
+                            }
+                            if (body.action === 'confirm-ip') {
+                                onIpConfirmCommand()
+                            }
                         } else {
                             // Async run execution callbacks
                             void onControlCommand(body)

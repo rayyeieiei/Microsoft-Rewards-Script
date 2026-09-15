@@ -2,6 +2,7 @@ import assert from 'assert'
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
+import { PassThrough } from 'stream'
 import {
     NetworkRecoveryController
 } from '../src/runtime/network/NetworkRecoveryController'
@@ -9,6 +10,7 @@ import {
     AdbNetworkRecoveryAdapter,
     type SubprocessRunner
 } from '../src/runtime/network/AdbNetworkRecoveryAdapter'
+import { ManualNetworkRecoveryAdapter } from '../src/runtime/network/ManualNetworkRecoveryAdapter'
 import { DeviceLockManager } from '../src/runtime/network/DeviceLockManager'
 import type {
     NetworkRecoveryAdapter,
@@ -457,7 +459,174 @@ export async function runNetworkRecoveryTests(): Promise<void> {
         console.log('✅ Test 15 Passed: Invalid serial with shell characters rejected immediately')
     }
 
-    console.log('🎉 ALL 15 NETWORK RECOVERY TESTS PASSED SUCCESSFULLY!\n')
+    // Test 16: Manual recovery generates single-use requestId and awaits operator confirmation
+    {
+        const adapter = new ManualNetworkRecoveryAdapter({
+            policy: createDefaultPolicy({ mode: 'manual', operatorTimeoutMs: 500 })
+        })
+        assert.strictEqual(adapter.getCurrentRequestId(), null)
+
+        // Start reconnect which generates requestId
+        const reconnectPromise = adapter.executeReconnect()
+        const requestId = adapter.getCurrentRequestId()
+        assert.ok(requestId, 'A non-null requestId must be generated upon executeReconnect')
+        assert.strictEqual(typeof requestId, 'string')
+        assert.ok(requestId.length >= 8)
+
+        // Resolve manual
+        const resolved = adapter.resolveManual(requestId, 'resume')
+        assert.strictEqual(resolved, true)
+        await reconnectPromise
+        assert.strictEqual(adapter.knowledge, 'confirmed-disabled')
+        console.log('✅ Test 16 Passed: Manual recovery generates single-use requestId and awaits confirmation')
+    }
+
+    // Test 17: Manual recovery times out cleanly when operatorTimeoutMs expires
+    {
+        const adapter = new ManualNetworkRecoveryAdapter({
+            policy: createDefaultPolicy({ mode: 'manual', operatorTimeoutMs: 50 })
+        })
+
+        let err: any = null
+        try {
+            await adapter.executeReconnect()
+        } catch (e) {
+            err = e
+        }
+        assert.ok(err, 'Manual recovery must reject when operator timeout expires')
+        assert.ok(err.message.includes('timed out'), `Expected timeout message, got: ${err.message}`)
+        assert.strictEqual(err.code, 'ETIMEDOUT')
+        console.log('✅ Test 17 Passed: Manual recovery times out cleanly when operatorTimeoutMs expires')
+    }
+
+    // Test 18: Stale or mismatched requestId in manual resolution is rejected
+    {
+        const adapter = new ManualNetworkRecoveryAdapter({
+            policy: createDefaultPolicy({ mode: 'manual', operatorTimeoutMs: 500 })
+        })
+
+        const reconnectPromise = adapter.executeReconnect()
+        const validId = adapter.getCurrentRequestId()!
+
+        // Attempt resolving with wrong ID
+        const resolvedWrong = adapter.resolveManual('wrong-request-id-999', 'resume')
+        assert.strictEqual(resolvedWrong, false, 'Mismatched requestId must be rejected')
+
+        // Resolve with correct ID
+        const resolvedCorrect = adapter.resolveManual(validId, 'resume')
+        assert.strictEqual(resolvedCorrect, true)
+        await reconnectPromise
+
+        // Attempt resolving again with the now-stale validId
+        const resolvedStale = adapter.resolveManual(validId, 'resume')
+        assert.strictEqual(resolvedStale, false, 'Already used requestId must be rejected as stale')
+        console.log('✅ Test 18 Passed: Stale or mismatched requestId in manual resolution is rejected')
+    }
+
+    // Test 19: Abort action from operator rejects manual recovery cleanly
+    {
+        const adapter = new ManualNetworkRecoveryAdapter({
+            policy: createDefaultPolicy({ mode: 'manual', operatorTimeoutMs: 500 })
+        })
+
+        const reconnectPromise = adapter.executeReconnect()
+        const validId = adapter.getCurrentRequestId()!
+
+        const resolved = adapter.resolveManual(validId, 'abort')
+        assert.strictEqual(resolved, true)
+
+        let err: any = null
+        try {
+            await reconnectPromise
+        } catch (e) {
+            err = e
+        }
+        assert.ok(err, 'Aborted manual recovery must reject')
+        assert.ok(err.message.includes('aborted by operator'), `Expected aborted message, got: ${err.message}`)
+        console.log('✅ Test 19 Passed: Abort action from operator rejects manual recovery cleanly')
+    }
+
+    // Test 20: Terminal readline Enter on stdin immediately resolves recovery successfully
+    {
+        const fakeStdin = new PassThrough()
+        const adapter = new ManualNetworkRecoveryAdapter({
+            policy: createDefaultPolicy({ mode: 'manual', operatorTimeoutMs: 1000 }),
+            stdin: fakeStdin
+        })
+
+        const reconnectPromise = adapter.executeReconnect()
+        assert.ok(adapter.getCurrentRequestId())
+
+        // Simulate operator pressing Enter on terminal stdin
+        fakeStdin.write('\n')
+
+        await reconnectPromise
+        assert.strictEqual(adapter.knowledge, 'confirmed-disabled')
+        console.log('✅ Test 20 Passed: Terminal readline Enter on stdin resolves recovery successfully')
+    }
+
+    // Test 21: Worker IPC delegate sends request to primary and handles response cleanly
+    {
+        const originalSend = process.send
+        let sentMessage: any = null
+
+        // Mock process.send to simulate primary worker IPC response
+        process.send = ((msg: any) => {
+            sentMessage = msg
+            // Simulate asynchronous response from primary after 10ms
+            setTimeout(() => {
+                if (msg.__networkRecoveryRequest) {
+                    process.emit('message' as any, {
+                        __networkRecoveryResponse: {
+                            correlationId: msg.__networkRecoveryRequest.correlationId,
+                            result: {
+                                status: 'recovered',
+                                trigger: msg.__networkRecoveryRequest.trigger,
+                                attempts: 1,
+                                durationMs: 100,
+                                finalStage: 'recovered',
+                                airplaneModeKnowledge: 'confirmed-disabled',
+                                restorationAttempted: false,
+                                restorationSucceeded: false
+                            }
+                        }
+                    } as any)
+                }
+            }, 10)
+            return true
+        }) as any
+
+        try {
+            const correlationId = 'test-corr-123'
+            const resultPromise = new Promise(resolve => {
+                const onMessage = (msg: any) => {
+                    if (
+                        msg?.__networkRecoveryResponse &&
+                        msg.__networkRecoveryResponse.correlationId === correlationId
+                    ) {
+                        process.removeListener('message', onMessage)
+                        resolve(msg.__networkRecoveryResponse.result)
+                    }
+                }
+                process.on('message', onMessage)
+                process.send!({
+                    __networkRecoveryRequest: { correlationId, trigger: 'connectivity-failure' }
+                })
+            })
+
+            const result: any = await resultPromise
+            assert.ok(sentMessage, 'Worker must send __networkRecoveryRequest message')
+            assert.strictEqual(sentMessage.__networkRecoveryRequest.correlationId, correlationId)
+            assert.strictEqual(sentMessage.__networkRecoveryRequest.trigger, 'connectivity-failure')
+            assert.strictEqual(result.status, 'recovered')
+            assert.strictEqual(result.attempts, 1)
+        } finally {
+            process.send = originalSend
+        }
+        console.log('✅ Test 21 Passed: Worker IPC delegate sends request to primary and handles response cleanly')
+    }
+
+    console.log('🎉 ALL 21 NETWORK RECOVERY TESTS PASSED SUCCESSFULLY!\n')
 }
 
 if (require.main === module) {
