@@ -48,7 +48,8 @@ import {
     NetworkRecoveryController
 } from './runtime/network/NetworkRecoveryController'
 import {
-    AdbNetworkRecoveryAdapter
+    AdbNetworkRecoveryAdapter,
+    type AdbPreflightStatus
 } from './runtime/network/AdbNetworkRecoveryAdapter'
 import {
     ManualNetworkRecoveryAdapter
@@ -61,7 +62,13 @@ import type {
     NetworkRecoveryResult,
     NetworkRecoveryTrigger
 } from './runtime/network/NetworkRecoveryTypes'
-import { registerNetworkRecoveryResolver } from './util/DashboardServer'
+import {
+    registerNetworkRecoveryResolver,
+    registerOperatorRecoveryHandler
+} from './util/DashboardServer'
+import {
+    resolveBuildMetadata
+} from './runtime/diagnostics/BuildMetadata'
 
 import type { Account } from './interface/Account'
 import AxiosClient from './util/Axios'
@@ -152,6 +159,10 @@ export class MicrosoftRewardsBot {
     private sessionSecret: string = crypto.randomBytes(32).toString('hex')
     public networkRecoveryController?: NetworkRecoveryController
     public manualNetworkRecoveryAdapter?: ManualNetworkRecoveryAdapter
+    public adbNetworkRecoveryAdapter?: AdbNetworkRecoveryAdapter
+    public networkRecoveryAvailable = true
+    public networkRecoveryPreflightStatus: AdbPreflightStatus | null = null
+    public activeRecoveryAbortController: AbortController | null = null
 
     private activeWorkers: number
     private exitedWorkers: number[]
@@ -258,6 +269,25 @@ export class MicrosoftRewardsBot {
     public async requestNetworkRecovery(
         trigger: NetworkRecoveryTrigger = 'connectivity-failure'
     ): Promise<NetworkRecoveryResult> {
+        if (!this.networkRecoveryAvailable) {
+            this.logger.warn(
+                'main',
+                'NETWORK-RECOVERY',
+                `Recovery requested (${trigger}) but subsystem is unavailable (preflight status: ${this.networkRecoveryPreflightStatus ?? 'unknown'})`
+            )
+            return {
+                status: 'failed',
+                trigger,
+                attempts: 0,
+                durationMs: 0,
+                finalStage: 'idle',
+                failureReason: (this.networkRecoveryPreflightStatus as any) || 'adb-unavailable',
+                airplaneModeKnowledge: 'confirmed-disabled',
+                restorationAttempted: false,
+                restorationSucceeded: false
+            }
+        }
+
         if (cluster.isWorker && process.send) {
             return new Promise(resolve => {
                 const correlationId = crypto.randomBytes(8).toString('hex')
@@ -295,7 +325,12 @@ export class MicrosoftRewardsBot {
                 })
             })
         } else if (this.networkRecoveryController) {
-            return this.networkRecoveryController.recover(trigger)
+            this.activeRecoveryAbortController = new AbortController()
+            try {
+                return await this.networkRecoveryController.recover(trigger, this.activeRecoveryAbortController.signal)
+            } finally {
+                this.activeRecoveryAbortController = null
+            }
         } else {
             return {
                 status: 'not-required',
@@ -307,6 +342,59 @@ export class MicrosoftRewardsBot {
                 restorationAttempted: false,
                 restorationSucceeded: false
             }
+        }
+    }
+
+    public async requestOperatorRecovery(
+        source: 'dashboard' | 'cli' = 'cli',
+        requestId: string = crypto.randomUUID()
+    ): Promise<NetworkRecoveryResult> {
+        this.logger.info(
+            'main',
+            'NETWORK-RECOVERY',
+            `requestReceived trigger=operator-request source=${source}`
+        )
+        return this.requestNetworkRecovery('operator-request')
+    }
+
+    public async notifySuspectedConnectivityFailure(
+        source: string,
+        error?: any
+    ): Promise<NetworkRecoveryResult> {
+        if (error) {
+            if (error.response?.status) {
+                return {
+                    status: 'not-required',
+                    trigger: 'connectivity-failure',
+                    attempts: 0,
+                    durationMs: 0,
+                    finalStage: 'idle',
+                    airplaneModeKnowledge: 'confirmed-disabled',
+                    restorationAttempted: false,
+                    restorationSucceeded: false
+                }
+            }
+            const msg = String(error.message || error).toLowerCase()
+            if (msg.includes('net::err_aborted') || msg.includes('timeout') || msg.includes('stage_timeout')) {
+                return {
+                    status: 'not-required',
+                    trigger: 'connectivity-failure',
+                    attempts: 0,
+                    durationMs: 0,
+                    finalStage: 'idle',
+                    airplaneModeKnowledge: 'confirmed-disabled',
+                    restorationAttempted: false,
+                    restorationSucceeded: false
+                }
+            }
+        }
+
+        return this.requestNetworkRecovery('connectivity-failure')
+    }
+
+    public cancelActiveRecovery(): void {
+        if (this.activeRecoveryAbortController && !this.activeRecoveryAbortController.signal.aborted) {
+            this.activeRecoveryAbortController.abort(new Error('Process interrupted (SIGINT/SIGTERM)'))
         }
     }
 
@@ -373,8 +461,41 @@ export class MicrosoftRewardsBot {
         await this.manualQuestQueue.load()
         await Database.getInstance().initialize()
 
+        // 1. Runtime Build Provenance
+        const buildMeta = resolveBuildMetadata()
+        this.logger.info(
+            'main',
+            'RUNTIME-BUILD',
+            `commit=${buildMeta.commit} builtAt=${buildMeta.builtAt} entrypoint=${buildMeta.entrypoint}`
+        )
+
+        // 2. Legacy useAdbIpRotation detection and migration warning
+        const legacyConfigDetected = Boolean(this.config.useAdbIpRotation)
+        if (legacyConfigDetected) {
+            this.logger.warn(
+                'main',
+                'NETWORK-RECOVERY-CONFIG',
+                `legacyConfigDetected=true migrationRequired=true | "useAdbIpRotation" is deprecated and ignored. Please configure "networkRecovery": { "enabled": true, "mode": "adb", "trigger": "connectivity-failure" } instead.`
+            )
+        }
+
+        // 3. Network Recovery Configuration & Preflight
         const recoveryConfig = this.config.networkRecovery
-        if (recoveryConfig && recoveryConfig.enabled && recoveryConfig.mode !== 'disabled') {
+        const isPrimaryProcess = cluster.isPrimary || !cluster.isWorker
+
+        if (!recoveryConfig || !recoveryConfig.enabled || recoveryConfig.mode === 'disabled') {
+            const disabledReason = !recoveryConfig
+                ? 'not-configured'
+                : !recoveryConfig.enabled
+                  ? 'disabled-in-config'
+                  : 'mode-disabled'
+
+            this.logger.info(
+                'main',
+                'NETWORK-RECOVERY-CONFIG',
+                `enabled=false reason=${disabledReason}`
+            )
+        } else {
             const policy: NetworkRecoveryPolicy = {
                 enabled: recoveryConfig.enabled,
                 mode: recoveryConfig.mode,
@@ -390,42 +511,84 @@ export class MicrosoftRewardsBot {
                 totalBudgetMs: recoveryConfig.totalBudgetMs ?? 120000
             }
 
-            const probe = new DefaultNetworkConnectivityProbe()
-            let adapter
-            if (policy.mode === 'adb') {
-                adapter = new AdbNetworkRecoveryAdapter({ policy })
-            } else {
-                adapter = new ManualNetworkRecoveryAdapter({
+            const adbSerialConfigured = Boolean(policy.adbSerial && policy.adbSerial.trim().length > 0)
+            const connectivityFailureTrigger = policy.trigger === 'connectivity-failure'
+            const operatorTrigger = true
+
+            this.logger.info(
+                'main',
+                'NETWORK-RECOVERY-CONFIG',
+                `enabled=${policy.enabled} mode=${policy.mode} connectivityFailureTrigger=${connectivityFailureTrigger} operatorTrigger=${operatorTrigger} adbSerialConfigured=${adbSerialConfigured} primaryOwner=${isPrimaryProcess} legacyConfigDetected=${legacyConfigDetected}`
+            )
+
+            if (isPrimaryProcess) {
+                const probe = new DefaultNetworkConnectivityProbe()
+                let adapter
+                if (policy.mode === 'adb') {
+                    const adbAdapter = new AdbNetworkRecoveryAdapter({ policy })
+                    this.adbNetworkRecoveryAdapter = adbAdapter
+                    adapter = adbAdapter
+
+                    // Phase 3: Safe startup ADB preflight (non-mutating, zero airplane-mode toggling, bounded)
+                    this.logger.info('main', 'ADB-PREFLIGHT', `start timeoutMs=${policy.commandTimeoutMs}`)
+                    try {
+                        const preflightResult = await adbAdapter.checkPreflightStatus()
+                        this.networkRecoveryPreflightStatus = preflightResult.status
+                        this.logger.info(
+                            'main',
+                            'ADB-PREFLIGHT',
+                            `end status=${preflightResult.status} deviceCount=${preflightResult.deviceCount} serialConfigured=${preflightResult.serialConfigured}`
+                        )
+                        if (preflightResult.status !== 'ready') {
+                            this.networkRecoveryAvailable = false
+                            this.logger.warn(
+                                'main',
+                                'NET-RECOVERY',
+                                `ADB preflight did not pass (status=${preflightResult.status}). Recovery capability disabled for this session.`
+                            )
+                        }
+                    } catch (err: any) {
+                        this.networkRecoveryAvailable = false
+                        this.networkRecoveryPreflightStatus = 'adb-unavailable'
+                        this.logger.warn(
+                            'main',
+                            'ADB-PREFLIGHT',
+                            `end status=adb-unavailable deviceCount=0 serialConfigured=${adbSerialConfigured}`
+                        )
+                    }
+                } else {
+                    adapter = new ManualNetworkRecoveryAdapter({
+                        policy,
+                        logger: {
+                            info: msg => this.logger.info(false, 'NET-RECOVERY', msg),
+                            warn: msg => this.logger.warn(false, 'NET-RECOVERY', msg),
+                            error: msg => this.logger.error(false, 'NET-RECOVERY', msg)
+                        }
+                    })
+                    this.manualNetworkRecoveryAdapter = adapter
+                    registerNetworkRecoveryResolver((requestId, action) => {
+                        return this.manualNetworkRecoveryAdapter?.resolveManual(requestId, action) ?? false
+                    })
+                }
+
+                this.networkRecoveryController = new NetworkRecoveryController({
                     policy,
+                    adapter,
+                    probe,
                     logger: {
                         info: msg => this.logger.info(false, 'NET-RECOVERY', msg),
                         warn: msg => this.logger.warn(false, 'NET-RECOVERY', msg),
                         error: msg => this.logger.error(false, 'NET-RECOVERY', msg)
                     }
                 })
-                this.manualNetworkRecoveryAdapter = adapter
-                registerNetworkRecoveryResolver((requestId, action) => {
-                    return this.manualNetworkRecoveryAdapter?.resolveManual(requestId, action) ?? false
-                })
+
+                this.logger.info(
+                    'main',
+                    'NET-RECOVERY',
+                    `Network recovery subsystem initialized | mode=${policy.mode} | trigger=${policy.trigger} | maxAttempts=${policy.maxAttempts}`,
+                    'green'
+                )
             }
-
-            this.networkRecoveryController = new NetworkRecoveryController({
-                policy,
-                adapter,
-                probe,
-                logger: {
-                    info: msg => this.logger.info(false, 'NET-RECOVERY', msg),
-                    warn: msg => this.logger.warn(false, 'NET-RECOVERY', msg),
-                    error: msg => this.logger.error(false, 'NET-RECOVERY', msg)
-                }
-            })
-
-            this.logger.info(
-                'main',
-                'NET-RECOVERY',
-                `Network recovery subsystem initialized | mode=${policy.mode} | trigger=${policy.trigger} | maxAttempts=${policy.maxAttempts}`,
-                'green'
-            )
         }
 
         this.updateDashboardGlobal({
@@ -543,6 +706,11 @@ export class MicrosoftRewardsBot {
                 if (reqId) {
                     this.manualNetworkRecoveryAdapter?.resolveManual(reqId, 'resume')
                 }
+            })
+
+            // Register operator recovery callback for dashboard
+            registerOperatorRecoveryHandler(async (requestId: string) => {
+                await this.requestOperatorRecovery('dashboard', requestId)
             })
 
             // Register exit cleanup
@@ -786,7 +954,12 @@ export class MicrosoftRewardsBot {
                 )
                 this.updateDashboardAccount(accountEmail, { status: 'Starting Browser' })
                 DataSaverManager.getInstance().beginAccountQuota(accountEmail)
-                this.axios = new AxiosClient(account.proxy, this.localProxyPort, bytes => this.trackBandwidth(bytes))
+                this.axios = new AxiosClient(
+                    account.proxy,
+                    this.localProxyPort,
+                    bytes => this.trackBandwidth(bytes),
+                    err => { void this.notifySuspectedConnectivityFailure('axios', err) }
+                )
 
                 const result = await this.Main(account, scope).catch(error => {
                     const errMsg = error instanceof Error ? error.message : String(error)
@@ -1236,11 +1409,13 @@ async function main(): Promise<void> {
     })
     process.on('SIGINT', async () => {
         rewardsBot.logger.warn('main', 'PROCESS', 'SIGINT received, flushing and exiting...')
+        rewardsBot.cancelActiveRecovery()
         await flushAllWebhooks()
         process.exit(130)
     })
     process.on('SIGTERM', async () => {
         rewardsBot.logger.warn('main', 'PROCESS', 'SIGTERM received, flushing and exiting...')
+        rewardsBot.cancelActiveRecovery()
         await flushAllWebhooks()
         process.exit(143)
     })
