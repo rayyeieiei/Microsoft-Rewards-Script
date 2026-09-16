@@ -1,4 +1,5 @@
-import { execSync } from 'child_process'
+import fs from 'fs'
+import path from 'path'
 
 export interface RuntimeBuildMetadata {
     commit: string
@@ -13,29 +14,47 @@ export function resolveBuildMetadata(): RuntimeBuildMetadata {
         return cachedMetadata
     }
 
-    let commit = process.env.GIT_COMMIT || 'unknown'
-    if (commit === 'unknown') {
+    const normalizedDir = __dirname.replace(/\\/g, '/')
+    const isDist = normalizedDir.includes('/dist') || __filename.replace(/\\/g, '/').includes('/dist')
+    const entrypoint: 'src' | 'dist' = isDist ? 'dist' : 'src'
+
+    let commit = 'source'
+    let builtAt = new Date().toISOString()
+
+    if (entrypoint === 'dist') {
         try {
-            commit = execSync('git rev-parse --short HEAD', {
-                stdio: ['ignore', 'pipe', 'ignore'],
-                timeout: 1500
-            })
-                .toString()
-                .trim()
+            const candidates = [
+                path.resolve(__dirname, '../../build-info.json'),
+                path.resolve(__dirname, '../build-info.json'),
+                path.resolve(process.cwd(), 'dist/build-info.json')
+            ]
+            for (const candidate of candidates) {
+                if (fs.existsSync(candidate)) {
+                    const raw = fs.readFileSync(candidate, 'utf8')
+                    const data = JSON.parse(raw)
+                    if (data && typeof data === 'object') {
+                        commit = data.commit || 'unknown'
+                        builtAt = data.builtAt || builtAt
+                        break
+                    }
+                }
+            }
         } catch {
             commit = 'unknown'
         }
+        if (commit === 'source') {
+            commit = 'unknown'
+        }
+    } else {
+        commit = process.env.GIT_COMMIT || 'source'
     }
-
-    const builtAt = process.env.BUILD_TIMESTAMP || new Date().toISOString()
-
-    const normalizedDir = __dirname.replace(/\\/g, '/')
-    const entrypoint: 'src' | 'dist' = normalizedDir.includes('/dist') || __filename.replace(/\\/g, '/').includes('/dist')
-        ? 'dist'
-        : 'src'
 
     cachedMetadata = { commit, builtAt, entrypoint }
     return cachedMetadata
+}
+
+export function resetBuildMetadataCacheForTest(): void {
+    cachedMetadata = null
 }
 
 export function formatBuildMetadataLog(meta: RuntimeBuildMetadata = resolveBuildMetadata()): string {
