@@ -112,7 +112,7 @@ export class NetworkRecoveryController {
             if (trigger === 'connectivity-failure') {
                 const initiallyHealthy = await this.probe.checkConnectivity(activeSignal)
                 if (initiallyHealthy) {
-                    this.logger?.info('[NETWORK-RECOVERY] Independent probe verified network connectivity is healthy; recovery not-required')
+                    this.logger?.info('[NETWORK-RECOVERY] skipped trigger=connectivity-failure reason=connectivity-healthy')
                     return {
                         status: 'not-required',
                         trigger,

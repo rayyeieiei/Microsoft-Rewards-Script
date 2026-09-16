@@ -19,6 +19,22 @@ export interface AdbDeviceEntry {
     status: 'device' | 'unauthorized' | 'offline' | string
 }
 
+export type AdbPreflightStatus =
+    | 'ready'
+    | 'adb-unavailable'
+    | 'device-not-found'
+    | 'multiple-devices'
+    | 'unauthorized'
+    | 'offline'
+    | 'timed-out'
+
+export interface AdbPreflightResult {
+    status: AdbPreflightStatus
+    deviceCount: number
+    serialConfigured: boolean
+    error?: string
+}
+
 export interface AdbAdapterOptions {
     policy: NetworkRecoveryPolicy
     adbBinary?: string
@@ -103,6 +119,114 @@ export class AdbNetworkRecoveryAdapter implements NetworkRecoveryAdapter {
             maxBuffer: 64 * 1024,
             signal
         })
+    }
+
+    /**
+     * Bounded, non-mutating preflight check for startup diagnostics.
+     * Executes `adb version` and `adb devices -l` without toggling airplane mode
+     * or acquiring exclusive device locks.
+     */
+    public async checkPreflightStatus(signal?: AbortSignal): Promise<AdbPreflightResult> {
+        const serialConfigured = Boolean(this.policy.adbSerial && this.policy.adbSerial.trim().length > 0)
+        let versionOut: { stdout: string; stderr: string }
+        try {
+            versionOut = await this.runner(this.adbBinary, ['version'], {
+                timeout: this.policy.commandTimeoutMs,
+                maxBuffer: 64 * 1024,
+                signal
+            })
+        } catch (err: any) {
+            const isTimeout = String(err?.message || '').toLowerCase().includes('timeout')
+            return {
+                status: isTimeout ? 'timed-out' : 'adb-unavailable',
+                deviceCount: 0,
+                serialConfigured,
+                error: err?.message || String(err)
+            }
+        }
+
+        if (!versionOut.stdout.includes('Android Debug Bridge')) {
+            return {
+                status: 'adb-unavailable',
+                deviceCount: 0,
+                serialConfigured,
+                error: 'ADB executable did not return valid version string'
+            }
+        }
+
+        let devicesOut: { stdout: string; stderr: string }
+        try {
+            devicesOut = await this.runner(this.adbBinary, ['devices', '-l'], {
+                timeout: this.policy.commandTimeoutMs,
+                maxBuffer: 64 * 1024,
+                signal
+            })
+        } catch (err: any) {
+            const isTimeout = String(err?.message || '').toLowerCase().includes('timeout')
+            return {
+                status: isTimeout ? 'timed-out' : 'adb-unavailable',
+                deviceCount: 0,
+                serialConfigured,
+                error: err?.message || String(err)
+            }
+        }
+
+        const devices = this.parseDevices(devicesOut.stdout)
+        const deviceCount = devices.length
+
+        if (deviceCount === 0) {
+            return {
+                status: 'device-not-found',
+                deviceCount: 0,
+                serialConfigured
+            }
+        }
+
+        // Check unauthorized/offline
+        for (const dev of devices) {
+            if (dev.status === 'unauthorized') {
+                return {
+                    status: 'unauthorized',
+                    deviceCount,
+                    serialConfigured
+                }
+            }
+            if (dev.status === 'offline') {
+                return {
+                    status: 'offline',
+                    deviceCount,
+                    serialConfigured
+                }
+            }
+        }
+
+        // Multi-device handling
+        if (!serialConfigured) {
+            if (deviceCount > 1) {
+                return {
+                    status: 'multiple-devices',
+                    deviceCount,
+                    serialConfigured
+                }
+            }
+        } else {
+            const configuredSerial = this.policy.adbSerial!.trim()
+            const found = devices.find(d => d.serial === configuredSerial)
+            if (!found) {
+                return {
+                    status: 'device-not-found',
+                    deviceCount,
+                    serialConfigured,
+                    error: `Configured serial not found`
+                }
+            }
+        }
+
+        return {
+            status: 'ready',
+            deviceCount,
+            serialConfigured
+        }
     }
 
     /**
