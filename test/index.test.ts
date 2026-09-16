@@ -9,6 +9,7 @@ import { runNewAccountOnboardingTests } from './newAccountOnboarding.test'
 import { runBrowserEnvironmentIsolationTests } from './browserEnvironmentIsolation.test'
 import { runAccountOwnershipIdentityTests } from './accountOwnershipIdentity.test'
 import { runNetworkRecoveryTests } from './networkRecovery.test'
+import { runNetworkRecoveryDiagnosticsTests } from './networkRecoveryDiagnostics.test'
 
 async function runAll() {
     console.log('🧪 Starting Full Test Suite Execution...\n')
@@ -17,6 +18,9 @@ async function runAll() {
     console.log('')
 
     await runNetworkRecoveryTests()
+    console.log('')
+
+    await runNetworkRecoveryDiagnosticsTests()
     console.log('')
 
     await runPunchCardTests()
