@@ -320,9 +320,23 @@ export async function runNetworkRecoveryDiagnosticsTests(): Promise<void> {
         await server.start()
 
         try {
+            const ticket = await new Promise<any>((resolve, reject) => {
+                http.get(`http://127.0.0.1:${port}/api/recovery-ticket`, {
+                    headers: { Host: `127.0.0.1:${port}` }
+                }, r => {
+                    let body = ''
+                    r.on('data', chunk => (body += chunk))
+                    r.on('end', () => resolve(JSON.parse(body)))
+                }).on('error', reject)
+            })
+
+            assert.ok(ticket.requestId, 'Ticket must contain requestId')
+            assert.ok(ticket.csrfToken, 'Ticket must contain csrfToken')
+
             const reqData = JSON.stringify({
                 action: 'request-network-recovery',
-                requestId: 'op-req-10'
+                requestId: ticket.requestId,
+                csrfToken: ticket.csrfToken
             })
 
             const res = await new Promise<any>((resolve, reject) => {
@@ -373,9 +387,20 @@ export async function runNetworkRecoveryDiagnosticsTests(): Promise<void> {
         await server.start()
 
         try {
+            const ticket = await new Promise<any>((resolve, reject) => {
+                http.get(`http://127.0.0.1:${port}/api/recovery-ticket`, {
+                    headers: { Host: `127.0.0.1:${port}` }
+                }, r => {
+                    let body = ''
+                    r.on('data', chunk => (body += chunk))
+                    r.on('end', () => resolve(JSON.parse(body)))
+                }).on('error', reject)
+            })
+
             const reqData = JSON.stringify({
                 action: 'request-network-recovery',
-                requestId: 'op-req-duplicate-test'
+                requestId: ticket.requestId,
+                csrfToken: ticket.csrfToken
             })
 
             const sendReq = () =>

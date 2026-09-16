@@ -1,6 +1,7 @@
 import http from 'http'
 import fs from 'fs'
 import path from 'path'
+import crypto from 'crypto'
 import { EventEmitter } from 'events'
 import { Database } from './Database'
 
@@ -133,12 +134,32 @@ export function registerOperatorRecoveryHandler(handler: OperatorRecoveryHandler
     operatorRecoveryHandler = handler
 }
 
+export interface RecoveryTicket {
+    csrfToken: string
+    expiresAt: number
+}
+
+export const activeRecoveryTickets = new Map<string, RecoveryTicket>()
+export const MAX_RECOVERY_TICKETS = 100
+export const RECOVERY_TICKET_TTL_MS = 5 * 60 * 1000
+
+export function pruneExpiredRecoveryTickets(now = Date.now()): void {
+    for (const [id, ticket] of activeRecoveryTickets.entries()) {
+        if (ticket.expiresAt <= now) {
+            activeRecoveryTickets.delete(id)
+        }
+    }
+}
+
 export const seenOperatorRecoveryRequestIds = new Set<string>()
 export let isOperatorRecoveryInProgress = false
+export let lastOperatorRecoveryTimestamp = 0
 
 export function resetOperatorRecoveryStateForTest() {
     seenOperatorRecoveryRequestIds.clear()
+    activeRecoveryTickets.clear()
     isOperatorRecoveryInProgress = false
+    lastOperatorRecoveryTimestamp = 0
     operatorRecoveryHandler = null
 }
 
@@ -551,6 +572,11 @@ const htmlPage = `<!DOCTYPE html>
                     <button class="btn-primary" onclick="sendControl('start')">Start All Accounts</button>
                     <button class="btn-danger" onclick="sendControl('stop')">Stop / Pause Bot</button>
                     <button class="btn-secondary" style="background-color: #8b5cf6;" onclick="sendControl('confirm-ip')">Confirm IP Rotated</button>
+                    <button id="btn-request-recovery" class="btn-secondary" style="background-color: #0284c7;" onclick="requestNetworkRecovery()">Request Network Recovery</button>
+                </div>
+                <div style="margin-top: 0.75rem; margin-bottom: 0.75rem; font-size: 0.8rem; display: flex; align-items: center; justify-content: space-between;">
+                    <span style="color: #94a3b8;">Network Recovery:</span>
+                    <span id="net-recovery-status" class="status-badge status-pending">idle</span>
                 </div>
                 <div class="single-acc-form">
                     <select id="single-email" class="text-input" style="cursor: pointer;">
@@ -630,6 +656,70 @@ const htmlPage = `<!DOCTYPE html>
             const email = document.getElementById('single-email').value.trim();
             if (email) {
                 sendControl('start-single', email);
+            }
+        }
+
+        async function requestNetworkRecovery() {
+            const btn = document.getElementById('btn-request-recovery');
+            const statusBadge = document.getElementById('net-recovery-status');
+            if (btn) btn.disabled = true;
+            if (statusBadge) {
+                statusBadge.innerText = 'requesting ticket';
+                statusBadge.className = 'status-badge status-stealth';
+            }
+            try {
+                const ticketRes = await fetch('/api/recovery-ticket');
+                if (!ticketRes.ok) {
+                    if (statusBadge) {
+                        statusBadge.innerText = 'ticket-failed';
+                        statusBadge.className = 'status-badge status-error';
+                    }
+                    return;
+                }
+                const ticket = await ticketRes.json();
+                if (!ticket || !ticket.requestId || !ticket.csrfToken) {
+                    if (statusBadge) {
+                        statusBadge.innerText = 'invalid-ticket';
+                        statusBadge.className = 'status-badge status-error';
+                    }
+                    return;
+                }
+
+                if (statusBadge) {
+                    statusBadge.innerText = 'submitting';
+                    statusBadge.className = 'status-badge status-stealth';
+                }
+
+                const ctrlRes = await fetch('/api/control', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        action: 'request-network-recovery',
+                        requestId: ticket.requestId,
+                        csrfToken: ticket.csrfToken
+                    })
+                });
+
+                const result = await ctrlRes.json();
+                if (statusBadge) {
+                    if (result.accepted) {
+                        statusBadge.innerText = 'accepted';
+                        statusBadge.className = 'status-badge status-done';
+                    } else {
+                        statusBadge.innerText = result.reason || 'rejected';
+                        statusBadge.className = 'status-badge status-error';
+                    }
+                }
+            } catch (err) {
+                console.error(err);
+                if (statusBadge) {
+                    statusBadge.innerText = 'network-error';
+                    statusBadge.className = 'status-badge status-error';
+                }
+            } finally {
+                if (btn) {
+                    setTimeout(() => { btn.disabled = false; }, 2000);
+                }
             }
         }
 
@@ -892,30 +982,54 @@ export class DashboardServer {
 
     constructor(private port: number = 4000) {}
 
-    private parseJsonBody(req: http.IncomingMessage, maxBytes = 65536): Promise<any> {
+    private parseJsonBody(req: http.IncomingMessage, maxBytes = 65536, timeoutMs = 5000): Promise<any> {
         return new Promise(resolve => {
             let body = ''
             let bytes = 0
             let exceeded = false
+            let settled = false
+
+            const timer = setTimeout(() => {
+                if (!settled) {
+                    settled = true
+                    req.destroy()
+                    resolve({ _error: 'timeout' })
+                }
+            }, timeoutMs)
+
             req.on('data', chunk => {
+                if (settled) return
                 bytes += chunk.length
                 if (bytes > maxBytes) {
+                    settled = true
                     exceeded = true
+                    clearTimeout(timer)
                     req.destroy()
-                    resolve({})
+                    resolve({ _error: 'payload-too-large' })
                     return
                 }
                 body += chunk.toString()
             })
             req.on('end', () => {
-                if (exceeded) return
+                if (settled) return
+                settled = true
+                clearTimeout(timer)
+                if (exceeded) {
+                    resolve({ _error: 'payload-too-large' })
+                    return
+                }
                 try {
                     resolve(JSON.parse(body))
                 } catch {
-                    resolve({})
+                    resolve({ _error: 'invalid-json' })
                 }
             })
-            req.on('error', () => resolve({}))
+            req.on('error', () => {
+                if (settled) return
+                settled = true
+                clearTimeout(timer)
+                resolve({ _error: 'read-error' })
+            })
         })
     }
 
@@ -953,6 +1067,28 @@ export class DashboardServer {
                     if (url === '/' || url === '/index.html') {
                         res.writeHead(200, { 'Content-Type': 'text/html' })
                         res.end(htmlPage)
+                        return
+                    }
+
+                    if (url === '/api/recovery-ticket') {
+                        pruneExpiredRecoveryTickets()
+                        if (activeRecoveryTickets.size >= MAX_RECOVERY_TICKETS) {
+                            const oldestKey = activeRecoveryTickets.keys().next().value
+                            if (oldestKey) {
+                                activeRecoveryTickets.delete(oldestKey)
+                            }
+                        }
+                        const requestId = crypto.randomUUID()
+                        const csrfToken = crypto.randomBytes(32).toString('hex')
+                        activeRecoveryTickets.set(requestId, {
+                            csrfToken,
+                            expiresAt: Date.now() + RECOVERY_TICKET_TTL_MS
+                        })
+                        res.writeHead(200, {
+                            'Content-Type': 'application/json',
+                            'Cache-Control': 'no-store'
+                        })
+                        res.end(JSON.stringify({ requestId, csrfToken }))
                         return
                     }
 
@@ -1013,7 +1149,20 @@ export class DashboardServer {
                     }
                 } else if (method === 'POST') {
                     if (url === '/api/control') {
+                        const contentType = (req.headers['content-type'] || '').toLowerCase()
+                        if (!contentType.includes('application/json')) {
+                            res.writeHead(400, { 'Content-Type': 'application/json' })
+                            res.end(JSON.stringify({ success: false, accepted: false, reason: 'invalid-content-type' }))
+                            return
+                        }
+
                         const body = await this.parseJsonBody(req)
+                        if (!body || body._error || typeof body !== 'object') {
+                            const statusCode = body?._error === 'payload-too-large' ? 413 : 400
+                            res.writeHead(statusCode, { 'Content-Type': 'application/json' })
+                            res.end(JSON.stringify({ success: false, accepted: false, reason: body?._error || 'invalid-json' }))
+                            return
+                        }
 
                         if (body && body.action === 'request-network-recovery') {
                             const requestId = typeof body.requestId === 'string' ? body.requestId.trim() : ''
@@ -1029,6 +1178,36 @@ export class DashboardServer {
                                 return
                             }
 
+                            const now = Date.now()
+                            if (now - lastOperatorRecoveryTimestamp < 2000) {
+                                res.writeHead(429, { 'Content-Type': 'application/json' })
+                                res.end(JSON.stringify({ success: false, accepted: false, reason: 'rate-limited' }))
+                                return
+                            }
+
+                            const ticket = activeRecoveryTickets.get(requestId)
+                            if (!ticket || ticket.expiresAt <= now) {
+                                if (ticket) {
+                                    activeRecoveryTickets.delete(requestId)
+                                }
+                                res.writeHead(403, { 'Content-Type': 'application/json' })
+                                res.end(JSON.stringify({ success: false, accepted: false, reason: 'invalid-ticket' }))
+                                return
+                            }
+
+                            const csrfToken = typeof body.csrfToken === 'string' ? body.csrfToken : ''
+                            const receivedBuf = Buffer.from(csrfToken, 'utf8')
+                            const expectedBuf = Buffer.from(ticket.csrfToken, 'utf8')
+                            if (receivedBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(receivedBuf, expectedBuf)) {
+                                activeRecoveryTickets.delete(requestId)
+                                res.writeHead(403, { 'Content-Type': 'application/json' })
+                                res.end(JSON.stringify({ success: false, accepted: false, reason: 'invalid-csrf' }))
+                                return
+                            }
+
+                            // Atomically consume ticket so it cannot be used again
+                            activeRecoveryTickets.delete(requestId)
+
                             if (isOperatorRecoveryInProgress) {
                                 res.writeHead(200, { 'Content-Type': 'application/json' })
                                 res.end(JSON.stringify({ success: true, accepted: false, reason: 'already-in-progress' }))
@@ -1043,6 +1222,7 @@ export class DashboardServer {
 
                             seenOperatorRecoveryRequestIds.add(requestId)
                             isOperatorRecoveryInProgress = true
+                            lastOperatorRecoveryTimestamp = now
 
                             res.writeHead(200, { 'Content-Type': 'application/json' })
                             res.end(JSON.stringify({ success: true, accepted: true }))
@@ -1075,7 +1255,8 @@ export class DashboardServer {
                     }
 
                     if (url === '/api/config') {
-                        const body = await this.parseJsonBody(req)
+                        const parsed = await this.parseJsonBody(req)
+                        const body = parsed && !parsed._error ? parsed : {}
 
                         // Update in-memory RAM dashboardState immediately
                         updateDashboardGlobal({
