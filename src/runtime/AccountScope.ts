@@ -11,6 +11,8 @@ import type {
 import { AccountDisposer } from './AccountDisposer'
 import type { MicrosoftRewardsBot } from '../index'
 
+export type AccountScopeLifecycleState = 'active' | 'disposing' | 'disposed'
+
 export class AccountScope {
     public readonly id: string
     public readonly runId: string
@@ -21,6 +23,9 @@ export class AccountScope {
     public readonly bot?: MicrosoftRewardsBot
     public readonly abortController: AbortController = new AbortController()
 
+    private _lifecycleState: AccountScopeLifecycleState = 'active'
+    private _disposalPromise: Promise<void> | null = null
+    private activeOperations = new Set<Promise<unknown>>()
     private _isDisposed = false
     private dapiToken = ''
     private mobileContext?: any
@@ -152,23 +157,108 @@ export class AccountScope {
         )
     }
 
+    public get lifecycleState(): AccountScopeLifecycleState {
+        return this._lifecycleState
+    }
+
     public get isDisposed(): boolean {
-        return this._isDisposed
+        return this._lifecycleState === 'disposed' || this._isDisposed
+    }
+
+    public get isDisposing(): boolean {
+        return this._lifecycleState === 'disposing'
+    }
+
+    public get isActive(): boolean {
+        return this._lifecycleState === 'active'
     }
 
     public markDisposed(): void {
+        this._lifecycleState = 'disposed'
         this._isDisposed = true
+    }
+
+    private assertActive(operationName: string): void {
+        if (this._lifecycleState !== 'active') {
+            throw new Error(`Cannot perform ${operationName}: AccountScope is ${this._lifecycleState}`)
+        }
+    }
+
+    public trackOperation<T>(promise: Promise<T>): Promise<T> {
+        this.assertActive('trackOperation')
+        this.activeOperations.add(promise)
+        promise
+            .finally(() => {
+                this.activeOperations.delete(promise)
+            })
+            .catch(() => {})
+        return promise
+    }
+
+    public async waitForActiveOperations(timeoutMs: number = 2000): Promise<void> {
+        if (this.activeOperations.size === 0) return
+        const operations = Array.from(this.activeOperations)
+        await Promise.race([
+            Promise.allSettled(operations),
+            new Promise<void>(resolve => setTimeout(resolve, timeoutMs))
+        ])
+    }
+
+    public getActiveOperationCount(): number {
+        return this.activeOperations.size
+    }
+
+    /**
+     * Synchronous latch ensures that disposalPromise is created and assigned
+     * BEFORE abortController.abort() fires, preventing duplicate disposal passes
+     * if abort listeners re-enter disposal synchronously.
+     */
+    public beginDisposal(work: () => Promise<void>): Promise<void> {
+        if (this._disposalPromise) {
+            return this._disposalPromise
+        }
+        if (this._lifecycleState === 'disposed' || this._isDisposed) {
+            return Promise.resolve()
+        }
+
+        this._lifecycleState = 'disposing'
+        let resolvePromise!: () => void
+        let rejectPromise!: (err: unknown) => void
+        this._disposalPromise = new Promise<void>((res, rej) => {
+            resolvePromise = res
+            rejectPromise = rej
+        })
+
+        // 1. Abort signal fired AFTER disposalPromise is created & assigned
+        try {
+            this.abortController.abort()
+        } catch {}
+
+        // 2. Execute work asynchronously
+        ;(async () => {
+            try {
+                await work()
+                resolvePromise()
+            } catch (err) {
+                rejectPromise(err)
+            } finally {
+                this._lifecycleState = 'disposed'
+                this._isDisposed = true
+            }
+        })()
+
+        return this._disposalPromise
     }
 
     // --- DAPI Token Management ---
 
     public getDapiToken(): string {
-        if (this._isDisposed) return ''
+        if (this._lifecycleState !== 'active') return ''
         return this.dapiToken
     }
 
     public setDapiToken(token: string): void {
-        if (this._isDisposed) {
+        if (this._lifecycleState !== 'active') {
             throw new Error('Cannot set DAPI token on disposed AccountScope')
         }
         this.dapiToken = token
@@ -181,13 +271,13 @@ export class AccountScope {
     // --- Ghost Cursor Management ---
 
     public bindCursor(page: any, cursor: any): void {
-        if (!this._isDisposed && page) {
+        if (this._lifecycleState === 'active' && page) {
             this.cursors.set(page, cursor)
         }
     }
 
     public getCursor(page: any): any | undefined {
-        if (this._isDisposed || !page) return undefined
+        if (this._lifecycleState !== 'active' || !page) return undefined
         return this.cursors.get(page)
     }
 
@@ -198,8 +288,11 @@ export class AccountScope {
     // --- Context Management ---
 
     public setContext(kind: 'mobile' | 'desktop', context: any): void {
-        if (this._isDisposed) {
-            throw new Error(`Cannot attach ${kind} context to disposed AccountScope`)
+        if (this._lifecycleState !== 'active') {
+            if (context && typeof context.close === 'function') {
+                context.close().catch(() => {})
+            }
+            throw new Error(`Cannot attach ${kind} context to ${this._lifecycleState} AccountScope`)
         }
         if (kind === 'mobile') {
             this.mobileContext = context
@@ -209,20 +302,20 @@ export class AccountScope {
     }
 
     public getContext(kind: 'mobile' | 'desktop'): any | undefined {
-        if (this._isDisposed) return undefined
+        if (this._lifecycleState === 'disposed') return undefined
         return kind === 'mobile' ? this.mobileContext : this.desktopContext
     }
 
     // --- Route & Response Handlers (Exact unroute support) ---
 
     public registerRouteHandler(context: any, url: string, handler: any): void {
-        if (!this._isDisposed) {
+        if (this._lifecycleState === 'active') {
             this.routeHandlers.push({ context, url, handler })
         }
     }
 
     public registerResponseListener(context: any, listener: any): void {
-        if (!this._isDisposed) {
+        if (this._lifecycleState === 'active') {
             this.responseListeners.push({ context, listener })
         }
     }
@@ -243,7 +336,7 @@ export class AccountScope {
     // --- Secrets Management ---
 
     public storeSecret(secret: ResolvedActionSecret): void {
-        if (this._isDisposed) {
+        if (this._lifecycleState !== 'active') {
             throw new Error('AccountScope is already disposed; cannot store secret')
         }
         if (secret.accountScopeId !== this.id) {
@@ -255,12 +348,12 @@ export class AccountScope {
     }
 
     public getSecret(offerId: string): ResolvedActionSecret | undefined {
-        if (this._isDisposed) return undefined
+        if (this._lifecycleState !== 'active') return undefined
         return this.secrets.get(offerId)
     }
 
     public hasSecret(offerId: string): boolean {
-        if (this._isDisposed) return false
+        if (this._lifecycleState !== 'active') return false
         return this.secrets.has(offerId)
     }
 
@@ -269,6 +362,9 @@ export class AccountScope {
     }
 
     public setSecret(offerId: string, secret: ResolvedActionSecret): void {
+        if (this._lifecycleState === 'disposed') {
+            throw new Error('AccountScope is already disposed; cannot set secret')
+        }
         this.secrets.set(offerId, secret)
     }
 
@@ -283,13 +379,13 @@ export class AccountScope {
     }
 
     public hasAttempted(parentOfferId: string, childOfferId: string): boolean {
-        if (this._isDisposed) return false
+        if (this._lifecycleState === 'disposed') return false
         const key = this.makeAttemptKey(parentOfferId, childOfferId)
         return this.attemptRecords.has(key)
     }
 
     public getAttempt(parentOfferId: string, childOfferId: string): PunchCardAttemptRecord | undefined {
-        if (this._isDisposed) return undefined
+        if (this._lifecycleState === 'disposed') return undefined
         const key = this.makeAttemptKey(parentOfferId, childOfferId)
         return this.attemptRecords.get(key)
     }
@@ -299,6 +395,7 @@ export class AccountScope {
         childOfferId: string,
         result: 'verified' | 'processed-unverified' | 'execution-unavailable'
     ): PunchCardAttemptRecord {
+        this.assertActive('recordAttempt')
         const key = this.makeAttemptKey(parentOfferId, childOfferId)
         const record: PunchCardAttemptRecord = {
             runId: this.runId,
@@ -319,9 +416,14 @@ export class AccountScope {
     // --- Tracked Pages & Timers ---
 
     public trackPage(page: any): void {
-        if (!this._isDisposed && page) {
-            this.trackedPages.add(page)
+        if (!page) return
+        if (this._lifecycleState !== 'active') {
+            if (typeof page.close === 'function') {
+                page.close().catch(() => {})
+            }
+            return
         }
+        this.trackedPages.add(page)
     }
 
     public untrackPage(page: any): void {
@@ -339,7 +441,7 @@ export class AccountScope {
     }
 
     public trackTimer(timer: NodeJS.Timeout): void {
-        if (!this._isDisposed && timer) {
+        if (this._lifecycleState === 'active' && timer) {
             this.trackedTimers.add(timer)
         }
     }
@@ -360,8 +462,8 @@ export class AccountScope {
 
     // --- Disposal ---
 
-    public async dispose(): Promise<void> {
-        await AccountDisposer.dispose(this)
+    public dispose(): Promise<void> {
+        return AccountDisposer.dispose(this)
     }
 
     public toJSON() {
@@ -369,11 +471,12 @@ export class AccountScope {
             id: this.id,
             runId: this.runId,
             accountKey: this.accountKey,
-            isDisposed: this._isDisposed
+            lifecycleState: this._lifecycleState,
+            isDisposed: this.isDisposed
         }
     }
 
     public toString(): string {
-        return `[AccountScope id=${this.id} runId=${this.runId} accountKey=${this.accountKey} disposed=${this._isDisposed}]`
+        return `[AccountScope id=${this.id} runId=${this.runId} accountKey=${this.accountKey} state=${this._lifecycleState}]`
     }
 }

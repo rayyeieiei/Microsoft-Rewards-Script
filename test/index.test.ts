@@ -8,6 +8,7 @@ import { runBrowserOperationGuardTests } from './browserOperationGuard.test'
 import { runNewAccountOnboardingTests } from './newAccountOnboarding.test'
 import { runBrowserEnvironmentIsolationTests } from './browserEnvironmentIsolation.test'
 import { runAccountOwnershipIdentityTests } from './accountOwnershipIdentity.test'
+import { runLifecycleAndShutdownTests } from './lifecycleAndShutdown.test'
 import { runNetworkRecoveryTests } from './networkRecovery.test'
 import { runNetworkRecoveryDiagnosticsTests } from './networkRecoveryDiagnostics.test'
 
@@ -48,6 +49,9 @@ async function runAll() {
     console.log('')
 
     await runBrowserEnvironmentIsolationTests()
+    console.log('')
+
+    await runLifecycleAndShutdownTests()
     console.log('')
 
     console.log('🎉 ALL TESTS IN SUITE PASSED SUCCESSFULLY!')

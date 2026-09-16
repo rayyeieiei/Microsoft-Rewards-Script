@@ -37,6 +37,7 @@ import { redactAccountKey } from './util/Redaction'
 import { DataSaverManager, mapResourceTypeToCategory } from './util/DataSaver'
 import { Database } from './util/Database'
 import { AccountScope } from './runtime/AccountScope'
+import { AccountDisposer } from './runtime/AccountDisposer'
 import { createManagedPage, recoverOwnerPage } from './runtime/BrowserOperationGuard'
 import crypto from 'crypto'
 import {
@@ -142,6 +143,14 @@ async function flushAllWebhooks(timeoutMs = 5000): Promise<void> {
     await Promise.allSettled([flushDiscordQueue(timeoutMs), flushNtfyQueue(timeoutMs)])
 }
 
+export type ShutdownStatus = 'completed' | 'failed' | 'timed-out'
+
+export interface ShutdownResult {
+    status: ShutdownStatus
+    error?: Error
+    durationMs: number
+}
+
 interface UserData {
     userName: string
     geoLocale: string
@@ -185,7 +194,9 @@ export class MicrosoftRewardsBot {
     public runId: string = `run_${Date.now()}`
     public isRunning = false
     public stopRequested = false
+    public dashboardServer: DashboardServer | null = null
     private dashboardServerActive = false
+    private shutdownPromise: Promise<ShutdownResult> | null = null
     private sessionSecret: string = crypto.randomBytes(32).toString('hex')
     public networkRecoveryController?: NetworkRecoveryController
     public manualNetworkRecoveryAdapter?: ManualNetworkRecoveryAdapter
@@ -523,6 +534,116 @@ export class MicrosoftRewardsBot {
         }
     }
 
+    public async requestShutdown(reason: string = 'manual', budgetMs: number = 10000): Promise<ShutdownResult> {
+        if (this.shutdownPromise) {
+            return this.shutdownPromise
+        }
+
+        this.stopRequested = true
+        const startTime = Date.now()
+
+        this.shutdownPromise = (async () => {
+            this.logger.warn('main', 'SHUTDOWN', `Graceful shutdown initiated (reason: ${reason}, budget: ${budgetMs}ms)...`)
+            let timer: NodeJS.Timeout | null = null
+
+            const timeoutPromise = new Promise<{ timedOut: true }>((resolve) => {
+                timer = setTimeout(() => {
+                    resolve({ timedOut: true })
+                }, budgetMs)
+            })
+
+            const performCleanup = async (): Promise<void> => {
+                // 1. Cancel active recovery & operator listeners
+                try {
+                    this.teardownCliOperatorListener()
+                    this.cancelActiveRecovery()
+                } catch {}
+
+                // 2. Dispose active accountScope if present
+                if (this.accountScope) {
+                    const scope = this.accountScope
+                    try {
+                        await AccountDisposer.dispose(scope)
+                    } catch (err) {
+                        this.logger.error(
+                            'main',
+                            'SHUTDOWN',
+                            `Error disposing active scope during shutdown: ${err instanceof Error ? err.message : String(err)}`
+                        )
+                    } finally {
+                        if (this.accountScope === scope) {
+                            this.accountScope = null
+                            this.resetAccountState()
+                        }
+                    }
+                }
+
+                // 3. Stop dynamic outbound proxy if running
+                if (this.localProxy) {
+                    try {
+                        await this.localProxy.stop(3000)
+                    } catch (err) {
+                        this.logger.error(
+                            'main',
+                            'SHUTDOWN',
+                            `Error stopping local proxy during shutdown: ${err instanceof Error ? err.message : String(err)}`
+                        )
+                    } finally {
+                        this.localProxy = null
+                    }
+                }
+
+                // 4. Stop dashboard server if running
+                if (this.dashboardServer) {
+                    try {
+                        await this.dashboardServer.stop()
+                    } catch (err) {
+                        this.logger.error(
+                            'main',
+                            'SHUTDOWN',
+                            `Error stopping dashboard server: ${err instanceof Error ? err.message : String(err)}`
+                        )
+                    }
+                }
+
+                // 5. Flush pending writes and webhooks
+                try {
+                    await this.manualQuestQueue?.flushPendingWrites().catch(() => {})
+                } catch {}
+                try {
+                    await flushAllWebhooks().catch(() => {})
+                } catch {}
+            }
+
+            try {
+                const outcome = await Promise.race([
+                    performCleanup().then(() => ({ timedOut: false })),
+                    timeoutPromise
+                ])
+
+                const durationMs = Date.now() - startTime
+                if (outcome.timedOut) {
+                    this.logger.warn('main', 'SHUTDOWN', `Graceful shutdown timed out after ${durationMs}ms`)
+                    return { status: 'timed-out', durationMs }
+                }
+
+                this.logger.info('main', 'SHUTDOWN', `Graceful shutdown completed successfully in ${durationMs}ms`)
+                return { status: 'completed', durationMs }
+            } catch (err) {
+                const durationMs = Date.now() - startTime
+                const error = err instanceof Error ? err : new Error(String(err))
+                this.logger.error('main', 'SHUTDOWN', `Graceful shutdown failed: ${error.message}`)
+                return { status: 'failed', error, durationMs }
+            } finally {
+                if (timer) {
+                    clearTimeout(timer)
+                }
+            }
+        })()
+
+        return this.shutdownPromise
+    }
+
     get isMobile(): boolean {
         return getCurrentContext().isMobile
     }
@@ -758,6 +879,7 @@ export class MicrosoftRewardsBot {
         if (this.config.useLocalDashboard && (cluster.isPrimary || !cluster.isWorker) && !this.dashboardServerActive) {
             this.dashboardServerActive = true
             const dashboardServer = new DashboardServer(4000)
+            this.dashboardServer = dashboardServer
             await dashboardServer.start().catch(err => {
                 this.logger.error('main', 'DASHBOARD-ERROR', `Failed to start dashboard: ${err.message}`)
             })
@@ -1074,28 +1196,28 @@ export class MicrosoftRewardsBot {
                 this.logger.warn('main', 'C2-CONTROL', 'Execution stopped/paused by user request.')
                 break
             }
-            this.resetAccountState()
+            let scope: AccountScope | null = null
             const accountStartTime = Date.now()
             const accountEmail = account.email
-            const scope = await AccountScope.create({
-                account,
-                bot: this,
-                runId: this.runId
-            })
-            this.accountScope = scope
-            this.userData.userName = this.utils.getEmailUsername(accountEmail)
-            this.activeAccount = account
-
-            this.updateDashboardAccount(accountEmail, {
-                email: accountEmail,
-                status: 'Stealth Delay',
-                initialPoints: 0,
-                collectedPoints: 0,
-                desktopProgress: '0/0',
-                mobileProgress: '0/0'
-            })
-
             try {
+                this.resetAccountState()
+                scope = await AccountScope.create({
+                    account,
+                    bot: this,
+                    runId: this.runId
+                })
+                this.accountScope = scope
+                this.userData.userName = this.utils.getEmailUsername(accountEmail)
+                this.activeAccount = account
+
+                this.updateDashboardAccount(accountEmail, {
+                    email: accountEmail,
+                    status: 'Stealth Delay',
+                    initialPoints: 0,
+                    collectedPoints: 0,
+                    desktopProgress: '0/0',
+                    mobileProgress: '0/0'
+                })
                 const randomStartDelay = Math.floor(Math.random() * (60000 - 10000 + 1)) + 10000
                 this.logger.info(
                     'main',
@@ -1223,14 +1345,23 @@ export class MicrosoftRewardsBot {
                     error: errMsg
                 })
             } finally {
-                if (scope) {
-                    await scope.dispose().catch(() => {})
+                try {
+                    if (scope) {
+                        await AccountDisposer.dispose(scope).catch(err => {
+                            this.logger.error(
+                                'main',
+                                'ACCOUNT-DISPOSE',
+                                `Disposal failed for ${redactAccountKey(accountEmail)}: ${err instanceof Error ? err.message : String(err)}`
+                            )
+                        })
+                    }
+                } finally {
                     if (this.accountScope === scope) {
                         this.accountScope = null
+                        this.resetAccountState()
                     }
+                    DataSaverManager.getInstance().resetAccountQuota(accountEmail)
                 }
-                DataSaverManager.getInstance().resetAccountQuota(accountEmail)
-                this.resetAccountState()
 
                 if (this.pendingOperatorRecovery) {
                     const pending = this.pendingOperatorRecovery
@@ -1739,17 +1870,13 @@ async function main(): Promise<void> {
         void flushAllWebhooks()
     })
     process.on('SIGINT', async () => {
-        rewardsBot.logger.warn('main', 'PROCESS', 'SIGINT received, flushing and exiting...')
-        rewardsBot.teardownCliOperatorListener()
-        rewardsBot.cancelActiveRecovery()
-        await flushAllWebhooks()
+        rewardsBot.logger.warn('main', 'PROCESS', 'SIGINT received, executing graceful shutdown...')
+        await rewardsBot.requestShutdown('SIGINT', 10000).catch(() => {})
         process.exit(130)
     })
     process.on('SIGTERM', async () => {
-        rewardsBot.logger.warn('main', 'PROCESS', 'SIGTERM received, flushing and exiting...')
-        rewardsBot.teardownCliOperatorListener()
-        rewardsBot.cancelActiveRecovery()
-        await flushAllWebhooks()
+        rewardsBot.logger.warn('main', 'PROCESS', 'SIGTERM received, executing graceful shutdown...')
+        await rewardsBot.requestShutdown('SIGTERM', 10000).catch(() => {})
         process.exit(143)
     })
     process.on('uncaughtException', async error => {
@@ -1774,9 +1901,11 @@ async function main(): Promise<void> {
     }
 }
 
-main().catch(async error => {
-    const tmpBot = new MicrosoftRewardsBot()
-    tmpBot.logger.error('main', 'MAIN-ERROR', error as Error)
-    await flushAllWebhooks()
-    process.exit(1)
-})
+if (require.main === module) {
+    main().catch(async error => {
+        const tmpBot = new MicrosoftRewardsBot()
+        tmpBot.logger.error('main', 'MAIN-ERROR', error as Error)
+        await flushAllWebhooks()
+        process.exit(1)
+    })
+}

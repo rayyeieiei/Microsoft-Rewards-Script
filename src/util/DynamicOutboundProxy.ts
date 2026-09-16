@@ -1,6 +1,7 @@
 import http from 'http'
 import net from 'net'
 import os from 'os'
+import stream from 'stream'
 import { URL } from 'url'
 import type { Logger } from '../logging/Logger'
 
@@ -8,6 +9,9 @@ export class DynamicOutboundProxy {
     private server: http.Server | null = null
     private currentWifiIp = ''
     private logger: Logger
+    private sockets = new Set<net.Socket | stream.Duplex>()
+    private stopPromise: Promise<void> | null = null
+    private isStopping = false
 
     constructor(private port: number = 0, logger: Logger) {
         this.logger = logger
@@ -131,8 +135,25 @@ export class DynamicOutboundProxy {
                 }
             })
 
+            // Track incoming client connections
+            this.server.on('connection', (socket: net.Socket) => {
+                if (this.isStopping) {
+                    socket.destroy()
+                    return
+                }
+                this.sockets.add(socket)
+                socket.once('close', () => this.sockets.delete(socket))
+            })
+
             // CONNECT tunnel untuk HTTPS
             this.server.on('connect', async (req, clientSocket, head) => {
+                if (this.isStopping) {
+                    clientSocket.destroy()
+                    return
+                }
+                this.sockets.add(clientSocket)
+                clientSocket.once('close', () => this.sockets.delete(clientSocket))
+
                 const wifiIp = await this.ensureWifiConnected()
                 this.logger.debug('main', 'LOCAL-PROXY-CONNECT', `Establishing HTTPS tunnel to ${req.url || ''} via IP: [ ${wifiIp} ]`)
 
@@ -159,6 +180,9 @@ export class DynamicOutboundProxy {
                     clientSocket.pipe(serverSocket)
                     serverSocket.pipe(clientSocket)
                 })
+
+                this.sockets.add(serverSocket)
+                serverSocket.once('close', () => this.sockets.delete(serverSocket))
 
                 serverSocket.on('error', (err) => {
                     this.logger.debug('main', 'LOCAL-PROXY-CONNECT-ERROR', `Tunnel connection to ${host}:${port} failed: ${err.message}`)
@@ -194,13 +218,58 @@ export class DynamicOutboundProxy {
         return this.currentWifiIp
     }
 
-    public stop(): Promise<void> {
-        return new Promise((resolve) => {
-            if (this.server) {
-                this.server.close(() => resolve())
-            } else {
+    public getTrackedSocketCount(): number {
+        return this.sockets.size
+    }
+
+    public getIsStopping(): boolean {
+        return this.isStopping
+    }
+
+    public stop(timeoutMs: number = 3000): Promise<void> {
+        if (this.stopPromise) {
+            return this.stopPromise
+        }
+        this.isStopping = true
+
+        this.stopPromise = new Promise<void>((resolve) => {
+            let completed = false
+            const finish = () => {
+                if (completed) return
+                completed = true
+                this.server = null
                 resolve()
             }
+
+            const timer = setTimeout(() => {
+                for (const socket of this.sockets) {
+                    try {
+                        socket.destroy()
+                    } catch {}
+                }
+                this.sockets.clear()
+                finish()
+            }, timeoutMs)
+
+            // Destroy all currently tracked sockets immediately
+            for (const socket of this.sockets) {
+                try {
+                    socket.destroy()
+                } catch {}
+            }
+            this.sockets.clear()
+
+            if (this.server) {
+                this.server.close(() => {
+                    clearTimeout(timer)
+                    finish()
+                })
+            } else {
+                clearTimeout(timer)
+                finish()
+            }
         })
+
+        return this.stopPromise
     }
 }

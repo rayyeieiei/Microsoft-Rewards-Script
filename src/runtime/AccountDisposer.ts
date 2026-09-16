@@ -6,27 +6,36 @@ import { ResolvedActionSecret } from '../functions/UrlRewardActionResolver'
 const CONTEXT_CLOSE_TIMEOUT_MS = 4000
 const STORAGE_SAVE_TIMEOUT_MS = 2000
 
+export interface CleanupStepResult {
+    step: string
+    status: 'ok' | 'failed' | 'timed-out'
+    error?: string
+    durationMs: number
+}
+
 export class AccountDisposer {
     /**
      * Executes the strict 10-step disposal sequence for an AccountScope.
      * Guarantees zero residual state, clean context/page teardown,
      * bounded timeout recovery, and memory wipe.
+     * Uses scope.beginDisposal() for atomic, race-safe execution.
      */
-    public static async dispose(scope: AccountScope): Promise<void> {
-        // Step 10 & Idempotency: Subsequent calls return immediately
+    public static dispose(scope: AccountScope): Promise<void> {
         if (scope.isDisposed) {
-            return
+            return Promise.resolve()
         }
+        return scope.beginDisposal(() => AccountDisposer.disposeOnce(scope))
+    }
 
-        // 1. Trigger cooperative cancellation
+    private static async disposeOnce(scope: AccountScope): Promise<void> {
+        // 1. Cooperative pause and wait for active in-flight operations
         try {
-            scope.abortController.abort()
+            await scope.waitForActiveOperations(1500)
         } catch {}
 
-        // 2. Cooperative cancellation pause to allow in-flight loops to inspect signal
         await new Promise(resolve => setTimeout(resolve, 20))
 
-        // 3. Detach exact route handlers and response listeners BEFORE closing context
+        // 2. Detach exact route handlers and response listeners BEFORE closing context
         const routeHandlers = scope.getRouteHandlers()
         for (const rh of routeHandlers) {
             try {
@@ -50,10 +59,10 @@ export class AccountDisposer {
         }
         scope.clearRouteHandlersAndListeners()
 
-        // 4. Dispose ghost cursor references
+        // 3. Dispose ghost cursor references
         scope.clearCursors()
 
-        // 5. Persist storageState bounded/atomic if contexts are open and valid
+        // 4. Persist storageState bounded/atomic if contexts are open and valid
         const storagePaths = scope.storagePaths
         if (storagePaths) {
             const mobileCtx = scope.getContext('mobile')
@@ -74,7 +83,7 @@ export class AccountDisposer {
             }
         }
 
-        // 6. Close pages and contexts with bounded timeout (e.g. 4000ms)
+        // 5. Close pages with bounded timeout (e.g. 1000ms per page)
         const trackedPages = scope.getTrackedPages()
         for (const p of trackedPages) {
             try {
@@ -91,6 +100,7 @@ export class AccountDisposer {
         }
         scope.clearTrackedPages()
 
+        // 6. Close contexts with bounded timeout (CONTEXT_CLOSE_TIMEOUT_MS)
         const contextsToClose = [scope.getContext('mobile'), scope.getContext('desktop')].filter(Boolean)
         let timeoutOccurred = false
 
@@ -132,14 +142,8 @@ export class AccountDisposer {
             }
         }
 
-        // 8. Clear DAPI token, bot account state, secrets, and tracked timers
+        // 8. Clear DAPI token, secrets, and tracked timers
         scope.clearDapiToken()
-
-        if (scope.bot) {
-            try {
-                scope.bot.resetAccountState()
-            } catch {}
-        }
 
         // Wipe secrets to prevent memory retention
         const secrets = scope.getSecrets()
