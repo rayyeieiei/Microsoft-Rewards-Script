@@ -5,6 +5,7 @@ import path from 'path'
 import type { Account, ConfigSaveFingerprint } from '../interface/Account'
 import type { Config } from '../interface/Config'
 import { validateAccounts, validateConfig } from './Validator'
+import { SessionPathResolver } from '../runtime/session/SessionPathResolver'
 
 
 let configCache: Config
@@ -53,15 +54,14 @@ export function loadConfig(forceReload = false): Config {
 
 export async function loadSessionData(sessionPath: string, email: string, saveFingerprint: ConfigSaveFingerprint, isMobile: boolean) {
     try {
-        const cookiesFileName = isMobile ? 'session_mobile.json' : 'session_desktop.json'
-        // 🔥 FIX: Simpan folder browser di root biar aman dari npm run build
-        const cookieFile = path.join(process.cwd(), 'browser', sessionPath, email, cookiesFileName)
+        const baseDir = SessionPathResolver.resolveBaseDir(sessionPath)
+        const cookieFile = SessionPathResolver.getLegacyPath(baseDir, email, isMobile ? 'mobile' : 'desktop')
         let cookies: Cookie[] = []
         if (fs.existsSync(cookieFile)) {
             cookies = JSON.parse(await fs.promises.readFile(cookieFile, 'utf-8'))
         }
         const fingerprintFileName = isMobile ? 'session_fingerprint_mobile.json' : 'session_fingerprint_desktop.json'
-        const fingerprintFile = path.join(process.cwd(), 'browser', sessionPath, email, fingerprintFileName)
+        const fingerprintFile = path.join(path.dirname(cookieFile), fingerprintFileName)
         let fingerprint: any = null
         const shouldLoadFingerprint = isMobile ? saveFingerprint.mobile : saveFingerprint.desktop
         if (shouldLoadFingerprint && fs.existsSync(fingerprintFile)) {
@@ -73,11 +73,11 @@ export async function loadSessionData(sessionPath: string, email: string, saveFi
 
 export async function saveSessionData(sessionPath: string, cookies: Cookie[], email: string, isMobile: boolean): Promise<string> {
     try {
-        // 🔥 FIX: Amanin folder penyimpanan session
-        const sessionDir = path.join(process.cwd(), 'browser', sessionPath, email)
-        const cookiesFileName = isMobile ? 'session_mobile.json' : 'session_desktop.json'
+        const baseDir = SessionPathResolver.resolveBaseDir(sessionPath)
+        const targetPath = SessionPathResolver.getLegacyPath(baseDir, email, isMobile ? 'mobile' : 'desktop')
+        const sessionDir = path.dirname(targetPath)
         if (!fs.existsSync(sessionDir)) await fs.promises.mkdir(sessionDir, { recursive: true })
-        await fs.promises.writeFile(path.join(sessionDir, cookiesFileName), JSON.stringify(cookies))
+        await fs.promises.writeFile(targetPath, JSON.stringify(cookies, null, 2), 'utf-8')
         return sessionDir
     } catch (error) { throw new Error(error as string) }
 }

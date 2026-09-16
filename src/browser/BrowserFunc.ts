@@ -3,6 +3,7 @@ import type { AxiosRequestConfig } from 'axios'
 
 import type { MicrosoftRewardsBot } from '../index'
 import { saveSessionData } from '../util/Load'
+import { AccountSessionStore } from '../runtime/session/AccountSessionStore'
 
 import type { Counters, DashboardData } from './../interface/DashboardData'
 import type { AppUserData } from '../interface/AppUserData'
@@ -565,12 +566,23 @@ export default class BrowserFunc {
         const rootBrowser = (browser as any).browser?.() || null
 
         try {
-            // Try to save cookies
-            const cookies = await browser.cookies()
-            this.bot.logger.debug(this.bot.isMobile, 'CLOSE-BROWSER', `Saving ${cookies.length} cookies.`)
-            await saveSessionData(this.bot.config.sessionPath, cookies, email, this.bot.isMobile)
-
-            await this.bot.utils.wait(2000)
+            if (this.bot.accountScope) {
+                const saveResult = await AccountSessionStore.saveContextSession(
+                    browser,
+                    this.bot.accountScope,
+                    this.bot.isMobile ? 'mobile' : 'desktop'
+                )
+                this.bot.logger.debug(
+                    this.bot.isMobile,
+                    'CLOSE-BROWSER',
+                    `Unified session persistence completed (${saveResult.status})`
+                )
+            } else {
+                // Fallback for legacy standalone invocation without scope
+                const cookies = await browser.cookies()
+                this.bot.logger.debug(this.bot.isMobile, 'CLOSE-BROWSER', `Saving ${cookies.length} cookies.`)
+                await saveSessionData(this.bot.config.sessionPath, cookies, email, this.bot.isMobile)
+            }
         } catch (error) {
             this.bot.logger.error(this.bot.isMobile, 'CLOSE-BROWSER', `Failed to save session: ${error}`)
         } finally {

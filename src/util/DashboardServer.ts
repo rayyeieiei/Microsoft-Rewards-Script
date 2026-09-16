@@ -1300,6 +1300,10 @@ export class DashboardServer {
             })
 
             this.server.listen(this.port, '127.0.0.1', () => {
+                const addr = this.server?.address()
+                if (typeof addr === 'object' && addr && addr.port) {
+                    this.port = addr.port
+                }
                 resolve()
             })
         })

@@ -1,6 +1,7 @@
 import type { Page } from 'patchright'
 import type { MicrosoftRewardsBot } from '../../index'
 import { saveSessionData, setRateLimitCooldown, getRateLimitCooldown } from '../../util/Load'
+import { AccountSessionStore } from '../../runtime/session/AccountSessionStore'
 
 import { MobileAccessLogin } from './methods/MobileAccessLogin'
 import { EmailLogin } from './methods/EmailLogin'
@@ -420,9 +421,26 @@ export class Login {
         await page.goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {})
         await this.verifyBingSession(page)
         await this.getRewardsSession(page)
-        const cookies = await page.context().cookies()
-        await saveSessionData(this.bot.config.sessionPath, cookies, email, this.bot.isMobile)
-        this.bot.logger.info(this.bot.isMobile, 'LOGIN', 'Login completed, session saved')
+        try {
+            if (this.bot.accountScope) {
+                const saveResult = await AccountSessionStore.saveContextSession(
+                    page.context(),
+                    this.bot.accountScope,
+                    this.bot.isMobile ? 'mobile' : 'desktop'
+                )
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'LOGIN',
+                    `Login completed, unified session persistence (${saveResult.status})`
+                )
+            } else {
+                const cookies = await page.context().cookies()
+                await saveSessionData(this.bot.config.sessionPath, cookies, email, this.bot.isMobile)
+                this.bot.logger.info(this.bot.isMobile, 'LOGIN', 'Login completed, session saved')
+            }
+        } catch (error) {
+            this.bot.logger.error(this.bot.isMobile, 'LOGIN', `Failed to save session: ${error}`)
+        }
     }
 
     async verifyBingSession(page: Page) {

@@ -329,9 +329,9 @@ export async function runNetworkRecoveryDiagnosticsTests(): Promise<void> {
             operatorCalls++
         })
 
-        const port = 49152 + Math.floor(Math.random() * 1000)
-        const server = new DashboardServer(port)
+        const server = new DashboardServer(0)
         await server.start()
+        const port = server.getPort()
 
         try {
             const ticket = await new Promise<any>((resolve, reject) => {
@@ -416,9 +416,9 @@ export async function runNetworkRecoveryDiagnosticsTests(): Promise<void> {
             operatorCalls++
         })
 
-        const port = 49152 + Math.floor(Math.random() * 1000)
-        const server = new DashboardServer(port)
+        const server = new DashboardServer(0)
         await server.start()
+        const port = server.getPort()
 
         try {
             const ticket = await new Promise<any>((resolve, reject) => {
@@ -481,9 +481,9 @@ export async function runNetworkRecoveryDiagnosticsTests(): Promise<void> {
     // Test 14: Invalid CSRF is rejected
     {
         resetOperatorRecoveryStateForTest()
-        const port = 49152 + Math.floor(Math.random() * 1000)
-        const server = new DashboardServer(port)
+        const server = new DashboardServer(0)
         await server.start()
+        const port = server.getPort()
 
         try {
             const ticket = await new Promise<any>((resolve, reject) => {
@@ -536,9 +536,9 @@ export async function runNetworkRecoveryDiagnosticsTests(): Promise<void> {
     // Test 15: Oversized or timed-out request body is rejected
     {
         resetOperatorRecoveryStateForTest()
-        const port = 49152 + Math.floor(Math.random() * 1000)
-        const server = new DashboardServer(port)
+        const server = new DashboardServer(0)
         await server.start()
+        const port = server.getPort()
 
         try {
             // Send >64KB body (70000 bytes)

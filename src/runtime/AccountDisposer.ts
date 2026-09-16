@@ -1,7 +1,6 @@
-import fs from 'fs'
-import path from 'path'
 import type { AccountScope } from './AccountScope'
 import { ResolvedActionSecret } from '../functions/UrlRewardActionResolver'
+import { AccountSessionStore } from './session/AccountSessionStore'
 
 const CONTEXT_CLOSE_TIMEOUT_MS = 4000
 const STORAGE_SAVE_TIMEOUT_MS = 2000
@@ -63,24 +62,27 @@ export class AccountDisposer {
         scope.clearCursors()
 
         // 4. Persist storageState bounded/atomic if contexts are open and valid
-        const storagePaths = scope.storagePaths
-        if (storagePaths) {
+        try {
             const mobileCtx = scope.getContext('mobile')
             if (mobileCtx) {
-                await AccountDisposer.saveStorageStateSafely(
+                await AccountSessionStore.saveContextSession(
                     mobileCtx,
-                    storagePaths.mobilePath,
+                    scope,
+                    'mobile',
                     STORAGE_SAVE_TIMEOUT_MS
                 )
             }
             const desktopCtx = scope.getContext('desktop')
             if (desktopCtx) {
-                await AccountDisposer.saveStorageStateSafely(
+                await AccountSessionStore.saveContextSession(
                     desktopCtx,
-                    storagePaths.desktopPath,
+                    scope,
+                    'desktop',
                     STORAGE_SAVE_TIMEOUT_MS
                 )
             }
+        } catch {
+            // Best-effort session persistence during teardown
         }
 
         // 5. Close pages with bounded timeout (e.g. 1000ms per page)
@@ -166,32 +168,5 @@ export class AccountDisposer {
 
         // 9. Mark disposed
         scope.markDisposed()
-    }
-
-    private static async saveStorageStateSafely(
-        context: any,
-        targetPath: string,
-        timeoutMs: number
-    ): Promise<void> {
-        if (!context || typeof context.storageState !== 'function') return
-        try {
-            const state = await Promise.race([
-                context.storageState(),
-                new Promise<null>((_, reject) =>
-                    setTimeout(() => reject(new Error('storageState timeout')), timeoutMs)
-                )
-            ])
-            if (state) {
-                const dir = path.dirname(targetPath)
-                if (!fs.existsSync(dir)) {
-                    await fs.promises.mkdir(dir, { recursive: true })
-                }
-                const tmpPath = `${targetPath}.tmp.${Date.now()}`
-                await fs.promises.writeFile(tmpPath, JSON.stringify(state, null, 2), 'utf-8')
-                await fs.promises.rename(tmpPath, targetPath)
-            }
-        } catch {
-            // Context already closed or timed out; safe to skip
-        }
     }
 }

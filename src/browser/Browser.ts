@@ -2,6 +2,7 @@ import rebrowser, { BrowserContext } from 'patchright'
 import type { MicrosoftRewardsBot } from '../index'
 import { loadSessionData } from '../util/Load'
 import { BrowserEnvironmentPolicy } from '../runtime/environment/BrowserEnvironmentPolicy'
+import { AccountSessionStore } from '../runtime/session/AccountSessionStore'
 import type { Account, AccountProxy } from '../interface/Account'
 
 export interface BrowserCreationResult {
@@ -108,16 +109,81 @@ class Browser {
         }
 
         try {
-            const sessionData = await loadSessionData(
-                this.bot.config.sessionPath,
-                account.email,
-                account.saveFingerprint,
-                this.bot.isMobile
-            )
+            const scope = this.bot.accountScope
+            let storageStateForContext: any = undefined
+            let cleanCookies: any[] = []
+
+            if (scope) {
+                const sessionResult = await AccountSessionStore.loadSession(
+                    scope,
+                    this.bot.isMobile ? 'mobile' : 'desktop',
+                    { legacyEmail: account.email }
+                )
+
+                if (sessionResult.status === 'loaded') {
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'BROWSER',
+                        `Session loaded from ${sessionResult.source}`
+                    )
+                    cleanCookies = (sessionResult.state.cookies || []).filter(c => {
+                        const name = (c.name || '').toLowerCase()
+                        const val = c.value || ''
+                        if (name === 'ak_bmsc' || name === 'bm_sv' || name === 'ai_session') return false
+                        if (name === 'usrloc' && val.includes('BLOCK=')) return false
+                        if (name === '_rwbf' && (val.includes('c=MY') || val.includes('c=US'))) return false
+                        return true
+                    })
+                    storageStateForContext = {
+                        cookies: cleanCookies,
+                        origins: sessionResult.state.origins || []
+                    }
+                } else if (sessionResult.status === 'corrupted') {
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'BROWSER',
+                        `Account session is corrupted (${sessionResult.reason}). Starting clean context.`
+                    )
+                } else if (sessionResult.status === 'identity-mismatch') {
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'BROWSER',
+                        `Session identity mismatch (expected: ${sessionResult.expectedAccountId}, actual: ${sessionResult.actualAccountId}). Starting clean context.`
+                    )
+                } else if (sessionResult.status === 'unsupported-version') {
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'BROWSER',
+                        `Unsupported session schema version ${sessionResult.schemaVersion}. Starting clean context.`
+                    )
+                }
+            } else {
+                const sessionData = await loadSessionData(
+                    this.bot.config.sessionPath,
+                    account.email,
+                    account.saveFingerprint,
+                    this.bot.isMobile
+                )
+                cleanCookies = (sessionData.cookies || []).filter(c => {
+                    const name = (c.name || '').toLowerCase()
+                    const val = c.value || ''
+                    if (name === 'ak_bmsc' || name === 'bm_sv' || name === 'ai_session') return false
+                    if (name === 'usrloc' && val.includes('BLOCK=')) return false
+                    if (name === '_rwbf' && (val.includes('c=MY') || val.includes('c=US'))) return false
+                    return true
+                })
+                storageStateForContext = {
+                    cookies: cleanCookies,
+                    origins: []
+                }
+            }
 
             // Resolve clean environment profile & context options (strict TLS, zero synthetic spoofing)
             const profile = BrowserEnvironmentPolicy.resolveProfile(this.bot.isMobile ? 'mobile' : 'desktop')
             const contextOptions = BrowserEnvironmentPolicy.toContextOptions(profile)
+            if (storageStateForContext) {
+                contextOptions.storageState = storageStateForContext
+            }
 
             const context = await browser.newContext(contextOptions)
 
@@ -131,18 +197,6 @@ class Browser {
             })
 
             context.setDefaultTimeout(this.bot.utils.stringToNumber(this.bot.config?.globalTimeout ?? 30000))
-
-            // Filter cookie usang / corrupted yang memicu Geo-Mismatch Lock atau Blokir Telemetri
-            const cleanCookies = (sessionData.cookies || []).filter(c => {
-                const name = (c.name || '').toLowerCase()
-                const val = c.value || ''
-                if (name === 'ak_bmsc' || name === 'bm_sv' || name === 'ai_session') return false
-                if (name === 'usrloc' && val.includes('BLOCK=')) return false
-                if (name === '_rwbf' && (val.includes('c=MY') || val.includes('c=US'))) return false
-                return true
-            })
-
-            await context.addCookies(cleanCookies)
 
             // ==================== ULTRA DATA SAVER (HEMAT KUOTA 80%-90%) ====================
             const routeHandler = (route: any) => {
@@ -217,6 +271,7 @@ class Browser {
             if (this.bot.accountScope) {
                 this.bot.accountScope.registerRouteHandler(context, '**/*', routeHandler)
                 this.bot.accountScope.registerResponseListener(context, responseListener)
+                this.bot.accountScope.setContext(this.bot.isMobile ? 'mobile' : 'desktop', context)
             }
 
             const screen = profile.screen

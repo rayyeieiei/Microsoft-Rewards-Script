@@ -221,12 +221,13 @@ export class ManualQuestQueue {
 
     private atomicWriteStore(store: ManualQuestStore): Promise<void> {
         return new Promise((resolve, reject) => {
+            let tmpPath: string | null = null
             try {
                 const dir = path.dirname(this.storagePath)
                 if (!fs.existsSync(dir)) {
                     fs.mkdirSync(dir, { recursive: true })
                 }
-                const tmpPath = path.join(dir, `.manual_quests_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.tmp`)
+                tmpPath = path.join(dir, `.manual_quests_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.tmp`)
                 fs.writeFileSync(tmpPath, JSON.stringify(store, null, 2), 'utf-8')
 
                 // Directory fsync where supported
@@ -240,6 +241,11 @@ export class ManualQuestQueue {
                 fs.renameSync(tmpPath, this.storagePath)
                 resolve()
             } catch (err) {
+                if (tmpPath && fs.existsSync(tmpPath)) {
+                    try {
+                        fs.unlinkSync(tmpPath)
+                    } catch {}
+                }
                 reject(err)
             }
         })

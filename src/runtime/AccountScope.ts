@@ -120,7 +120,8 @@ export class AccountScope {
         accountKey: string,
         runId?: string,
         customScopeId?: string,
-        customOwnership?: Partial<AccountOwnershipIdentity>
+        customOwnership?: Partial<AccountOwnershipIdentity>,
+        customSessionDir?: string
     ): AccountScope {
         const resolvedRunId = runId || `run_test_${Date.now()}`
         const scopeId =
@@ -133,7 +134,7 @@ export class AccountScope {
             .digest('hex')
             .slice(0, 32)
 
-        const sessionDir = path.join(process.cwd(), 'browser', 'sessions')
+        const sessionDir = customSessionDir || path.join(process.cwd(), 'browser', 'sessions')
         const storagePaths: StorageStatePaths = {
             storageKey,
             sessionDir,
