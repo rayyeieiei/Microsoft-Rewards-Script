@@ -126,6 +126,22 @@ export function registerNetworkRecoveryResolver(resolver: NetworkRecoveryResolve
     networkRecoveryResolver = resolver
 }
 
+export type OperatorRecoveryHandler = (requestId: string) => Promise<void>
+let operatorRecoveryHandler: OperatorRecoveryHandler | null = null
+
+export function registerOperatorRecoveryHandler(handler: OperatorRecoveryHandler) {
+    operatorRecoveryHandler = handler
+}
+
+export const seenOperatorRecoveryRequestIds = new Set<string>()
+export let isOperatorRecoveryInProgress = false
+
+export function resetOperatorRecoveryStateForTest() {
+    seenOperatorRecoveryRequestIds.clear()
+    isOperatorRecoveryInProgress = false
+    operatorRecoveryHandler = null
+}
+
 export type ManualQuestProvider = () => Record<string, any[]>
 let manualQuestProvider: ManualQuestProvider | null = null
 
@@ -876,25 +892,60 @@ export class DashboardServer {
 
     constructor(private port: number = 4000) {}
 
-    private parseJsonBody(req: http.IncomingMessage): Promise<any> {
+    private parseJsonBody(req: http.IncomingMessage, maxBytes = 65536): Promise<any> {
         return new Promise(resolve => {
             let body = ''
+            let bytes = 0
+            let exceeded = false
             req.on('data', chunk => {
+                bytes += chunk.length
+                if (bytes > maxBytes) {
+                    exceeded = true
+                    req.destroy()
+                    resolve({})
+                    return
+                }
                 body += chunk.toString()
             })
             req.on('end', () => {
+                if (exceeded) return
                 try {
                     resolve(JSON.parse(body))
                 } catch {
                     resolve({})
                 }
             })
+            req.on('error', () => resolve({}))
         })
     }
 
     public start(): Promise<void> {
         return new Promise((resolve, reject) => {
             this.server = http.createServer(async (req, res) => {
+                const host = req.headers.host || ''
+                const hostPattern = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i
+                if (!hostPattern.test(host)) {
+                    res.writeHead(403, { 'Content-Type': 'text/plain' })
+                    res.end('Forbidden: Invalid Host')
+                    return
+                }
+
+                const origin = req.headers.origin
+                if (origin) {
+                    try {
+                        const originUrl = new URL(origin)
+                        if (!hostPattern.test(originUrl.host)) {
+                            res.writeHead(403, { 'Content-Type': 'text/plain' })
+                            res.end('Forbidden: Invalid Origin')
+                            return
+                        }
+                    } catch {
+                        res.writeHead(403, { 'Content-Type': 'text/plain' })
+                        res.end('Forbidden: Malformed Origin')
+                        return
+                    }
+                }
+
                 const url = req.url || '/'
                 const method = req.method || 'GET'
 
@@ -963,6 +1014,49 @@ export class DashboardServer {
                 } else if (method === 'POST') {
                     if (url === '/api/control') {
                         const body = await this.parseJsonBody(req)
+
+                        if (body && body.action === 'request-network-recovery') {
+                            const requestId = typeof body.requestId === 'string' ? body.requestId.trim() : ''
+                            if (!requestId) {
+                                res.writeHead(400, { 'Content-Type': 'application/json' })
+                                res.end(JSON.stringify({ success: false, accepted: false, reason: 'missing-requestId' }))
+                                return
+                            }
+
+                            if (seenOperatorRecoveryRequestIds.has(requestId)) {
+                                res.writeHead(200, { 'Content-Type': 'application/json' })
+                                res.end(JSON.stringify({ success: true, accepted: false, reason: 'duplicate-requestId' }))
+                                return
+                            }
+
+                            if (isOperatorRecoveryInProgress) {
+                                res.writeHead(200, { 'Content-Type': 'application/json' })
+                                res.end(JSON.stringify({ success: true, accepted: false, reason: 'already-in-progress' }))
+                                return
+                            }
+
+                            if (!operatorRecoveryHandler) {
+                                res.writeHead(200, { 'Content-Type': 'application/json' })
+                                res.end(JSON.stringify({ success: true, accepted: false, reason: 'handler-unavailable' }))
+                                return
+                            }
+
+                            seenOperatorRecoveryRequestIds.add(requestId)
+                            isOperatorRecoveryInProgress = true
+
+                            res.writeHead(200, { 'Content-Type': 'application/json' })
+                            res.end(JSON.stringify({ success: true, accepted: true }))
+
+                            void (async () => {
+                                try {
+                                    await operatorRecoveryHandler!(requestId)
+                                } finally {
+                                    isOperatorRecoveryInProgress = false
+                                }
+                            })()
+                            return
+                        }
+
                         res.writeHead(200, { 'Content-Type': 'application/json' })
                         res.end(JSON.stringify({ success: true }))
 
@@ -1024,7 +1118,7 @@ export class DashboardServer {
                 reject(err)
             })
 
-            this.server.listen(this.port, '0.0.0.0', () => {
+            this.server.listen(this.port, '127.0.0.1', () => {
                 resolve()
             })
         })
