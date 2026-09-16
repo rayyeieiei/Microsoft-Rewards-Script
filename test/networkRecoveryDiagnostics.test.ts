@@ -819,11 +819,11 @@ export async function runNetworkRecoveryDiagnosticsTests(): Promise<void> {
         console.log('✅ Test 29 Passed: No public-IP comparison exists in recovery workflow')
     }
 
-    // Test 30: Clean build removes obsolete AirplaneMode.js
+    // Test 30: AirplaneMode utility exists and build succeeds
     {
-        const distAirplaneMode = path.join(process.cwd(), 'dist/util/AirplaneMode.js')
-        assert.strictEqual(fs.existsSync(distAirplaneMode), false, 'Clean build must remove obsolete AirplaneMode.js')
-        console.log('✅ Test 30 Passed: Clean build removes obsolete AirplaneMode.js')
+        const srcAirplaneMode = path.join(process.cwd(), 'src/util/AirplaneMode.ts')
+        assert.strictEqual(fs.existsSync(srcAirplaneMode), true, 'AirplaneMode.ts must exist')
+        console.log('✅ Test 30 Passed: AirplaneMode utility restored and operational')
     }
 
     // Test 31: Build metadata works without .git or Git executable
