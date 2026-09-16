@@ -30,7 +30,10 @@ export class AirplaneMode {
 
             console.log('\n✈️  [ADB-NETWORK] Menyalakan Airplane Mode (Membunuh sinyal data)...');
             try {
-                await execAsync('adb shell cmd connectivity airplane-mode enable');
+                const out: any = await execAsync('adb shell cmd connectivity airplane-mode enable');
+                if (typeof out?.stdout === 'string' && out.stdout.includes('No shell command implementation')) {
+                    throw new Error(out.stdout.trim());
+                }
             } catch {
                 await execAsync('adb shell settings put global airplane_mode_on 1').catch(() => {});
                 await execAsync('adb shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state true').catch(() => {});
@@ -41,7 +44,10 @@ export class AirplaneMode {
 
             console.log('📶  [ADB-NETWORK] Mematikan Airplane Mode (Mencari sinyal 4G/5G baru)...');
             try {
-                await execAsync('adb shell cmd connectivity airplane-mode disable');
+                const out: any = await execAsync('adb shell cmd connectivity airplane-mode disable');
+                if (typeof out?.stdout === 'string' && out.stdout.includes('No shell command implementation')) {
+                    throw new Error(out.stdout.trim());
+                }
             } catch {
                 await execAsync('adb shell settings put global airplane_mode_on 0').catch(() => {});
                 await execAsync('adb shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state false').catch(() => {});

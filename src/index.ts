@@ -1317,7 +1317,10 @@ export class MicrosoftRewardsBot {
                             const execSync = require('child_process').execSync
                             this.logger.info('main', 'IP-INTERCEPTOR', 'ADB -> Mengaktifkan Mode Pesawat...')
                             try {
-                                execSync('adb shell cmd connectivity airplane-mode enable')
+                                const out = execSync('adb shell cmd connectivity airplane-mode enable', { encoding: 'utf-8' })
+                                if (out && out.includes('No shell command implementation')) {
+                                    throw new Error(out.trim())
+                                }
                             } catch {
                                 execSync('adb shell settings put global airplane_mode_on 1')
                                 execSync('adb shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state true')
@@ -1330,7 +1333,10 @@ export class MicrosoftRewardsBot {
                                 'ADB -> Mematikan Mode Pesawat (Mencari Sinyal Baru)...'
                             )
                             try {
-                                execSync('adb shell cmd connectivity airplane-mode disable')
+                                const out = execSync('adb shell cmd connectivity airplane-mode disable', { encoding: 'utf-8' })
+                                if (out && out.includes('No shell command implementation')) {
+                                    throw new Error(out.trim())
+                                }
                             } catch {
                                 execSync('adb shell settings put global airplane_mode_on 0')
                                 execSync('adb shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state false')
