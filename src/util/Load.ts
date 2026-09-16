@@ -45,9 +45,9 @@ export function loadConfig(forceReload = false): Config {
         // 🔥 FIX: Selalu baca dari folder root project
         const configDir = path.join(process.cwd(), 'config.json')
         const configData = JSON.parse(fs.readFileSync(configDir, 'utf-8'))
-        validateConfig(configData)
-        configCache = configData
-        return configData
+        const validated = validateConfig(configData)
+        configCache = validated
+        return validated
     } catch (error) { throw new Error(error as string) }
 }
 

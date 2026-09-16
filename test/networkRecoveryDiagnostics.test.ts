@@ -22,6 +22,7 @@ import {
     formatBuildMetadataLog
 } from '../src/runtime/diagnostics/BuildMetadata'
 import { DataSaverManager } from '../src/util/DataSaver'
+import { NetworkRecoverySchema } from '../src/util/Validator'
 
 class FakeConnectivityProbe implements NetworkConnectivityProbe {
     public checkCount = 0
@@ -81,12 +82,17 @@ function createPolicy(overrides: Partial<NetworkRecoveryPolicy> = {}): NetworkRe
         enabled: true,
         mode: 'adb',
         trigger: 'connectivity-failure',
+        operatorTrigger: true,
+        connectivityFailureTrigger: true,
         maxAttempts: 2,
+        preflightTimeoutMs: 1000,
         commandTimeoutMs: 1000,
         disconnectTimeoutMs: 10,
         reconnectTimeoutMs: 10,
         verificationIntervalMs: 5,
         operatorTimeoutMs: 500,
+        operatorRequestTtlMs: 1800000,
+        recoveryCooldownMs: 120000,
         reassertUsbTethering: false,
         totalBudgetMs: 5000,
         ...overrides
@@ -129,7 +135,33 @@ export async function runNetworkRecoveryDiagnosticsTests(): Promise<void> {
             const logMsg = `enabled=false reason=${disabledReason}`
             assert.strictEqual(logMsg, r.expected)
         }
-        console.log('✅ Test 2 Passed: Disabled mode prints an explicit disabled reason')
+
+        // Phase 1: Verify NetworkRecoverySchema preserves config and enforces strict bounds
+        const validRecoveryConfig = {
+            enabled: true,
+            mode: 'adb',
+            operatorTrigger: true,
+            connectivityFailureTrigger: false,
+            maxAttempts: 1,
+            preflightTimeoutMs: 5000,
+            commandTimeoutMs: 8000,
+            disconnectTimeoutMs: 10000,
+            reconnectTimeoutMs: 30000,
+            verificationIntervalMs: 2000,
+            totalBudgetMs: 60000,
+            recoveryCooldownMs: 120000,
+            operatorRequestTtlMs: 1800000,
+            reassertUsbTethering: false
+        }
+        const parsedRecovery = NetworkRecoverySchema.parse(validRecoveryConfig)
+        assert.strictEqual(parsedRecovery.enabled, true)
+        assert.strictEqual(parsedRecovery.mode, 'adb')
+        assert.strictEqual(parsedRecovery.operatorRequestTtlMs, 1800000)
+        assert.strictEqual(parsedRecovery.reassertUsbTethering, false)
+        assert.throws(() => NetworkRecoverySchema.parse({ ...validRecoveryConfig, maxAttempts: 5 }))
+        assert.throws(() => NetworkRecoverySchema.parse({ ...validRecoveryConfig, operatorRequestTtlMs: 10000 }))
+
+        console.log('✅ Test 2 Passed: Disabled mode prints an explicit disabled reason and schema validates strictly')
     }
 
     // Test 3: ADB mode runs non-mutating preflight exactly once in primary

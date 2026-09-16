@@ -33,19 +33,27 @@ export type AirplaneModeKnowledge =
     | 'confirmed-enabled'
     | 'possibly-enabled'
 
-export interface NetworkRecoveryPolicy {
+export interface NetworkRecoveryConfig {
     enabled: boolean
     mode: NetworkRecoveryMode
-    trigger: NetworkRecoveryTrigger
+    operatorTrigger: boolean
+    connectivityFailureTrigger: boolean
     adbSerial?: string
     maxAttempts: number
+    preflightTimeoutMs: number
     commandTimeoutMs: number
     disconnectTimeoutMs: number
     reconnectTimeoutMs: number
     verificationIntervalMs: number
-    operatorTimeoutMs: number
-    reassertUsbTethering: boolean // default false
     totalBudgetMs: number
+    recoveryCooldownMs: number
+    operatorRequestTtlMs: number
+    reassertUsbTethering: boolean
+}
+
+export interface NetworkRecoveryPolicy extends NetworkRecoveryConfig {
+    trigger: NetworkRecoveryTrigger
+    operatorTimeoutMs?: number
 }
 
 export interface NetworkRecoveryResult {

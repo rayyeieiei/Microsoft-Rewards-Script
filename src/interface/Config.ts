@@ -1,5 +1,7 @@
 import { AppOnlyPolicy } from '../functions/activities/appOnly/AppOnlyTypes'
-import type { NetworkRecoveryPolicy } from '../runtime/network/NetworkRecoveryTypes'
+import type { NetworkRecoveryConfig, NetworkRecoveryPolicy } from '../runtime/network/NetworkRecoveryTypes'
+
+export type { NetworkRecoveryConfig, NetworkRecoveryPolicy }
 
 export type NumberOrString = number | string
 
@@ -47,7 +49,7 @@ export interface Config {
     punchCardExecution?: PunchCardExecutionConfig
     newAccountOnboarding?: NewAccountOnboardingConfig
     identityPolicy?: IdentityPolicyConfig
-    networkRecovery?: NetworkRecoveryPolicy
+    networkRecovery?: NetworkRecoveryConfig
     searchOnBingLocalQueries: boolean
     globalTimeout: number | string
     searchSettings: ConfigSearchSettings

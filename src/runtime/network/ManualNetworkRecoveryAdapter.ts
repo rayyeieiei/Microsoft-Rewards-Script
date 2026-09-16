@@ -95,7 +95,7 @@ export class ManualNetworkRecoveryAdapter implements NetworkRecoveryAdapter {
 
         const requestId = crypto.randomBytes(8).toString('hex')
         this.currentRequestId = requestId
-        const timeoutMs = this.policy.operatorTimeoutMs
+        const timeoutMs = this.policy.operatorTimeoutMs ?? this.policy.operatorRequestTtlMs ?? 120000
         const timeoutSec = Math.round(timeoutMs / 1000)
 
         const promptMsg =

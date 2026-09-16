@@ -77,18 +77,21 @@ export const IdentityPolicySchema = z
     .optional()
 
 export const NetworkRecoverySchema = z.object({
-    enabled: z.boolean(),
-    mode: z.enum(['disabled', 'manual', 'adb']),
-    trigger: z.enum(['connectivity-failure', 'operator-request']).default('connectivity-failure'),
+    enabled: z.boolean().default(false),
+    mode: z.enum(['disabled', 'manual', 'adb']).default('disabled'),
+    operatorTrigger: z.boolean().default(true),
+    connectivityFailureTrigger: z.boolean().default(false),
     adbSerial: z.string().optional(),
-    maxAttempts: z.number().int().positive().default(2),
-    commandTimeoutMs: z.number().int().positive().default(5000),
-    disconnectTimeoutMs: z.number().int().positive().default(5000),
-    reconnectTimeoutMs: z.number().int().positive().default(10000),
-    verificationIntervalMs: z.number().int().positive().default(3000),
-    operatorTimeoutMs: z.number().int().positive().default(120000),
-    reassertUsbTethering: z.boolean().default(false),
-    totalBudgetMs: z.number().int().positive().default(120000)
+    maxAttempts: z.number().int().min(1).max(3).default(1),
+    preflightTimeoutMs: z.number().int().min(1000).max(30000).default(5000),
+    commandTimeoutMs: z.number().int().min(1000).max(60000).default(8000),
+    disconnectTimeoutMs: z.number().int().min(1000).max(60000).default(10000),
+    reconnectTimeoutMs: z.number().int().min(1000).max(120000).default(30000),
+    verificationIntervalMs: z.number().int().min(500).max(10000).default(2000),
+    totalBudgetMs: z.number().int().min(5000).max(300000).default(60000),
+    recoveryCooldownMs: z.number().int().min(10000).max(600000).default(120000),
+    operatorRequestTtlMs: z.number().int().min(60000).max(3600000).default(1800000),
+    reassertUsbTethering: z.boolean().default(false)
 })
 
 // Config
