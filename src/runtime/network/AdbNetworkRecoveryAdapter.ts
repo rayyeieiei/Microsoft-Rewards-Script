@@ -128,10 +128,11 @@ export class AdbNetworkRecoveryAdapter implements NetworkRecoveryAdapter {
      */
     public async checkPreflightStatus(signal?: AbortSignal): Promise<AdbPreflightResult> {
         const serialConfigured = Boolean(this.policy.adbSerial && this.policy.adbSerial.trim().length > 0)
+        const timeoutMs = this.policy.preflightTimeoutMs || this.policy.commandTimeoutMs
         let versionOut: { stdout: string; stderr: string }
         try {
             versionOut = await this.runner(this.adbBinary, ['version'], {
-                timeout: this.policy.commandTimeoutMs,
+                timeout: timeoutMs,
                 maxBuffer: 64 * 1024,
                 signal
             })
@@ -157,7 +158,7 @@ export class AdbNetworkRecoveryAdapter implements NetworkRecoveryAdapter {
         let devicesOut: { stdout: string; stderr: string }
         try {
             devicesOut = await this.runner(this.adbBinary, ['devices', '-l'], {
-                timeout: this.policy.commandTimeoutMs,
+                timeout: timeoutMs,
                 maxBuffer: 64 * 1024,
                 signal
             })
@@ -289,7 +290,7 @@ export class AdbNetworkRecoveryAdapter implements NetworkRecoveryAdapter {
         // Acquire exclusive device lock
         const locked = this.lockManager.acquire(this.resolvedSerial)
         if (!locked) {
-            throw new Error(`Device locked: another process currently holds an active lock for device '${this.resolvedSerial}'`)
+            throw new Error('Device locked: another process currently holds an active lock for this device')
         }
     }
 

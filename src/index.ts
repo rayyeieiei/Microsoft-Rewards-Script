@@ -57,6 +57,9 @@ import {
 import {
     DefaultNetworkConnectivityProbe
 } from './runtime/network/NetworkConnectivityProbe'
+import {
+    NetworkRecoveryIpcClient
+} from './runtime/network/NetworkRecoveryIpcClient'
 import type {
     NetworkRecoveryPolicy,
     NetworkRecoveryResult,
@@ -162,6 +165,7 @@ export class MicrosoftRewardsBot {
     public adbNetworkRecoveryAdapter?: AdbNetworkRecoveryAdapter
     public networkRecoveryAvailable = true
     public networkRecoveryPreflightStatus: AdbPreflightStatus | null = null
+    public networkRecoveryIpcClient?: NetworkRecoveryIpcClient
     public activeRecoveryAbortController: AbortController | null = null
 
     private activeWorkers: number
@@ -288,43 +292,56 @@ export class MicrosoftRewardsBot {
             }
         }
 
-        if (cluster.isWorker && process.send) {
-            return new Promise(resolve => {
-                const correlationId = crypto.randomBytes(8).toString('hex')
-                let timer: NodeJS.Timeout | null = null
+        if (cluster.isWorker) {
+            if (this.networkRecoveryIpcClient) {
+                return this.networkRecoveryIpcClient.requestRecovery(trigger)
+            }
+            return {
+                status: 'failed',
+                trigger,
+                attempts: 0,
+                durationMs: 0,
+                finalStage: 'idle',
+                failureReason: 'unknown',
+                airplaneModeKnowledge: 'confirmed-disabled',
+                restorationAttempted: false,
+                restorationSucceeded: false
+            }
+        }
 
-                const onMessage = (msg: any) => {
-                    if (
-                        msg?.__networkRecoveryResponse &&
-                        msg.__networkRecoveryResponse.correlationId === correlationId
-                    ) {
-                        process.removeListener('message', onMessage)
-                        if (timer) clearTimeout(timer)
-                        resolve(msg.__networkRecoveryResponse.result)
-                    }
-                }
-                process.on('message', onMessage)
-
-                const timeoutMs = (this.config.networkRecovery?.totalBudgetMs ?? 120000) + 5000
-                timer = setTimeout(() => {
-                    process.removeListener('message', onMessage)
-                    resolve({
+        if (this.adbNetworkRecoveryAdapter && this.networkRecoveryPreflightStatus !== 'ready') {
+            try {
+                const freshPreflight = await this.adbNetworkRecoveryAdapter.checkPreflightStatus()
+                this.networkRecoveryPreflightStatus = freshPreflight.status
+                if (freshPreflight.status !== 'ready') {
+                    return {
                         status: 'failed',
                         trigger,
                         attempts: 0,
-                        durationMs: timeoutMs,
-                        finalStage: 'failed',
-                        airplaneModeKnowledge: 'possibly-enabled',
+                        durationMs: 0,
+                        finalStage: 'idle',
+                        failureReason: (freshPreflight.status as any) || 'adb-unavailable',
+                        airplaneModeKnowledge: 'confirmed-disabled',
                         restorationAttempted: false,
                         restorationSucceeded: false
-                    })
-                }, timeoutMs)
+                    }
+                }
+            } catch {
+                return {
+                    status: 'failed',
+                    trigger,
+                    attempts: 0,
+                    durationMs: 0,
+                    finalStage: 'idle',
+                    failureReason: 'adb-unavailable',
+                    airplaneModeKnowledge: 'confirmed-disabled',
+                    restorationAttempted: false,
+                    restorationSucceeded: false
+                }
+            }
+        }
 
-                process.send!({
-                    __networkRecoveryRequest: { correlationId, trigger }
-                })
-            })
-        } else if (this.networkRecoveryController) {
+        if (this.networkRecoveryController) {
             this.activeRecoveryAbortController = new AbortController()
             try {
                 return await this.networkRecoveryController.recover(trigger, this.activeRecoveryAbortController.signal)
@@ -490,36 +507,43 @@ export class MicrosoftRewardsBot {
                   ? 'disabled-in-config'
                   : 'mode-disabled'
 
-            this.logger.info(
-                'main',
-                'NETWORK-RECOVERY-CONFIG',
-                `enabled=false reason=${disabledReason}`
-            )
+            if (isPrimaryProcess) {
+                this.logger.info(
+                    'main',
+                    'NETWORK-RECOVERY-CONFIG',
+                    `enabled=false reason=${disabledReason}`
+                )
+            }
         } else {
             const policy: NetworkRecoveryPolicy = {
                 enabled: recoveryConfig.enabled,
                 mode: recoveryConfig.mode,
-                trigger: recoveryConfig.trigger || 'connectivity-failure',
-                maxAttempts: recoveryConfig.maxAttempts ?? 2,
-                commandTimeoutMs: recoveryConfig.commandTimeoutMs ?? 5000,
-                disconnectTimeoutMs: recoveryConfig.disconnectTimeoutMs ?? 5000,
-                reconnectTimeoutMs: recoveryConfig.reconnectTimeoutMs ?? 10000,
-                verificationIntervalMs: recoveryConfig.verificationIntervalMs ?? 3000,
-                operatorTimeoutMs: recoveryConfig.operatorTimeoutMs ?? 120000,
+                trigger: recoveryConfig.connectivityFailureTrigger ? 'connectivity-failure' : 'operator-request',
+                operatorTrigger: recoveryConfig.operatorTrigger ?? true,
+                connectivityFailureTrigger: recoveryConfig.connectivityFailureTrigger ?? false,
                 adbSerial: recoveryConfig.adbSerial,
+                maxAttempts: recoveryConfig.maxAttempts ?? 1,
+                preflightTimeoutMs: recoveryConfig.preflightTimeoutMs ?? 5000,
+                commandTimeoutMs: recoveryConfig.commandTimeoutMs ?? 8000,
+                disconnectTimeoutMs: recoveryConfig.disconnectTimeoutMs ?? 10000,
+                reconnectTimeoutMs: recoveryConfig.reconnectTimeoutMs ?? 30000,
+                verificationIntervalMs: recoveryConfig.verificationIntervalMs ?? 2000,
+                totalBudgetMs: recoveryConfig.totalBudgetMs ?? 60000,
+                recoveryCooldownMs: recoveryConfig.recoveryCooldownMs ?? 120000,
+                operatorRequestTtlMs: recoveryConfig.operatorRequestTtlMs ?? 1800000,
                 reassertUsbTethering: recoveryConfig.reassertUsbTethering ?? false,
-                totalBudgetMs: recoveryConfig.totalBudgetMs ?? 120000
+                operatorTimeoutMs: recoveryConfig.operatorRequestTtlMs ?? 1800000
             }
 
             const adbSerialConfigured = Boolean(policy.adbSerial && policy.adbSerial.trim().length > 0)
-            const connectivityFailureTrigger = policy.trigger === 'connectivity-failure'
-            const operatorTrigger = true
 
-            this.logger.info(
-                'main',
-                'NETWORK-RECOVERY-CONFIG',
-                `enabled=${policy.enabled} mode=${policy.mode} connectivityFailureTrigger=${connectivityFailureTrigger} operatorTrigger=${operatorTrigger} adbSerialConfigured=${adbSerialConfigured} primaryOwner=${isPrimaryProcess} legacyConfigDetected=${legacyConfigDetected}`
-            )
+            if (isPrimaryProcess) {
+                this.logger.info(
+                    'main',
+                    'NETWORK-RECOVERY-CONFIG',
+                    `enabled=${policy.enabled} mode=${policy.mode} operatorTrigger=${policy.operatorTrigger} connectivityFailureTrigger=${policy.connectivityFailureTrigger} adbSerialConfigured=${adbSerialConfigured} primaryOwner=${isPrimaryProcess} legacyConfigDetected=${legacyConfigDetected}`
+                )
+            }
 
             if (isPrimaryProcess) {
                 const probe = new DefaultNetworkConnectivityProbe()
@@ -530,7 +554,7 @@ export class MicrosoftRewardsBot {
                     adapter = adbAdapter
 
                     // Phase 3: Safe startup ADB preflight (non-mutating, zero airplane-mode toggling, bounded)
-                    this.logger.info('main', 'ADB-PREFLIGHT', `start timeoutMs=${policy.commandTimeoutMs}`)
+                    this.logger.info('main', 'ADB-PREFLIGHT', `start timeoutMs=${policy.preflightTimeoutMs}`)
                     try {
                         const preflightResult = await adbAdapter.checkPreflightStatus()
                         this.networkRecoveryPreflightStatus = preflightResult.status
@@ -540,15 +564,13 @@ export class MicrosoftRewardsBot {
                             `end status=${preflightResult.status} deviceCount=${preflightResult.deviceCount} serialConfigured=${preflightResult.serialConfigured}`
                         )
                         if (preflightResult.status !== 'ready') {
-                            this.networkRecoveryAvailable = false
                             this.logger.warn(
                                 'main',
                                 'NET-RECOVERY',
-                                `ADB preflight did not pass (status=${preflightResult.status}). Recovery capability disabled for this session.`
+                                `ADB preflight did not pass (status=${preflightResult.status}). Can be retried on operator request.`
                             )
                         }
                     } catch (err: any) {
-                        this.networkRecoveryAvailable = false
                         this.networkRecoveryPreflightStatus = 'adb-unavailable'
                         this.logger.warn(
                             'main',
@@ -588,6 +610,11 @@ export class MicrosoftRewardsBot {
                     `Network recovery subsystem initialized | mode=${policy.mode} | trigger=${policy.trigger} | maxAttempts=${policy.maxAttempts}`,
                     'green'
                 )
+            } else {
+                this.networkRecoveryIpcClient = new NetworkRecoveryIpcClient(
+                    policy.totalBudgetMs + 5000
+                )
+                this.networkRecoveryAvailable = policy.enabled && policy.mode !== 'disabled'
             }
         }
 
