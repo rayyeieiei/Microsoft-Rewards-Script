@@ -194,11 +194,17 @@ export class NetworkRecoveryController {
             if (this.adapter.knowledge === 'confirmed-enabled' || this.adapter.knowledge === 'possibly-enabled') {
                 this.logger?.warn(`[NETWORK-RECOVERY] Radio state is ${this.adapter.knowledge}; performing bounded restoration to disable airplane mode`)
                 restorationAttempted = true
+                const restorationController = new AbortController()
+                const restorationDeadline = setTimeout(() => {
+                    restorationController.abort(new Error('Restoration timeout exceeded'))
+                }, this.policy.commandTimeoutMs || 10000)
                 try {
-                    restorationSucceeded = await this.adapter.attemptRestoration()
+                    restorationSucceeded = await this.adapter.attemptRestoration(restorationController.signal)
                 } catch (resErr: any) {
                     restorationSucceeded = false
                     this.logger?.error(`[NETWORK-RECOVERY] Restoration attempt encountered error: ${resErr?.message || String(resErr)}`)
+                } finally {
+                    clearTimeout(restorationDeadline)
                 }
             }
 

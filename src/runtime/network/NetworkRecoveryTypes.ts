@@ -57,7 +57,7 @@ export interface NetworkRecoveryPolicy extends NetworkRecoveryConfig {
 }
 
 export interface NetworkRecoveryResult {
-    status: 'recovered' | 'failed' | 'cancelled' | 'not-required'
+    status: 'recovered' | 'failed' | 'cancelled' | 'not-required' | 'queued'
     trigger: NetworkRecoveryTrigger
     attempts: number
     durationMs: number

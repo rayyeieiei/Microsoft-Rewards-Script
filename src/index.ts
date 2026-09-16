@@ -167,6 +167,13 @@ export class MicrosoftRewardsBot {
     public networkRecoveryPreflightStatus: AdbPreflightStatus | null = null
     public networkRecoveryIpcClient?: NetworkRecoveryIpcClient
     public activeRecoveryAbortController: AbortController | null = null
+    public pendingOperatorRecovery: {
+        source: 'dashboard' | 'cli'
+        requestId: string
+        receivedAt: number
+        ttlMs: number
+    } | null = null
+    private cliStdinListener: ((chunk: Buffer | string) => void) | null = null
 
     private activeWorkers: number
     private exitedWorkers: number[]
@@ -371,7 +378,52 @@ export class MicrosoftRewardsBot {
             'NETWORK-RECOVERY',
             `requestReceived trigger=operator-request source=${source}`
         )
+        if (this.accountScope) {
+            const ttlMs = this.config.networkRecovery?.operatorRequestTtlMs ?? 1800000
+            this.pendingOperatorRecovery = {
+                source,
+                requestId,
+                receivedAt: Date.now(),
+                ttlMs
+            }
+            this.logger.info(
+                'main',
+                'NETWORK-RECOVERY',
+                `queued reason=account-scope-active ttlMs=${ttlMs}`
+            )
+            return {
+                status: 'queued',
+                trigger: 'operator-request',
+                attempts: 0,
+                durationMs: 0,
+                finalStage: 'idle',
+                airplaneModeKnowledge: 'confirmed-disabled',
+                restorationAttempted: false,
+                restorationSucceeded: false
+            }
+        }
         return this.requestNetworkRecovery('operator-request')
+    }
+
+    public setupCliOperatorListener(): void {
+        if (!process.stdin.isTTY || this.cliStdinListener) {
+            return
+        }
+        this.cliStdinListener = (chunk: Buffer | string) => {
+            const line = chunk.toString().trim().toLowerCase()
+            if (line === 'r' || line === 'recover') {
+                this.logger.info('main', 'CLI-OPERATOR', 'Operator requested network recovery via CLI')
+                void this.requestOperatorRecovery('cli')
+            }
+        }
+        process.stdin.on('data', this.cliStdinListener)
+    }
+
+    public teardownCliOperatorListener(): void {
+        if (this.cliStdinListener) {
+            process.stdin.removeListener('data', this.cliStdinListener)
+            this.cliStdinListener = null
+        }
     }
 
     public async notifySuspectedConnectivityFailure(
@@ -621,6 +673,10 @@ export class MicrosoftRewardsBot {
         this.updateDashboardGlobal({
             loadedAccounts: this.accounts.map(a => a.email)
         })
+
+        if ((cluster.isPrimary || !cluster.isWorker) && this.config.networkRecovery?.enabled && this.config.networkRecovery?.operatorTrigger) {
+            this.setupCliOperatorListener()
+        }
     }
 
     async run(): Promise<void> {
@@ -1099,6 +1155,26 @@ export class MicrosoftRewardsBot {
                 }
                 DataSaverManager.getInstance().resetAccountQuota(accountEmail)
                 this.resetAccountState()
+
+                if (this.pendingOperatorRecovery) {
+                    const pending = this.pendingOperatorRecovery
+                    this.pendingOperatorRecovery = null
+                    const now = Date.now()
+                    if (now - pending.receivedAt <= pending.ttlMs) {
+                        this.logger.info(
+                            'main',
+                            'NETWORK-RECOVERY',
+                            `dequeued checkpoint=account-scope-disposed source=${pending.source}`
+                        )
+                        await this.requestNetworkRecovery('operator-request')
+                    } else {
+                        this.logger.info(
+                            'main',
+                            'NETWORK-RECOVERY',
+                            `discarded reason=expired receivedAt=${pending.receivedAt} ttlMs=${pending.ttlMs}`
+                        )
+                    }
+                }
             }
 
             processedCount++
@@ -1124,12 +1200,14 @@ export class MicrosoftRewardsBot {
             if (this.localProxy) {
                 await this.localProxy.stop()
             }
+            this.teardownCliOperatorListener()
             process.exit(0)
         }
 
         if (this.localProxy) {
             await this.localProxy.stop()
         }
+        this.teardownCliOperatorListener()
         return accountStats
     }
 
@@ -1436,12 +1514,14 @@ async function main(): Promise<void> {
     })
     process.on('SIGINT', async () => {
         rewardsBot.logger.warn('main', 'PROCESS', 'SIGINT received, flushing and exiting...')
+        rewardsBot.teardownCliOperatorListener()
         rewardsBot.cancelActiveRecovery()
         await flushAllWebhooks()
         process.exit(130)
     })
     process.on('SIGTERM', async () => {
         rewardsBot.logger.warn('main', 'PROCESS', 'SIGTERM received, flushing and exiting...')
+        rewardsBot.teardownCliOperatorListener()
         rewardsBot.cancelActiveRecovery()
         await flushAllWebhooks()
         process.exit(143)
@@ -1463,6 +1543,7 @@ async function main(): Promise<void> {
     } catch (error) {
         rewardsBot.logger.error('main', 'MAIN-ERROR', error as Error)
     } finally {
+        rewardsBot.teardownCliOperatorListener()
         await rewardsBot.manualQuestQueue.flushPendingWrites().catch(() => {})
     }
 }
