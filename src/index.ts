@@ -60,6 +60,10 @@ import {
 import {
     NetworkRecoveryIpcClient
 } from './runtime/network/NetworkRecoveryIpcClient'
+import {
+    ConnectivityFailureReporter,
+    type ConnectivityFailureSource
+} from './runtime/network/ConnectivityFailureReporter'
 import type {
     NetworkRecoveryPolicy,
     NetworkRecoveryResult,
@@ -174,6 +178,7 @@ export class MicrosoftRewardsBot {
         ttlMs: number
     } | null = null
     private cliStdinListener: ((chunk: Buffer | string) => void) | null = null
+    public connectivityFailureReporter?: ConnectivityFailureReporter
 
     private activeWorkers: number
     private exitedWorkers: number[]
@@ -280,6 +285,31 @@ export class MicrosoftRewardsBot {
     public async requestNetworkRecovery(
         trigger: NetworkRecoveryTrigger = 'connectivity-failure'
     ): Promise<NetworkRecoveryResult> {
+        if (trigger === 'connectivity-failure' && !this.config.networkRecovery?.connectivityFailureTrigger) {
+            return {
+                status: 'not-required',
+                trigger,
+                attempts: 0,
+                durationMs: 0,
+                finalStage: 'idle',
+                airplaneModeKnowledge: 'confirmed-disabled',
+                restorationAttempted: false,
+                restorationSucceeded: false
+            }
+        }
+        if (trigger === 'operator-request' && !this.config.networkRecovery?.operatorTrigger) {
+            return {
+                status: 'not-required',
+                trigger,
+                attempts: 0,
+                durationMs: 0,
+                finalStage: 'idle',
+                airplaneModeKnowledge: 'confirmed-disabled',
+                restorationAttempted: false,
+                restorationSucceeded: false
+            }
+        }
+
         if (!this.networkRecoveryAvailable) {
             this.logger.warn(
                 'main',
@@ -430,31 +460,34 @@ export class MicrosoftRewardsBot {
         source: string,
         error?: any
     ): Promise<NetworkRecoveryResult> {
-        if (error) {
-            if (error.response?.status) {
-                return {
-                    status: 'not-required',
-                    trigger: 'connectivity-failure',
-                    attempts: 0,
-                    durationMs: 0,
-                    finalStage: 'idle',
-                    airplaneModeKnowledge: 'confirmed-disabled',
-                    restorationAttempted: false,
-                    restorationSucceeded: false
-                }
+        if (!this.config.networkRecovery?.connectivityFailureTrigger) {
+            return {
+                status: 'not-required',
+                trigger: 'connectivity-failure',
+                attempts: 0,
+                durationMs: 0,
+                finalStage: 'idle',
+                airplaneModeKnowledge: 'confirmed-disabled',
+                restorationAttempted: false,
+                restorationSucceeded: false
             }
-            const msg = String(error.message || error).toLowerCase()
-            if (msg.includes('net::err_aborted') || msg.includes('timeout') || msg.includes('stage_timeout')) {
-                return {
-                    status: 'not-required',
-                    trigger: 'connectivity-failure',
-                    attempts: 0,
-                    durationMs: 0,
-                    finalStage: 'idle',
-                    airplaneModeKnowledge: 'confirmed-disabled',
-                    restorationAttempted: false,
-                    restorationSucceeded: false
-                }
+        }
+
+        if (this.connectivityFailureReporter) {
+            const res = await this.connectivityFailureReporter.reportFailure(
+                source as ConnectivityFailureSource,
+                error
+            )
+            if (res) return res
+            return {
+                status: 'not-required',
+                trigger: 'connectivity-failure',
+                attempts: 0,
+                durationMs: 0,
+                finalStage: 'idle',
+                airplaneModeKnowledge: 'confirmed-disabled',
+                restorationAttempted: false,
+                restorationSucceeded: false
             }
         }
 
@@ -668,6 +701,20 @@ export class MicrosoftRewardsBot {
                 )
                 this.networkRecoveryAvailable = policy.enabled && policy.mode !== 'disabled'
             }
+
+            const reporterProbe = new DefaultNetworkConnectivityProbe()
+            this.connectivityFailureReporter = new ConnectivityFailureReporter({
+                cooldownMs: policy.recoveryCooldownMs,
+                probe: reporterProbe,
+                onEscalate: async () => {
+                    return this.requestNetworkRecovery('connectivity-failure')
+                },
+                logger: {
+                    info: msg => this.logger.info(false, 'NET-RECOVERY', msg),
+                    warn: msg => this.logger.warn(false, 'NET-RECOVERY', msg),
+                    error: msg => this.logger.error(false, 'NET-RECOVERY', msg)
+                }
+            })
         }
 
         this.updateDashboardGlobal({
