@@ -10,12 +10,31 @@ class AxiosClient {
     private instance: AxiosInstance
     private account: AccountProxy
 
-    constructor(account: AccountProxy, localProxyPort?: number, onBandwidth?: (bytes: number) => void) {
+    constructor(
+        account: AccountProxy,
+        localProxyPort?: number,
+        onBandwidth?: (bytes: number) => void,
+        onSuspectedNetworkOutage?: (error: any) => void
+    ) {
         this.account = account
 
         this.instance = axios.create({
             timeout: 20000
         })
+
+        if (onSuspectedNetworkOutage) {
+            this.instance.interceptors.response.use(
+                response => response,
+                error => {
+                    if (!error?.response && error?.code && ['ENOTFOUND', 'ECONNREFUSED', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH'].includes(error.code)) {
+                        try {
+                            onSuspectedNetworkOutage(error)
+                        } catch {}
+                    }
+                    return Promise.reject(error)
+                }
+            )
+        }
 
         if (onBandwidth) {
             this.instance.interceptors.response.use(response => {

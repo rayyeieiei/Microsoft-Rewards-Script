@@ -4,7 +4,7 @@
     "headless": false,
     "useDynamicWifiProxy": false,
     "useLocalDashboard": false,
-    "useAdbIpRotation": true,
+    "useAdbIpRotation": false,
     "useGhostCursor": true,
     "usePostgres": false,
     "postgresConfig": {
