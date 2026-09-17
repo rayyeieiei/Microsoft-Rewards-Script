@@ -12,6 +12,13 @@ export const MAX_SESSION_FILE_SIZE_BYTES = 10 * 1024 * 1024 // 10MB limit
 /**
  * Storage envelope for persisted Playwright sessions.
  * Plaintext authentication data at rest; protected via filesystem boundaries.
+ *
+ * NOTE on `savedAt`: `savedAt` represents wall-clock time (milliseconds since Unix epoch)
+ * at the moment the snapshot was captured. It is subject to clock skew, NTP adjustments,
+ * and OS timer resolution, and therefore does NOT constitute a monotonic sequence number
+ * that guarantees freshness across concurrent contexts or processes. It is merely an
+ * opportunistic heuristic against writing an older snapshot, and MUST NEVER be relied
+ * upon as a substitute for writer exclusivity and target file locking.
  */
 export interface StoredSessionEnvelope {
     schemaVersion: 1
@@ -20,6 +27,28 @@ export interface StoredSessionEnvelope {
     savedAt: number
     storageState: PlaywrightStorageState
 }
+
+/**
+ * Metadata recorded inside cross-process session lockfile.
+ */
+export interface SessionLockMetadata {
+    pid: number
+    ownerToken: string
+    accountId: string
+    device: SessionDevice
+    acquiredAt: number
+}
+
+export type LockAcquisitionResult =
+    | {
+          acquired: true
+          ownerToken: string
+      }
+    | {
+          acquired: false
+          reason: 'lock-busy' | 'stale-lock-needs-review' | 'timed-out'
+          detail: string
+      }
 
 export type SessionLoadSource =
     | 'modern-envelope'

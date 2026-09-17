@@ -10,7 +10,9 @@ import {
     PlaywrightStorageState,
     SUPPORTED_SCHEMA_VERSION,
     MAX_SESSION_FILE_SIZE_BYTES,
-    isValidStorageState
+    isValidStorageState,
+    SessionLockMetadata,
+    LockAcquisitionResult
 } from './AccountSessionTypes'
 import { SessionPathResolver } from './SessionPathResolver'
 
@@ -248,9 +250,7 @@ export class AccountSessionStore {
         }
     }
 
-    private static readonly LOCK_TTL_MS = 30000
-
-    private static isPidAlive(pid: number): boolean {
+    public static isPidAlive(pid: number): boolean {
         if (!pid || pid <= 0) return false
         try {
             process.kill(pid, 0)
@@ -260,21 +260,37 @@ export class AccountSessionStore {
         }
     }
 
-    private static async acquireCrossProcessLock(
+    /**
+     * Acquires an exclusive cross-process file lock for a session target.
+     *
+     * Invariants:
+     * 1. Ownership vs Timeout: An acquisition timeout bounds how long the contender waits;
+     *    it NEVER deletes or steals an existing active owner's lock.
+     * 2. Active Owner Preservation: Even if lock age exceeds any arbitrary threshold,
+     *    if the owner PID is alive, the lock remains strictly protected and is never reclaimed.
+     * 3. Conservative Stale Lock Policy: Locks from inactive/dead PIDs or corrupt lockfiles
+     *    are reported as 'stale-lock-needs-review' and preserved on disk for review,
+     *    strictly preventing race conditions or premature takeover.
+     * 4. Unique Ownership Token: Every acquisition receives a distinct cryptographic UUID.
+     *    Release operations only succeed if the caller holds the exact token matching the file.
+     */
+    public static async acquireCrossProcessLock(
         lockfilePath: string,
         accountId: string,
         device: SessionDevice,
-        deadlineMs = 2500
-    ): Promise<boolean> {
-        const deadline = Date.now() + deadlineMs
+        acquisitionTimeoutMs = 2500
+    ): Promise<LockAcquisitionResult> {
+        const deadline = Date.now() + acquisitionTimeoutMs
         const delays = [30, 60, 120, 250, 500]
         let attempt = 0
+        const ownerToken = crypto.randomUUID()
 
-        while (Date.now() < deadline) {
+        while (true) {
             try {
                 const handle = await fs.promises.open(lockfilePath, 'wx')
-                const metadata = {
+                const metadata: SessionLockMetadata = {
                     pid: process.pid,
+                    ownerToken,
                     accountId,
                     device,
                     acquiredAt: Date.now()
@@ -282,59 +298,103 @@ export class AccountSessionStore {
                 await handle.writeFile(JSON.stringify(metadata, null, 2), 'utf-8')
                 await handle.sync()
                 await handle.close()
-                return true
+                return { acquired: true, ownerToken }
             } catch (err: any) {
                 if (err?.code !== 'EEXIST') {
-                    return false
+                    return {
+                        acquired: false,
+                        reason: 'lock-busy',
+                        detail: `Filesystem error opening lockfile: ${err?.message || err}`
+                    }
                 }
 
-                // Inspect existing lock
+                // File exists on disk - inspect existing lock metadata
+                let existing: any = null
                 try {
                     const raw = await fs.promises.readFile(lockfilePath, 'utf-8')
-                    const existing = JSON.parse(raw)
-                    const isAlive = typeof existing?.pid === 'number' ? this.isPidAlive(existing.pid) : false
-                    const isExpired = Date.now() - (existing?.acquiredAt || 0) > this.LOCK_TTL_MS
-
-                    if (!isAlive || isExpired) {
-                        // Break stale lock from dead PID or expired TTL
-                        await fs.promises.unlink(lockfilePath).catch(() => {})
-                        continue
-                    }
+                    existing = JSON.parse(raw)
                 } catch {
-                    // Lockfile unparseable or transient, retry
+                    // Lockfile may be concurrently created or unreadable
                 }
 
-                const delay = delays[attempt % delays.length] ?? 100
+                if (existing && typeof existing.pid === 'number') {
+                    const isAlive = this.isPidAlive(existing.pid)
+                    if (!isAlive) {
+                        // Dead owner detected. Conservative policy: do NOT auto-steal or delete!
+                        // Preserve lockfile on disk for operator inspection.
+                        return {
+                            acquired: false,
+                            reason: 'stale-lock-needs-review',
+                            detail: `Lockfile held by inactive process PID ${existing.pid}; conservative policy preserves lock for operator review`
+                        }
+                    }
+                    // Owner is alive: NEVER take over or delete the lock, even if acquiredAt > 30s!
+                }
+
+                // Check acquisition deadline
+                const now = Date.now()
+                if (now >= deadline) {
+                    if (existing === null) {
+                        return {
+                            acquired: false,
+                            reason: 'stale-lock-needs-review',
+                            detail: `Lockfile could not be parsed after ${acquisitionTimeoutMs}ms; conservative policy preserves lock for operator review`
+                        }
+                    }
+                    return {
+                        acquired: false,
+                        reason: 'timed-out',
+                        detail: `Acquisition timed out after ${acquisitionTimeoutMs}ms waiting for active owner to release lock`
+                    }
+                }
+
+                const delay = Math.min(delays[attempt % delays.length] ?? 100, deadline - now)
                 attempt++
                 await new Promise(res => setTimeout(res, delay))
             }
         }
-        return false
     }
 
-    private static async releaseCrossProcessLock(lockfilePath: string): Promise<void> {
+    /**
+     * Releases cross-process lock ONLY if the caller provides the exact ownerToken
+     * matching the active lockfile and the process PID matches.
+     * Prevents delayed release from an earlier acquisition from unlinking a new acquisition's lock.
+     */
+    public static async releaseCrossProcessLock(
+        lockfilePath: string,
+        expectedOwnerToken: string
+    ): Promise<boolean> {
+        if (!expectedOwnerToken) return false
         try {
-            if (fs.existsSync(lockfilePath)) {
-                const raw = await fs.promises.readFile(lockfilePath, 'utf-8')
-                const existing = JSON.parse(raw)
-                if (existing?.pid === process.pid) {
-                    await fs.promises.unlink(lockfilePath).catch(() => {})
-                }
+            if (!fs.existsSync(lockfilePath)) {
+                return false
             }
+            const raw = await fs.promises.readFile(lockfilePath, 'utf-8')
+            const existing = JSON.parse(raw)
+            if (
+                existing?.ownerToken === expectedOwnerToken &&
+                existing?.pid === process.pid
+            ) {
+                await fs.promises.unlink(lockfilePath)
+                return true
+            }
+            return false
         } catch {
-            await fs.promises.unlink(lockfilePath).catch(() => {})
+            return false
         }
     }
 
     /**
      * Executes action within serialized in-process mutex queue AND cross-process file lock.
      * Guarantees queue self-healing even on action failure.
+     * Lock remains held until all filesystem and asynchronous action operations settle.
      */
     public static async withTargetLock<T>(
         targetPath: string,
         accountId: string,
         device: SessionDevice,
-        action: () => Promise<T>
+        action: () => Promise<T>,
+        acquisitionTimeoutMs = 2500
     ): Promise<T | SessionSaveResult> {
         const currentLock = this.fileLocks.get(targetPath) || Promise.resolve()
         let releaseLock: () => void = () => {}
@@ -353,7 +413,7 @@ export class AccountSessionStore {
         await currentLock
 
         let lockfilePath: string | null = null
-        let acquiredCrossProcess = false
+        let acquiredOwnerToken: string | null = null
         try {
             lockfilePath = SessionPathResolver.getLockfilePath(
                 path.dirname(targetPath),
@@ -361,24 +421,27 @@ export class AccountSessionStore {
                 device
             )
 
-            acquiredCrossProcess = await this.acquireCrossProcessLock(
+            const acqResult = await this.acquireCrossProcessLock(
                 lockfilePath,
                 accountId,
-                device
+                device,
+                acquisitionTimeoutMs
             )
 
-            if (!acquiredCrossProcess) {
+            if (!acqResult.acquired) {
                 return {
                     status: 'failed',
-                    error: `Cross-process writer lock conflict on ${device} session (held by another process)`,
+                    error: `Cross-process writer lock conflict on ${device} session: ${acqResult.reason} (${acqResult.detail})`,
                     path: targetPath
                 } as any
             }
 
+            acquiredOwnerToken = acqResult.ownerToken
+
             return await action()
         } finally {
-            if (acquiredCrossProcess && lockfilePath) {
-                await this.releaseCrossProcessLock(lockfilePath)
+            if (acquiredOwnerToken && lockfilePath) {
+                await this.releaseCrossProcessLock(lockfilePath, acquiredOwnerToken)
             }
             releaseLock()
             if (this.fileLocks.get(targetPath) === nextLock) {
@@ -391,6 +454,13 @@ export class AccountSessionStore {
      * Extracts storageState from an active context and saves it atomically.
      * Enforces bounded execution, snapshot validation, and mutex serialization before snapshot.
      * Prevents snapshot inversion races and empty/synthetic overwriting on closed contexts.
+     *
+     * Freshness Note:
+     * `savedAt` represents wall-clock time at snapshot capture, which is subject to system clock
+     * skew, NTP adjustments, or timer granularity. It does NOT constitute a monotonic sequence
+     * number that guarantees freshness across concurrent contexts or processes. It acts solely
+     * as an opportunistic heuristic against writing an obviously older snapshot, and MUST NEVER
+     * be claimed or relied upon to replace target writer exclusivity.
      */
     public static async saveContextSession(
         context: any,
@@ -449,7 +519,7 @@ export class AccountSessionStore {
 
                 const snapshotTime = Date.now()
 
-                // Monotonic sequence verification: prevent stale snapshot from overwriting newer disk session
+                // Opportunistic wall-clock guard (does not substitute for writer lock exclusivity)
                 if (fs.existsSync(targetPath)) {
                     try {
                         const existingRaw = await fs.promises.readFile(targetPath, 'utf-8')
@@ -472,7 +542,8 @@ export class AccountSessionStore {
                 }
 
                 return await this.executeAtomicFileWrite(targetPath, envelope)
-            }
+            },
+            timeoutMs
         )) as SessionSaveResult
 
         // If save succeeded, clear any existing quarantine marker for this account/device
@@ -497,7 +568,8 @@ export class AccountSessionStore {
      */
     public static async saveEnvelopeAtomically(
         targetPath: string,
-        envelope: StoredSessionEnvelope
+        envelope: StoredSessionEnvelope,
+        timeoutMs = 2500
     ): Promise<SessionSaveResult> {
         // Pre-validate payload before acquiring locks or writing
         if (
@@ -518,7 +590,8 @@ export class AccountSessionStore {
             targetPath,
             envelope.accountId,
             envelope.device,
-            () => this.executeAtomicFileWrite(targetPath, envelope)
+            () => this.executeAtomicFileWrite(targetPath, envelope),
+            timeoutMs
         )) as SessionSaveResult
     }
 

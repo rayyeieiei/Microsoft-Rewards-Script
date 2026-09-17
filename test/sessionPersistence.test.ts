@@ -2,6 +2,7 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import assert from 'assert'
+import * as child_process from 'child_process'
 import { AccountSessionStore } from '../src/runtime/session/AccountSessionStore'
 import { SessionPathResolver } from '../src/runtime/session/SessionPathResolver'
 import { AccountScope } from '../src/runtime/AccountScope'
@@ -735,7 +736,7 @@ export async function runSessionPersistenceTests(): Promise<void> {
             console.log('✅ Test 18 Passed: Snapshot serialization and monotonic ordering prevent inversion races')
         }
 
-        // --- Test 19: Cross-process writer lock rejects concurrent writer and breaks stale dead-PID lock ---
+        // --- Test 19: Cross-process writer lock rejects concurrent writer and preserves stale lock for review ---
         {
             const testDir = path.join(tempRoot, 'test19')
             fs.mkdirSync(testDir, { recursive: true })
@@ -748,6 +749,7 @@ export async function runSessionPersistenceTests(): Promise<void> {
                 lockfilePath,
                 JSON.stringify({
                     pid: process.pid,
+                    ownerToken: 'active-owner-token-19',
                     accountId: scope.identity.accountId,
                     device: 'mobile',
                     acquiredAt: Date.now()
@@ -771,11 +773,12 @@ export async function runSessionPersistenceTests(): Promise<void> {
                 'Error must mention lock conflict'
             )
 
-            // Case B: Create a stale lock owned by a dead PID (e.g. 99999999)
+            // Case B: Create a stale lock owned by an inactive PID (e.g. 99999999)
             fs.writeFileSync(
                 lockfilePath,
                 JSON.stringify({
                     pid: 99999999, // Non-existent process
+                    ownerToken: 'dead-pid-token-19',
                     accountId: scope.identity.accountId,
                     device: 'mobile',
                     acquiredAt: Date.now() - 5000
@@ -783,17 +786,285 @@ export async function runSessionPersistenceTests(): Promise<void> {
                 'utf-8'
             )
 
-            // Save should safely detect the dead PID, break the stale lock, and succeed
-            const successRes = await AccountSessionStore.saveContextSession(ctx, scope, 'mobile')
-            assert.strictEqual(successRes.status, 'saved', 'Must break stale lock and succeed')
+            // Conservative policy: must NOT automatically steal or break the stale lock
+            const reviewRes = await AccountSessionStore.saveContextSession(ctx, scope, 'mobile')
+            assert.strictEqual(reviewRes.status, 'failed', 'Must report failed on dead PID without automatic takeover')
+            assert.match(
+                (reviewRes as any).error || '',
+                /stale-lock-needs-review/i,
+                'Error must indicate stale-lock-needs-review'
+            )
 
-            // Lockfile must be cleanly released after operation
-            assert.strictEqual(fs.existsSync(lockfilePath), false, 'Lockfile must be released after completion')
+            // Lockfile must be preserved on disk for operator inspection
+            assert.strictEqual(fs.existsSync(lockfilePath), true, 'Stale lockfile must remain on disk for review')
 
-            console.log('✅ Test 19 Passed: Cross-process writer lock enforces exclusivity and breaks stale dead-PID locks')
+            console.log('✅ Test 19 Passed: Cross-process writer lock rejects concurrent writer and preserves stale lock for review')
         }
 
-        // --- Test 20: Seluruh test tidak menyentuh storage produksi ---
+        // --- Test 21: Pemilik masih aktif setelah usia lock melewati 30 detik: contender tidak mengambil alih ---
+        {
+            const testDir = path.join(tempRoot, 'test21')
+            fs.mkdirSync(testDir, { recursive: true })
+
+            const scope = AccountScope.createForTesting('active30@example.com', 'runAct', 'scopeAct', undefined, testDir)
+            const lockfilePath = SessionPathResolver.getLockfilePath(testDir, scope.identity.accountId, 'mobile')
+
+            const originalToken = 'token-active-owner-001'
+            const sixtySecondsAgo = Date.now() - 60000
+
+            fs.writeFileSync(
+                lockfilePath,
+                JSON.stringify({
+                    pid: process.pid, // active owner
+                    ownerToken: originalToken,
+                    accountId: scope.identity.accountId,
+                    device: 'mobile',
+                    acquiredAt: sixtySecondsAgo
+                }),
+                'utf-8'
+            )
+
+            // Contender attempts to acquire lock with 300ms timeout
+            const acq = await AccountSessionStore.acquireCrossProcessLock(
+                lockfilePath,
+                scope.identity.accountId,
+                'mobile',
+                300
+            )
+
+            assert.strictEqual(acq.acquired, false, 'Contender must NOT take over lock of an active owner')
+            assert.strictEqual(acq.reason, 'timed-out')
+
+            // Verify original lockfile is 100% intact with original owner token and age
+            assert.strictEqual(fs.existsSync(lockfilePath), true)
+            const raw = JSON.parse(fs.readFileSync(lockfilePath, 'utf-8'))
+            assert.strictEqual(raw.ownerToken, originalToken, 'Owner token must remain unchanged')
+            assert.strictEqual(raw.pid, process.pid, 'Owner PID must remain unchanged')
+            assert.strictEqual(raw.acquiredAt, sixtySecondsAgo, 'Original acquisition timestamp must be preserved')
+
+            console.log('✅ Test 21 Passed: Pemilik masih aktif setelah usia lock melewati 30 detik: contender tidak mengambil alih')
+        }
+
+        // --- Test 22: Contender timeout: lock dan target pemilik tetap utuh ---
+        {
+            const testDir = path.join(tempRoot, 'test22')
+            fs.mkdirSync(testDir, { recursive: true })
+
+            const scope = AccountScope.createForTesting('contenderTimeout@example.com', 'runCt', 'scopeCt', undefined, testDir)
+            const targetPath = SessionPathResolver.getModernPath(testDir, scope.identity.accountId, 'mobile')
+            const lockfilePath = SessionPathResolver.getLockfilePath(testDir, scope.identity.accountId, 'mobile')
+
+            // Write valid owner target session
+            const initialEnvelope: StoredSessionEnvelope = {
+                schemaVersion: 1,
+                accountId: scope.identity.accountId,
+                device: 'mobile',
+                savedAt: Date.now() - 10000,
+                storageState: {
+                    cookies: [createMockCookie('owner_cookie', 'owner_val')],
+                    origins: []
+                }
+            }
+            fs.writeFileSync(targetPath, JSON.stringify(initialEnvelope, null, 2), 'utf-8')
+
+            // Active owner holds lock
+            const ownerToken = 'active-owner-token-22'
+            fs.writeFileSync(
+                lockfilePath,
+                JSON.stringify({
+                    pid: process.pid,
+                    ownerToken,
+                    accountId: scope.identity.accountId,
+                    device: 'mobile',
+                    acquiredAt: Date.now()
+                }),
+                'utf-8'
+            )
+
+            // Contender attempts to save with 200ms timeout
+            const contenderContext = {
+                storageState: async () => ({
+                    cookies: [createMockCookie('contender_intruder', 'bad')],
+                    origins: []
+                })
+            }
+
+            const res = await AccountSessionStore.saveContextSession(contenderContext, scope, 'mobile', 200)
+            assert.strictEqual(res.status, 'failed', 'Contender write must fail due to lock conflict')
+            assert.match((res as any).error || '', /lock conflict/i)
+
+            // Verify owner lockfile is completely intact
+            assert.strictEqual(fs.existsSync(lockfilePath), true, 'Owner lockfile must remain intact')
+            const lockData = JSON.parse(fs.readFileSync(lockfilePath, 'utf-8'))
+            assert.strictEqual(lockData.ownerToken, ownerToken)
+
+            // Verify target session file is completely unchanged
+            const sessionData = JSON.parse(fs.readFileSync(targetPath, 'utf-8'))
+            assert.strictEqual(sessionData.storageState.cookies[0].name, 'owner_cookie', 'Target session must be untouched')
+
+            console.log('✅ Test 22 Passed: Contender timeout: lock dan target pemilik tetap utuh')
+        }
+
+        // --- Test 23: Dua proses lokal berbeda bersaing pada file yang sama: hanya satu memperoleh lock ---
+        {
+            const testDir = path.join(tempRoot, 'test23')
+            fs.mkdirSync(testDir, { recursive: true })
+
+            const lockfilePath = path.join(testDir, 'contention_target.lock')
+
+            // Subprocess runner script: attempts acquireCrossProcessLock, holds for 400ms if acquired, then releases
+            const childScript = `
+                const { AccountSessionStore } = require('./src/runtime/session/AccountSessionStore');
+                (async () => {
+                    const lockfilePath = process.argv.slice(1).find(a => a && a.endsWith('.lock')) || process.argv[1];
+                    const acq = await AccountSessionStore.acquireCrossProcessLock(lockfilePath, 'acc23', 'mobile', 300);
+                    if (acq.acquired) {
+                        process.stdout.write(JSON.stringify({ pid: process.pid, acquired: true, token: acq.ownerToken }));
+                        await new Promise(r => setTimeout(r, 400));
+                        await AccountSessionStore.releaseCrossProcessLock(lockfilePath, acq.ownerToken);
+                    } else {
+                        process.stdout.write(JSON.stringify({ pid: process.pid, acquired: false, reason: acq.reason }));
+                    }
+                    process.exit(0);
+                })().catch(e => {
+                    console.error(e);
+                    process.exit(1);
+                });
+            `
+
+            const runChild = (): Promise<{ pid: number; acquired: boolean; reason?: string }> => {
+                return new Promise((resolve, reject) => {
+                    const cp = child_process.spawn(
+                        process.execPath,
+                        ['-r', 'ts-node/register', '-e', childScript, lockfilePath],
+                        { cwd: process.cwd() }
+                    )
+                    let stdout = ''
+                    let stderr = ''
+                    cp.stdout.on('data', d => (stdout += d))
+                    cp.stderr.on('data', d => (stderr += d))
+                    cp.on('close', code => {
+                        if (code !== 0) {
+                            reject(new Error(`Child exited with code ${code}: ${stderr}`))
+                        } else {
+                            try {
+                                resolve(JSON.parse(stdout.trim()))
+                            } catch (err) {
+                                reject(new Error(`Failed to parse child output: "${stdout}" (stderr: ${stderr})`))
+                            }
+                        }
+                    })
+                })
+            }
+
+            // Launch both child processes concurrently
+            const [childA, childB] = await Promise.all([runChild(), runChild()])
+
+            const acquiredCount = (childA.acquired ? 1 : 0) + (childB.acquired ? 1 : 0)
+            assert.strictEqual(acquiredCount, 1, 'Exactly one process must acquire the lock under contention')
+
+            const failedChild = childA.acquired ? childB : childA
+            assert.strictEqual(failedChild.acquired, false)
+            assert.ok(failedChild.reason === 'timed-out' || failedChild.reason === 'lock-busy')
+
+            // Wait for winner's release to complete
+            await new Promise(r => setTimeout(r, 200))
+            assert.strictEqual(fs.existsSync(lockfilePath), false, 'Lockfile must be released after completion')
+
+            console.log('✅ Test 23 Passed: Dua proses lokal berbeda bersaing pada file yang sama: hanya satu memperoleh lock')
+        }
+
+        // --- Test 24: Release dari acquisition lama tidak menghapus lock acquisition baru ---
+        {
+            const testDir = path.join(tempRoot, 'test24')
+            fs.mkdirSync(testDir, { recursive: true })
+
+            const lockfilePath = path.join(testDir, 'token_test.lock')
+            const oldToken = 'stale-token-phase-1'
+            const newToken = 'fresh-token-phase-2'
+
+            // Write lockfile belonging to the new acquisition
+            fs.writeFileSync(
+                lockfilePath,
+                JSON.stringify({
+                    pid: process.pid,
+                    ownerToken: newToken,
+                    accountId: 'acc24',
+                    device: 'mobile',
+                    acquiredAt: Date.now()
+                }),
+                'utf-8'
+            )
+
+            // Attempt release using old token from an earlier acquisition
+            const releasedOld = await AccountSessionStore.releaseCrossProcessLock(lockfilePath, oldToken)
+            assert.strictEqual(releasedOld, false, 'Release with mismatched token must return false')
+
+            // Lockfile must still exist with the new token
+            assert.strictEqual(fs.existsSync(lockfilePath), true, 'Lockfile must not be deleted by stale release')
+            const currentLock = JSON.parse(fs.readFileSync(lockfilePath, 'utf-8'))
+            assert.strictEqual(currentLock.ownerToken, newToken)
+
+            // Valid release with matching token succeeds
+            const releasedNew = await AccountSessionStore.releaseCrossProcessLock(lockfilePath, newToken)
+            assert.strictEqual(releasedNew, true, 'Release with matching token must return true')
+            assert.strictEqual(fs.existsSync(lockfilePath), false, 'Lockfile must be unlinked after matching release')
+
+            console.log('✅ Test 24 Passed: Release dari acquisition lama tidak menghapus lock acquisition baru')
+        }
+
+        // --- Test 25: Write tertunda tetap memegang ownership sampai operasi selesai ---
+        {
+            const testDir = path.join(tempRoot, 'test25')
+            fs.mkdirSync(testDir, { recursive: true })
+
+            const scope = AccountScope.createForTesting('delayedWrite@example.com', 'runDw', 'scopeDw', undefined, testDir)
+            const targetPath = SessionPathResolver.getModernPath(testDir, scope.identity.accountId, 'mobile')
+            const lockfilePath = SessionPathResolver.getLockfilePath(testDir, scope.identity.accountId, 'mobile')
+
+            let writeFinished = false
+
+            // Start a delayed target lock operation
+            const writePromise = AccountSessionStore.withTargetLock(
+                targetPath,
+                scope.identity.accountId,
+                'mobile',
+                async () => {
+                    await new Promise(r => setTimeout(r, 400))
+                    writeFinished = true
+                    return 'done'
+                }
+            )
+
+            // Allow operation to acquire lock
+            await new Promise(r => setTimeout(r, 100))
+
+            // Verify write is still in-flight
+            assert.strictEqual(writeFinished, false, 'Write operation must still be pending')
+            assert.strictEqual(fs.existsSync(lockfilePath), true, 'Lockfile must be held during delayed write')
+
+            // Contender attempts to acquire lock while write is in flight
+            const contenderAcq = await AccountSessionStore.acquireCrossProcessLock(
+                lockfilePath,
+                scope.identity.accountId,
+                'mobile',
+                100
+            )
+            assert.strictEqual(contenderAcq.acquired, false, 'Contender must be rejected while write is pending')
+            assert.strictEqual(contenderAcq.reason, 'timed-out')
+
+            // Wait for delayed write to complete
+            const writeRes = await writePromise
+            assert.strictEqual(writeRes, 'done')
+            assert.strictEqual(writeFinished, true)
+
+            // Lock is now released
+            assert.strictEqual(fs.existsSync(lockfilePath), false, 'Lockfile must be released once write settles')
+
+            console.log('✅ Test 25 Passed: Write tertunda tetap memegang ownership sampai operasi selesai')
+        }
+
+        // --- Test 26: Seluruh test tidak menyentuh storage produksi ---
         {
             const finalProdFiles = fs.existsSync(prodSessionsDir)
                 ? fs.readdirSync(prodSessionsDir)
@@ -804,10 +1075,10 @@ export async function runSessionPersistenceTests(): Promise<void> {
                 'Production sessions directory must have 0 modifications from test suite'
             )
 
-            console.log('✅ Test 20 Passed: Entire test suite operated exclusively in isolated synthetic storage')
+            console.log('✅ Test 26 Passed: Entire test suite operated exclusively in isolated synthetic storage')
         }
 
-        console.log('🎉 ALL 20 UNIFIED SESSION PERSISTENCE TESTS PASSED SUCCESSFULLY!')
+        console.log('🎉 ALL 26 UNIFIED SESSION PERSISTENCE TESTS PASSED SUCCESSFULLY!')
     } finally {
         try {
             fs.rmSync(tempRoot, { recursive: true, force: true })
