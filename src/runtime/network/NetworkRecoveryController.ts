@@ -26,7 +26,6 @@ export class NetworkRecoveryController {
     public readonly probe: NetworkConnectivityProbe
     private readonly logger?: NetworkRecoveryControllerOptions['logger']
     private isRecovering = false
-    private activeRecoveryPromise: Promise<NetworkRecoveryResult> | null = null
 
     constructor(options: NetworkRecoveryControllerOptions) {
         this.policy = options.policy
@@ -59,79 +58,55 @@ export class NetworkRecoveryController {
             }
         }
 
-        // Concurrency control: merge concurrent requests into in-flight pass
-        if (this.isRecovering && this.activeRecoveryPromise) {
-            this.logger?.info('[NETWORK-RECOVERY] Recovery requested while another operation is in progress; joining in-flight recovery pass')
-            if (outerSignal) {
-                if (outerSignal.aborted) {
-                    return {
-                        status: 'cancelled',
-                        trigger,
-                        attempts: 0,
-                        durationMs: Date.now() - startTime,
-                        finalStage: 'cancelled',
-                        failureReason: 'cancelled',
-                        airplaneModeKnowledge: this.adapter.knowledge,
-                        restorationAttempted: false,
-                        restorationSucceeded: false
-                    }
-                }
-                return await Promise.race([
-                    this.activeRecoveryPromise,
-                    new Promise<NetworkRecoveryResult>((_, reject) => {
-                        outerSignal.addEventListener('abort', () => reject(new Error('Operation cancelled')), { once: true })
-                    })
-                ]).catch(() => {
-                    return {
-                        status: 'cancelled',
-                        trigger,
-                        attempts: 0,
-                        durationMs: Date.now() - startTime,
-                        finalStage: 'cancelled',
-                        failureReason: 'cancelled',
-                        airplaneModeKnowledge: this.adapter.knowledge,
-                        restorationAttempted: false,
-                        restorationSucceeded: false
-                    }
-                })
+        // Concurrency control: serialize recovery per controller
+        if (this.isRecovering) {
+            this.logger?.warn('[NETWORK-RECOVERY] Recovery requested while another operation is in progress; joining / failing fast')
+            return {
+                status: 'failed',
+                trigger,
+                attempts: 0,
+                durationMs: Date.now() - startTime,
+                finalStage: 'idle',
+                failureReason: 'device-locked',
+                airplaneModeKnowledge: this.adapter.knowledge,
+                restorationAttempted: false,
+                restorationSucceeded: false
             }
-            return await this.activeRecoveryPromise
         }
 
         this.isRecovering = true
 
-        const runWorkflow = async (): Promise<NetworkRecoveryResult> => {
-            // Total budget abort controller
-            const budgetController = new AbortController()
-            const totalBudgetTimer = setTimeout(() => {
-                budgetController.abort(new Error('Total recovery budget exceeded'))
-            }, this.policy.totalBudgetMs)
+        // Total budget abort controller
+        const budgetController = new AbortController()
+        const totalBudgetTimer = setTimeout(() => {
+            budgetController.abort(new Error('Total recovery budget exceeded'))
+        }, this.policy.totalBudgetMs)
 
-            const handleOuterAbort = () => {
-                budgetController.abort(new Error('External cancellation requested'))
+        const handleOuterAbort = () => {
+            budgetController.abort(new Error('External cancellation requested'))
+        }
+        if (outerSignal?.aborted) {
+            budgetController.abort(new Error('External cancellation requested'))
+        } else {
+            outerSignal?.addEventListener('abort', handleOuterAbort)
+        }
+
+        const activeSignal = budgetController.signal
+
+        let stage: NetworkRecoveryStage = 'idle'
+        let currentAttempt = 0
+        let restorationAttempted = false
+        let restorationSucceeded = false
+        let failureReason: NetworkRecoveryFailureReason | undefined
+
+        this.logger?.info(`[NETWORK-RECOVERY] start mode=${this.policy.mode} trigger=${trigger}`)
+
+        try {
+            if (activeSignal.aborted) {
+                stage = 'cancelled'
+                failureReason = 'cancelled'
+                throw new Error('Operation cancelled')
             }
-            if (outerSignal?.aborted) {
-                budgetController.abort(new Error('External cancellation requested'))
-            } else {
-                outerSignal?.addEventListener('abort', handleOuterAbort)
-            }
-
-            const activeSignal = budgetController.signal
-
-            let stage: NetworkRecoveryStage = 'idle'
-            let currentAttempt = 0
-            let restorationAttempted = false
-            let restorationSucceeded = false
-            let failureReason: NetworkRecoveryFailureReason | undefined
-
-            this.logger?.info(`[NETWORK-RECOVERY] start mode=${this.policy.mode} trigger=${trigger}`)
-
-            try {
-                if (activeSignal.aborted) {
-                    stage = 'cancelled'
-                    failureReason = 'cancelled'
-                    throw new Error('Operation cancelled')
-                }
 
             // Rule 6: Suspected connectivity failure must first run independent bounded probe
             if (trigger === 'connectivity-failure') {
@@ -233,35 +208,23 @@ export class NetworkRecoveryController {
                 }
             }
 
-            if (restorationAttempted && !restorationSucceeded) {
-                failureReason = 'restoration-failed'
-            }
-
             this.logger?.info(
                 `[NETWORK-RECOVERY] end status=${stage} attempts=${currentAttempt} durationMs=${Date.now() - startTime} restorationAttempted=${restorationAttempted} restorationSucceeded=${restorationSucceeded}`
             )
-        }
 
-            return {
-                status: stage === 'cancelled' ? 'cancelled' : 'failed',
-                trigger,
-                attempts: currentAttempt,
-                durationMs: Date.now() - startTime,
-                finalStage: stage,
-                failureReason,
-                airplaneModeKnowledge: this.adapter.knowledge,
-                restorationAttempted,
-                restorationSucceeded
-            }
-        }
-
-        const recoveryWork = runWorkflow()
-        this.activeRecoveryPromise = recoveryWork
-        try {
-            return await recoveryWork
-        } finally {
             this.isRecovering = false
-            this.activeRecoveryPromise = null
+        }
+
+        return {
+            status: stage === 'cancelled' ? 'cancelled' : 'failed',
+            trigger,
+            attempts: currentAttempt,
+            durationMs: Date.now() - startTime,
+            finalStage: stage,
+            failureReason,
+            airplaneModeKnowledge: this.adapter.knowledge,
+            restorationAttempted,
+            restorationSucceeded
         }
     }
 

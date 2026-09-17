@@ -50,7 +50,6 @@ export class AdbNetworkRecoveryAdapter implements NetworkRecoveryAdapter {
     private readonly runner: SubprocessRunner
     private readonly lockManager: DeviceLockManager
     private resolvedSerial: string | null = null
-    private activeSubprocessCount = 0
 
     constructor(options: AdbAdapterOptions) {
         this.policy = options.policy
@@ -115,16 +114,11 @@ export class AdbNetworkRecoveryAdapter implements NetworkRecoveryAdapter {
 
     private async runAdb(args: string[], signal?: AbortSignal): Promise<{ stdout: string; stderr: string }> {
         const fullArgs = this.resolvedSerial ? ['-s', this.resolvedSerial, ...args] : args
-        this.activeSubprocessCount++
-        try {
-            return await this.runner(this.adbBinary, fullArgs, {
-                timeout: this.policy.commandTimeoutMs,
-                maxBuffer: 64 * 1024,
-                signal
-            })
-        } finally {
-            this.activeSubprocessCount--
-        }
+        return this.runner(this.adbBinary, fullArgs, {
+            timeout: this.policy.commandTimeoutMs,
+            maxBuffer: 64 * 1024,
+            signal
+        })
     }
 
     /**
@@ -386,11 +380,6 @@ export class AdbNetworkRecoveryAdapter implements NetworkRecoveryAdapter {
     }
 
     public async dispose(): Promise<void> {
-        // Invariant: Do not release device lock while any ADB subprocess is still running
-        const deadline = Date.now() + (this.policy.commandTimeoutMs || 5000)
-        while (this.activeSubprocessCount > 0 && Date.now() < deadline) {
-            await new Promise(r => setTimeout(r, 25))
-        }
         this.lockManager.release()
     }
 }

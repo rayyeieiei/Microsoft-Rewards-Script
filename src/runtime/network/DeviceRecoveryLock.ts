@@ -4,7 +4,6 @@ import path from 'path'
 
 export interface DeviceLockMetadata {
     pid: number
-    ownerToken: string
     acquiredAt: number
 }
 
@@ -14,13 +13,11 @@ export interface DeviceRecoveryLockAcquireResult {
     success: boolean
     status: DeviceRecoveryLockStatus
     release: () => void
-    ownerToken?: string
 }
 
 export class DeviceRecoveryLock {
     private readonly lockDir: string
     private activeLockPath: string | null = null
-    private activeOwnerToken: string | null = null
     private cleanupHandlerAttached = false
 
     constructor(customLockDir?: string) {
@@ -40,7 +37,6 @@ export class DeviceRecoveryLock {
 
     /**
      * Atomically acquires an exclusive lock file.
-     * Never steals lock from an active process regardless of TTL.
      * Reclaims stale lock only when the recorded owner PID is confirmed dead.
      */
     public acquire(deviceIdentity?: string): DeviceRecoveryLockAcquireResult {
@@ -57,12 +53,10 @@ export class DeviceRecoveryLock {
         if (fs.existsSync(lockPath)) {
             try {
                 const content = fs.readFileSync(lockPath, 'utf-8')
-                const metadata: Partial<DeviceLockMetadata> = JSON.parse(content)
-                const pid = metadata.pid
-                const isAlive = typeof pid === 'number' && this.isProcessAlive(pid)
+                const metadata: DeviceLockMetadata = JSON.parse(content)
+                const isAlive = this.isProcessAlive(metadata.pid)
 
-                if (isAlive && pid !== process.pid) {
-                    // Contender cannot steal lock from active owner regardless of elapsed time/TTL
+                if (isAlive && metadata.pid !== process.pid) {
                     return {
                         success: false,
                         status: 'device-busy',
@@ -70,7 +64,7 @@ export class DeviceRecoveryLock {
                     }
                 }
 
-                // Stale PID recovery: safe to unlink only if process is confirmed dead
+                // Stale PID recovery: safe to unlink if process is confirmed dead
                 if (!isAlive) {
                     try {
                         fs.unlinkSync(lockPath)
@@ -85,10 +79,8 @@ export class DeviceRecoveryLock {
         }
 
         try {
-            const ownerToken = crypto.randomUUID()
             const metadata: DeviceLockMetadata = {
                 pid: process.pid,
-                ownerToken,
                 acquiredAt: Date.now()
             }
             // Exclusive atomic file creation
@@ -100,18 +92,16 @@ export class DeviceRecoveryLock {
             }
 
             this.activeLockPath = lockPath
-            this.activeOwnerToken = ownerToken
             this.attachExitCleanup()
 
             const release = () => {
-                this.releasePath(lockPath, ownerToken)
+                this.releasePath(lockPath)
             }
 
             return {
                 success: true,
                 status: 'acquired',
-                release,
-                ownerToken
+                release
             }
         } catch {
             return {
@@ -124,29 +114,24 @@ export class DeviceRecoveryLock {
 
     public release(): void {
         if (this.activeLockPath) {
-            this.releasePath(this.activeLockPath, this.activeOwnerToken || undefined)
+            this.releasePath(this.activeLockPath)
             this.activeLockPath = null
-            this.activeOwnerToken = null
         }
     }
 
-    private releasePath(targetPath: string, expectedOwnerToken?: string): void {
+    private releasePath(targetPath: string): void {
         try {
             if (fs.existsSync(targetPath)) {
                 const content = fs.readFileSync(targetPath, 'utf-8')
-                const metadata: Partial<DeviceLockMetadata> = JSON.parse(content)
-                // Only unlink if this process owns the lock AND ownerToken matches if specified
-                const pidMatches = metadata.pid === process.pid
-                const tokenMatches =
-                    !expectedOwnerToken || !metadata.ownerToken || metadata.ownerToken === expectedOwnerToken
-                if (pidMatches && tokenMatches) {
+                const metadata: DeviceLockMetadata = JSON.parse(content)
+                // Only unlink if this process owns the lock
+                if (metadata.pid === process.pid) {
                     fs.unlinkSync(targetPath)
                 }
             }
         } catch {}
         if (this.activeLockPath === targetPath) {
             this.activeLockPath = null
-            this.activeOwnerToken = null
         }
     }
 

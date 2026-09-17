@@ -5,24 +5,7 @@ import type { NetworkRecoveryIpcRequest, NetworkRecoveryIpcResponse } from './Ne
 export class NetworkRecoveryIpcClient {
     constructor(private readonly timeoutMs: number = 65000) {}
 
-    public requestRecovery(
-        trigger: NetworkRecoveryTrigger,
-        signal?: AbortSignal
-    ): Promise<NetworkRecoveryResult> {
-        if (signal?.aborted) {
-            return Promise.resolve({
-                status: 'cancelled',
-                trigger,
-                attempts: 0,
-                durationMs: 0,
-                finalStage: 'cancelled',
-                failureReason: 'cancelled',
-                airplaneModeKnowledge: 'confirmed-disabled',
-                restorationAttempted: false,
-                restorationSucceeded: false
-            })
-        }
-
+    public requestRecovery(trigger: NetworkRecoveryTrigger): Promise<NetworkRecoveryResult> {
         if (!process.send) {
             return Promise.resolve({
                 status: 'failed',
@@ -40,19 +23,6 @@ export class NetworkRecoveryIpcClient {
         return new Promise(resolve => {
             const correlationId = crypto.randomBytes(8).toString('hex')
             let timer: NodeJS.Timeout | null = null
-            let onAbort: (() => void) | null = null
-
-            const cleanup = () => {
-                process.removeListener('message', onMessage)
-                if (timer) {
-                    clearTimeout(timer)
-                    timer = null
-                }
-                if (signal && onAbort) {
-                    signal.removeEventListener('abort', onAbort)
-                    onAbort = null
-                }
-            }
 
             const onMessage = (msg: any) => {
                 const response = msg as NetworkRecoveryIpcResponse
@@ -60,33 +30,16 @@ export class NetworkRecoveryIpcClient {
                     response?.__networkRecoveryResponse &&
                     response.__networkRecoveryResponse.correlationId === correlationId
                 ) {
-                    cleanup()
+                    process.removeListener('message', onMessage)
+                    if (timer) clearTimeout(timer)
                     resolve(response.__networkRecoveryResponse.result)
                 }
             }
 
             process.on('message', onMessage)
 
-            if (signal) {
-                onAbort = () => {
-                    cleanup()
-                    resolve({
-                        status: 'cancelled',
-                        trigger,
-                        attempts: 0,
-                        durationMs: 0,
-                        finalStage: 'cancelled',
-                        failureReason: 'cancelled',
-                        airplaneModeKnowledge: 'confirmed-disabled',
-                        restorationAttempted: false,
-                        restorationSucceeded: false
-                    })
-                }
-                signal.addEventListener('abort', onAbort, { once: true })
-            }
-
             timer = setTimeout(() => {
-                cleanup()
+                process.removeListener('message', onMessage)
                 resolve({
                     status: 'failed',
                     trigger,

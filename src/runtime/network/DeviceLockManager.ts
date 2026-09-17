@@ -7,7 +7,6 @@ export interface DeviceLockInfo {
 
 export class DeviceLockManager {
     private readonly lock: DeviceRecoveryLock
-    private activeRelease: (() => void) | null = null
 
     constructor(customLockDir?: string) {
         this.lock = new DeviceRecoveryLock(customLockDir)
@@ -27,23 +26,14 @@ export class DeviceLockManager {
      */
     public acquire(serial: string): boolean {
         const res = this.lock.acquire(serial)
-        if (res.success) {
-            this.activeRelease = res.release
-            return true
-        }
-        return false
+        return res.success
     }
 
     /**
      * Releases the acquired lock file.
      */
     public release(): void {
-        if (this.activeRelease) {
-            this.activeRelease()
-            this.activeRelease = null
-        } else {
-            this.lock.release()
-        }
+        this.lock.release()
     }
 
     public isProcessAlive(pid: number): boolean {

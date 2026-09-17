@@ -63,39 +63,6 @@ export class ConnectivityFailureReporter {
 
         const msg = String(error.message || error).toLowerCase()
 
-        // Filter HTTP 401/403/429 and rate-limiting/auth messages
-        if (
-            msg.includes('401') ||
-            msg.includes('403') ||
-            msg.includes('429') ||
-            msg.includes('unauthorized') ||
-            msg.includes('forbidden') ||
-            msg.includes('rate limit') ||
-            msg.includes('too many requests')
-        ) {
-            return true
-        }
-
-        // Filter CAPTCHA and authentication requirements
-        if (
-            msg.includes('captcha') ||
-            msg.includes('challenge') ||
-            msg.includes('verification required') ||
-            msg.includes('login')
-        ) {
-            return true
-        }
-
-        // Filter quest-locked and account progression errors
-        if (msg.includes('locked') || msg.includes('quest') || msg.includes('punch card')) {
-            return true
-        }
-
-        // Filter point balance and attribution errors
-        if (msg.includes('balance') || msg.includes('point') || msg.includes('streak')) {
-            return true
-        }
-
         // Filter activity timeouts, interaction timeouts, and navigation stage timeouts
         if (msg.includes('stage_timeout') || msg.includes('selector') || msg.includes('waiting for') || msg.includes('navigation timeout')) {
             return true

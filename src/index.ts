@@ -84,6 +84,29 @@ import { sendDiscord, flushDiscordQueue } from './logging/Discord'
 import { sendNtfy, flushNtfyQueue } from './logging/Ntfy'
 import type { DashboardData } from './interface/DashboardData'
 import type { AppDashboardData } from './interface/AppDashBoardData'
+import readline from 'readline'
+
+let manualIpConfirmResolver: (() => void) | null = null
+
+function waitForUserConfirmation(): Promise<void> {
+    return new Promise(resolve => {
+        manualIpConfirmResolver = resolve
+
+        const rl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout
+        })
+
+        rl.question('', () => {
+            rl.close()
+            if (manualIpConfirmResolver) {
+                const res = manualIpConfirmResolver
+                manualIpConfirmResolver = null
+                res()
+            }
+        })
+    })
+}
 
 interface ExecutionContext {
     isMobile: boolean
@@ -296,25 +319,6 @@ export class MicrosoftRewardsBot {
     public async requestNetworkRecovery(
         trigger: NetworkRecoveryTrigger = 'connectivity-failure'
     ): Promise<NetworkRecoveryResult> {
-        if (this.shutdownPromise || this.stopRequested) {
-            this.logger.warn(
-                'main',
-                'NETWORK-RECOVERY',
-                `Recovery rejected: shutdown in progress | trigger=${trigger}`
-            )
-            return {
-                status: 'cancelled',
-                trigger,
-                attempts: 0,
-                durationMs: 0,
-                finalStage: 'cancelled',
-                failureReason: 'cancelled',
-                airplaneModeKnowledge: 'confirmed-disabled',
-                restorationAttempted: false,
-                restorationSucceeded: false
-            }
-        }
-
         if (trigger === 'connectivity-failure' && !this.config.networkRecovery?.connectivityFailureTrigger) {
             return {
                 status: 'not-required',
@@ -711,14 +715,14 @@ export class MicrosoftRewardsBot {
             `commit=${buildMeta.commit} builtAt=${buildMeta.builtAt} entrypoint=${buildMeta.entrypoint}`
         )
 
-        // 2. ADB IP Rotation configuration status (legacy)
+        // 2. ADB IP Rotation configuration status
+        const adbRotationEnabled = Boolean(this.config.useAdbIpRotation)
         const legacyConfigDetected = Boolean(this.config.useAdbIpRotation)
-        if (legacyConfigDetected) {
-            this.logger.warn(
+        if (adbRotationEnabled) {
+            this.logger.info(
                 'main',
-                'LEGACY-CONFIG',
-                '⚠️ useAdbIpRotation (batch rotation per account count) has been removed. Use networkRecovery configuration instead.',
-                'yellow'
+                'ADB-ROTATION',
+                `ADB IP Rotation enabled=true (auto-rotate per batch every 2 accounts via airplane mode)`
             )
         }
 
@@ -974,6 +978,11 @@ export class MicrosoftRewardsBot {
 
             // Register IP confirm callback for dashboard button
             registerIpConfirmCallback(() => {
+                if (manualIpConfirmResolver) {
+                    const res = manualIpConfirmResolver
+                    manualIpConfirmResolver = null
+                    res()
+                }
                 const reqId = this.manualNetworkRecoveryAdapter?.getCurrentRequestId()
                 if (reqId) {
                     this.manualNetworkRecoveryAdapter?.resolveManual(reqId, 'resume')
@@ -1376,6 +1385,156 @@ export class MicrosoftRewardsBot {
             }
 
             processedCount++
+
+            // =======================================================
+            // 🤖 AUTO-ROTATE DENGAN PROTECTION LOOP + DATA SAVER CLI
+            // =======================================================
+            if (processedCount % 2 === 0 && processedCount < accounts.length) {
+                let ipChanged = false
+                const oldIp = currentIpAddress
+                const isManual = this.config.useDynamicWifiProxy || !this.config.useAdbIpRotation
+
+                while (!ipChanged) {
+                    if (this.stopRequested) {
+                        this.logger.warn('main', 'IP-INTERCEPTOR', 'IP rotation aborted due to user stop request.')
+                        break
+                    }
+
+                    this.logger.warn(
+                        'main',
+                        'IP-INTERCEPTOR',
+                        '=======================================================',
+                        'yellow'
+                    )
+                    this.logger.warn(
+                        'main',
+                        'IP-INTERCEPTOR',
+                        `🔥 BATCH [${processedCount / 2}] SELESAI! ROTASI IP ${isManual ? 'MANUAL (LAN / HOTSPOT)' : 'AUTO (ADB AIRPLANE MODE)'} DIMULAI... 🔥`,
+                        'yellow'
+                    )
+                    this.logger.warn('main', 'IP-INTERCEPTOR', `IP Saat Ini: [ ${oldIp} ]`, 'yellow')
+                    this.logger.warn(
+                        'main',
+                        'IP-INTERCEPTOR',
+                        '=======================================================',
+                        'yellow'
+                    )
+
+                    try {
+                        if (isManual) {
+                            try {
+                                require('child_process').exec(
+                                    `powershell -c (New-Object Media.SoundPlayer "C:\\Windows\\Media\\notify.wav").PlaySync();`
+                                )
+                            } catch {}
+
+                            this.logger.info(
+                                'main',
+                                'IP-INTERCEPTOR',
+                                '📌 SILAKAN MATIKAN & NYALAKAN MODE PESAWAT / HOTSPOT DI HP ANDA.',
+                                'cyan'
+                            )
+                            this.logger.info(
+                                'main',
+                                'IP-INTERCEPTOR',
+                                '👉 Tekan [ENTER] di terminal atau klik [Confirm IP Rotated] di Web UI setelah selesai...',
+                                'cyan'
+                            )
+
+                            await waitForUserConfirmation()
+
+                            this.logger.info('main', 'IP-INTERCEPTOR', 'Memeriksa perubahan IP publik baru...')
+                        } else {
+                            const execSync = require('child_process').execSync
+                            this.logger.info('main', 'IP-INTERCEPTOR', 'ADB -> Mengaktifkan Mode Pesawat...')
+                            try {
+                                const out = execSync('adb shell cmd connectivity airplane-mode enable', { encoding: 'utf-8' })
+                                if (out && out.includes('No shell command implementation')) {
+                                    throw new Error(out.trim())
+                                }
+                            } catch {
+                                execSync('adb shell settings put global airplane_mode_on 1')
+                                execSync('adb shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state true')
+                            }
+                            await this.utils.wait(5000)
+
+                            this.logger.info(
+                                'main',
+                                'IP-INTERCEPTOR',
+                                'ADB -> Mematikan Mode Pesawat (Mencari Sinyal Baru)...'
+                            )
+                            try {
+                                const out = execSync('adb shell cmd connectivity airplane-mode disable', { encoding: 'utf-8' })
+                                if (out && out.includes('No shell command implementation')) {
+                                    throw new Error(out.trim())
+                                }
+                            } catch {
+                                execSync('adb shell settings put global airplane_mode_on 0')
+                                execSync('adb shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state false')
+                            }
+
+                            this.logger.info(
+                                'main',
+                                'IP-INTERCEPTOR',
+                                'Menunggu 12 detik agar interface sinyal stabil...'
+                            )
+                            await this.utils.wait(12000)
+
+                            try {
+                                execSync('adb shell cmd tethering tether usb')
+                                execSync('adb shell svc usb setFunctions rndis')
+                            } catch {}
+                        }
+
+                        const checkNewIp = await this.getCurrentIP(this.localProxyPort || undefined)
+
+                        if (checkNewIp !== oldIp && checkNewIp !== 'UNKNOWN_IP') {
+                            currentIpAddress = checkNewIp
+                            ipChanged = true
+                            this.logger.info(
+                                'main',
+                                'IP-INTERCEPTOR',
+                                `🚀 SUKSES! IP Baru Terdeteksi: [ ${currentIpAddress} ]`,
+                                'green'
+                            )
+                            this.updateDashboardGlobal({ currentIP: currentIpAddress })
+                            await this.utils.wait(3000)
+                        } else {
+                            this.logger.error(
+                                'main',
+                                'IP-INTERCEPTOR',
+                                `❌ GAGAL! IP masih kembar [ ${checkNewIp} ]. Silakan coba matikan/nyalakan ulang hotspot...`,
+                                'red'
+                            )
+                            try {
+                                require('child_process').exec(
+                                    `powershell -c (New-Object Media.SoundPlayer "C:\\Windows\\Media\\notify.wav").PlaySync();`
+                                )
+                            } catch {}
+                            await this.utils.wait(3000)
+                        }
+                    } catch (adbError) {
+                        this.logger.error(
+                            'main',
+                            'IP-INTERCEPTOR',
+                            `🚨 Jalur Jaringan Lemot/IP Glitch / Device ADB Tidak Terdeteksi: ${adbError}`,
+                            'red'
+                        )
+                        try {
+                            require('child_process').exec(
+                                `powershell -c (New-Object Media.SoundPlayer "C:\\Windows\\Media\\notify.wav").PlaySync();`
+                            )
+                        } catch {}
+                        this.logger.info(
+                            'main',
+                            'IP-INTERCEPTOR',
+                            '📌 Pastikan device HP tercolok dan USB debugging aktif, atau ubah IP secara manual...',
+                            'cyan'
+                        )
+                        await this.utils.wait(3000)
+                    }
+                }
+            }
         }
 
         if (this.config.clusters <= 1 && cluster.isPrimary) {
