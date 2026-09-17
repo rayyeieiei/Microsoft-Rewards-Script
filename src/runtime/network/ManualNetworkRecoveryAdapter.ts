@@ -1,3 +1,4 @@
+import cluster from 'cluster'
 import crypto from 'crypto'
 import readline from 'readline'
 import type {
@@ -135,8 +136,10 @@ export class ManualNetworkRecoveryAdapter implements NetworkRecoveryAdapter {
                 reject(timeoutErr)
             }, timeoutMs)
 
-            // 3. Setup CLI readline listener on stdin if available
-            const input = this.stdin || (process.stdin.isTTY ? process.stdin : undefined)
+            // 3. Setup CLI readline listener on stdin only if in primary TTY or explicit stream
+            const isWorker = typeof cluster !== 'undefined' && (cluster.isWorker || !cluster.isPrimary)
+            const isTty = Boolean(process.stdin && process.stdin.isTTY && !isWorker)
+            const input = this.stdin || (isTty ? process.stdin : undefined)
             if (input) {
                 try {
                     const rl = readline.createInterface({
@@ -151,6 +154,10 @@ export class ManualNetworkRecoveryAdapter implements NetworkRecoveryAdapter {
                         }
                     })
                 } catch {}
+            } else {
+                this.logger?.info(
+                    '[NETWORK-MANUAL] Console stdin is not a TTY or running in worker; operator resolution via Dashboard or timeout required'
+                )
             }
         })
     }

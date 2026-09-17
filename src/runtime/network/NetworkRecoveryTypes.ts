@@ -26,6 +26,8 @@ export type NetworkRecoveryFailureReason =
     | 'operator-timeout'
     | 'cancelled'
     | 'device-locked'
+    | 'device-busy'
+    | 'restoration-failed'
     | 'unknown'
 
 export type AirplaneModeKnowledge =

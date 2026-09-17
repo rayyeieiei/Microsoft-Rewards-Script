@@ -11,6 +11,7 @@ import { runAccountOwnershipIdentityTests } from './accountOwnershipIdentity.tes
 import { runLifecycleAndShutdownTests } from './lifecycleAndShutdown.test'
 import { runNetworkRecoveryTests } from './networkRecovery.test'
 import { runNetworkRecoveryDiagnosticsTests } from './networkRecoveryDiagnostics.test'
+import { runNetworkRecoveryDecouplingTests } from './networkRecoveryDecoupling.test'
 import { runSessionPersistenceTests } from './sessionPersistence.test'
 
 async function runAll() {
@@ -23,6 +24,9 @@ async function runAll() {
     console.log('')
 
     await runNetworkRecoveryDiagnosticsTests()
+    console.log('')
+
+    await runNetworkRecoveryDecouplingTests()
     console.log('')
 
     await runPunchCardTests()
