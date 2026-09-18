@@ -4,6 +4,7 @@ import { URLSearchParams } from 'url'
 
 import type { MicrosoftRewardsBot } from '../../../index'
 import { createManagedPage, sanitizeDiagnosticUrl } from '../../../runtime/BrowserOperationGuard'
+import { UserAgentManager } from '../../UserAgent'
 
 export class MobileAccessLogin {
     private clientId = '0000000040170455'
@@ -172,7 +173,12 @@ export class MobileAccessLogin {
             const response = await this.bot.axios.request({
                 url: this.tokenUrl,
                 method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'User-Agent': UserAgentManager.DEFAULT_MOBILE_UA,
+                    'Origin': 'https://login.live.com',
+                    'Referer': 'https://login.live.com/'
+                },
                 data: data.toString()
             })
 

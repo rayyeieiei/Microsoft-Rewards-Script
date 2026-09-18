@@ -325,7 +325,7 @@ export class Search extends Workers {
             this.bot.logger.debug(isMobile, 'SEARCH-BING', `Returning home to refresh state | url=${this.bingHome}`)
 
             const cvid = randomBytes(16).toString('hex')
-            const url = `${this.bingHome}/search?q=${encodeURIComponent(query)}&PC=U531&FORM=ANNTA1&cvid=${cvid}`
+            const url = `${this.bingHome}/search?q=${encodeURIComponent(query)}&cvid=${cvid}`
 
             await searchPage.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
             await this.bot.browser.utils.tryDismissAllMessages(searchPage)
@@ -334,7 +334,7 @@ export class Search extends Workers {
         this.bot.logger.debug(
             isMobile,
             'SEARCH-BING',
-            `Starting bingSearch | query="${query}" | maxAttempts=${maxAttempts} | searchCount=${currentSearchCount} | refreshEvery=${refreshThreshold} | scrollRandomResults=${this.bot.config.searchSettings.scrollRandomResults} | clickRandomResults=${this.bot.config.searchSettings.clickRandomResults}`
+            `Starting search session | maxAttempts=${maxAttempts} | query="${query}"`
         )
 
         for (let i = 0; i < maxAttempts; i++) {
@@ -354,12 +354,16 @@ export class Search extends Workers {
                 if (isReady) {
                     await searchBox.click({ timeout: 1500 }).catch(() => {})
                     await searchBox.fill('')
-                    await searchPage.keyboard.type(query, { delay: 35 })
+                    // Pengetikan realistis dengan random jitter 70ms - 190ms per karakter
+                    for (const char of query) {
+                        const charDelay = Math.floor(Math.random() * (190 - 70 + 1)) + 70
+                        await searchPage.keyboard.type(char, { delay: charDelay })
+                    }
                     await searchPage.keyboard.press('Enter')
                 } else {
-                    // Resilient Fallback: Navigasi langsung ke URL pencarian (100% andal, mengatasi widget olahraga/hasil dinamis)
+                    // Resilient Fallback: Navigasi langsung ke URL pencarian bersih tanpa parameter statis mencurigakan
                     const cvid = randomBytes(16).toString('hex')
-                    const searchUrl = `${this.bingHome}/search?q=${encodeURIComponent(query)}&PC=U531&FORM=ANNTA1&cvid=${cvid}`
+                    const searchUrl = `${this.bingHome}/search?q=${encodeURIComponent(query)}&cvid=${cvid}`
                     await searchPage.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {})
                 }
 

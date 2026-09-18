@@ -3,9 +3,14 @@ import type { ChromeVersion, EdgeVersion } from '../interface/UserAgentUtil'
 import type { MicrosoftRewardsBot } from '../index'
 
 export class UserAgentManager {
+    public static readonly DEFAULT_MOBILE_UA =
+        'Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36 EdgA/128.0.2708.57'
+    public static readonly DEFAULT_DESKTOP_UA =
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 Edg/128.0.2708.57'
+
     private static readonly NOT_A_BRAND_VERSION = '99'
 
-    constructor(private bot: MicrosoftRewardsBot) {}
+    constructor(private bot?: MicrosoftRewardsBot) {}
 
     async getUserAgent(isMobile: boolean) {
         const system = this.getSystemComponents(isMobile)
@@ -53,7 +58,7 @@ export class UserAgentManager {
             const data: ChromeVersion = response.data
             return data.channels.Stable.version
         } catch (error) {
-            this.bot.logger.error(
+            this.bot?.logger?.error(
                 isMobile,
                 'USERAGENT-CHROME-VERSION',
                 `An error occurred: ${error instanceof Error ? error.message : String(error)}`
@@ -80,7 +85,7 @@ export class UserAgentManager {
                 windows: stable.Releases.find(x => x.Platform == 'Windows' && x.Architecture == 'x64')?.ProductVersion
             }
         } catch (error) {
-            this.bot.logger.error(
+            this.bot?.logger?.error(
                 isMobile,
                 'USERAGENT-EDGE-VERSION',
                 `An error occurred: ${error instanceof Error ? error.message : String(error)}`

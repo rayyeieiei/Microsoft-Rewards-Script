@@ -38,7 +38,7 @@ export class SearchOnBing extends Workers {
                 ['bing.com', 'live.com', 'microsoftonline.com']
             )
 
-            const fingerprintHeaders = { ...this.bot.fingerprint.headers }
+            const fingerprintHeaders = { ...(this.bot.fingerprint?.headers ?? {}) }
             delete fingerprintHeaders['Cookie']
             delete fingerprintHeaders['cookie']
             this.fingerprintHeader = fingerprintHeaders
@@ -104,7 +104,7 @@ export class SearchOnBing extends Workers {
                 this.bot.logger.debug(this.bot.isMobile, 'SEARCH-ON-BING-SEARCH', `Processing query | query="${query}"`)
 
                 const cvid = randomBytes(16).toString('hex')
-                const url = `${this.bingHome}/search?q=${encodeURIComponent(query)}&PC=U531&FORM=ANNTA1&cvid=${cvid}`
+                const url = `${this.bingHome}/search?q=${encodeURIComponent(query)}&cvid=${cvid}`
 
                 await this.bot.mainMobilePage.goto(url)
 

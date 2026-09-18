@@ -5,6 +5,7 @@ import { HttpsProxyAgent } from 'https-proxy-agent'
 import { SocksProxyAgent } from 'socks-proxy-agent'
 import { URL } from 'url'
 import type { AccountProxy } from '../interface/Account'
+import { UserAgentManager } from '../browser/UserAgent'
 
 class AxiosClient {
     private instance: AxiosInstance
@@ -19,7 +20,18 @@ class AxiosClient {
         this.account = account
 
         this.instance = axios.create({
-            timeout: 20000
+            timeout: 20000,
+            headers: {
+                'User-Agent': UserAgentManager.DEFAULT_MOBILE_UA,
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Sec-Ch-Ua': '"Chromium";v="128", "Not;A=Brand";v="24", "Microsoft Edge";v="128"',
+                'Sec-Ch-Ua-Mobile': '?1',
+                'Sec-Ch-Ua-Platform': '"Android"',
+                'Sec-Fetch-Site': 'same-origin',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Dest': 'empty'
+            }
         })
 
         if (onSuspectedNetworkOutage) {
@@ -125,7 +137,16 @@ class AxiosClient {
 
     public async request(config: AxiosRequestConfig, bypassProxy = false): Promise<AxiosResponse> {
         if (bypassProxy) {
-            const bypassInstance = axios.create()
+            const bypassInstance = axios.create({
+                headers: {
+                    'User-Agent': UserAgentManager.DEFAULT_MOBILE_UA,
+                    'Accept': 'application/json, text/plain, */*',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Sec-Ch-Ua': '"Chromium";v="128", "Not;A=Brand";v="24", "Microsoft Edge";v="128"',
+                    'Sec-Ch-Ua-Mobile': '?1',
+                    'Sec-Ch-Ua-Platform': '"Android"'
+                }
+            })
             axiosRetry(bypassInstance, {
                 retries: 3,
                 retryDelay: axiosRetry.exponentialDelay

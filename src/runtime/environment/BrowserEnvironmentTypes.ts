@@ -16,6 +16,7 @@ export interface BrowserEnvironmentProfile {
     source: 'browser-default' | 'project-config'
     contextKind: BrowserContextKind
     screen?: ScreenProfile
+    userAgent?: string
     locale?: string
     timezoneId?: string
     colorScheme?: 'light' | 'dark' | 'no-preference'
@@ -30,6 +31,7 @@ export interface EnvironmentValidationResult {
 export interface BrowserEnvironmentConfig {
     mobile?: Partial<ScreenProfile>
     desktop?: Partial<ScreenProfile>
+    userAgent?: string
     locale?: string
     timezoneId?: string
     colorScheme?: 'light' | 'dark' | 'no-preference'

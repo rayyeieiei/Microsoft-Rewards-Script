@@ -1,4 +1,5 @@
 import type { BrowserContextOptions } from 'patchright'
+import { UserAgentManager } from '../../browser/UserAgent'
 import type {
     BrowserContextKind,
     BrowserEnvironmentConfig,
@@ -49,6 +50,9 @@ export class BrowserEnvironmentPolicy {
         }
 
         const profileId = `profile_${kind}_${finalScreen.viewport.width}x${finalScreen.viewport.height}`
+        const userAgent =
+            config?.userAgent ??
+            (isMobile ? UserAgentManager.DEFAULT_MOBILE_UA : UserAgentManager.DEFAULT_DESKTOP_UA)
 
         return {
             schemaVersion: 1,
@@ -56,6 +60,7 @@ export class BrowserEnvironmentPolicy {
             source: 'project-config',
             contextKind: kind,
             screen: finalScreen,
+            userAgent,
             locale: config?.locale,
             timezoneId: config?.timezoneId,
             colorScheme: config?.colorScheme ?? 'light'
@@ -67,6 +72,7 @@ export class BrowserEnvironmentPolicy {
      * Strictly enforces:
      * - ignoreHTTPSErrors: false (TLS security)
      * - NO extraHTTPHeaders containing sec-ch-ua* (Chromium generates client hints natively)
+     * - Official Edge userAgent for mobile/desktop to eliminate HeadlessChrome and Win32 on mobile
      * - Native WebGL, webdriver, battery, and media devices
      */
     public static toContextOptions(profile: BrowserEnvironmentProfile): BrowserContextOptions {
@@ -74,6 +80,12 @@ export class BrowserEnvironmentPolicy {
             ignoreHTTPSErrors: false,
             permissions: []
         }
+
+        options.userAgent =
+            profile.userAgent ??
+            (profile.contextKind === 'mobile'
+                ? UserAgentManager.DEFAULT_MOBILE_UA
+                : UserAgentManager.DEFAULT_DESKTOP_UA)
 
         if (profile.screen) {
             options.viewport = profile.screen.viewport

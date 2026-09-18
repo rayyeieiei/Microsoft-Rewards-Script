@@ -2,8 +2,61 @@ import type { AxiosRequestConfig } from 'axios'
 import { randomBytes } from 'crypto'
 import { Workers } from '../../Workers'
 import { Database } from '../../../util/Database'
+import { UserAgentManager } from '../../../browser/UserAgent'
 
 export class ReadToEarn extends Workers {
+    private async fetchValidMsnArticles(count: number): Promise<string[]> {
+        const market = (this.bot.userData.geoLocale || 'US').toLowerCase()
+        const marketParam = market === 'us' ? 'en-us' : `en-${market}`
+        const endpoints = [
+            `https://assets.msn.com/service/news/feed/pages/binghp?apikey=0QfOX3Vn51YCzitbLaRkTTBadtWpgTN8NZLW0C1SEM&market=${marketParam}`,
+            `https://assets.msn.com/service/news/feed/pages/selected?apikey=0QfOX3Vn51YCzitbLaRkTTBadtWpgTN8NZLW0C1SEM&market=${marketParam}`
+        ]
+
+        for (const url of endpoints) {
+            try {
+                const res = await this.bot.axios.request({
+                    url,
+                    method: 'GET',
+                    headers: {
+                        'User-Agent': UserAgentManager.DEFAULT_MOBILE_UA,
+                        Accept: 'application/json'
+                    }
+                })
+
+                if (res?.data) {
+                    const data = typeof res.data === 'string' ? JSON.parse(res.data) : res.data
+                    const articleIds: string[] = []
+
+                    for (const section of data.sections || []) {
+                        for (const card of section.cards || []) {
+                            if (card.id && typeof card.id === 'string') {
+                                articleIds.push(card.id)
+                            }
+                            for (const subCard of card.subCards || []) {
+                                if (subCard.id && typeof subCard.id === 'string') {
+                                    articleIds.push(subCard.id)
+                                }
+                            }
+                        }
+                    }
+
+                    if (articleIds.length > 0) {
+                        return Array.from(new Set(articleIds)).slice(0, count)
+                    }
+                }
+            } catch (err) {
+                this.bot.logger.debug(
+                    this.bot.isMobile,
+                    'READ-TO-EARN',
+                    `Failed to fetch articles from MSN feed: ${err instanceof Error ? err.message : String(err)}`
+                )
+            }
+        }
+
+        return []
+    }
+
     public async doReadToEarn() {
         if (!this.bot.accessToken) {
             this.bot.logger.warn(
@@ -53,11 +106,13 @@ export class ReadToEarn extends Workers {
             }
 
             const articleCount = Math.min(10, Math.ceil(remainingQuota / 3))
+            const validArticleIds = await this.fetchValidMsnArticles(articleCount)
             let totalGained = 0
             let articlesRead = 0
 
             for (let i = 0; i < articleCount; ++i) {
-                jsonData.id = randomBytes(64).toString('hex')
+                const articleId = validArticleIds[i] || randomBytes(16).toString('hex')
+                jsonData.id = articleId
 
                 this.bot.logger.debug(
                     this.bot.isMobile,
@@ -70,8 +125,7 @@ export class ReadToEarn extends Workers {
                     method: 'POST',
                     headers: {
                         Authorization: `Bearer ${this.bot.accessToken}`,
-                        'User-Agent':
-                            'Bing/32.5.431027001 (com.microsoft.bing; build:431027001; iOS 17.6.1) Alamofire/5.10.2',
+                        'User-Agent': UserAgentManager.DEFAULT_MOBILE_UA,
                         'Content-Type': 'application/json',
                         'X-Rewards-Country': this.bot.userData.geoLocale,
                         'X-Rewards-Language': 'en',

@@ -2,6 +2,7 @@ import type { AxiosRequestConfig } from 'axios'
 import { randomUUID } from 'crypto'
 import { Workers } from '../../Workers'
 import { Database } from '../../../util/Database'
+import { UserAgentManager } from '../../../browser/UserAgent'
 
 export class DailyCheckIn extends Workers {
     private oldBalance: number = this.bot.userData.currentPoints
@@ -143,8 +144,7 @@ export class DailyCheckIn extends Workers {
                 method: 'POST',
                 headers: {
                     Authorization: `Bearer ${this.bot.accessToken}`,
-                    'User-Agent':
-                        'Bing/32.5.431027001 (com.microsoft.bing; build:431027001; iOS 17.6.1) Alamofire/5.10.2',
+                    'User-Agent': UserAgentManager.DEFAULT_MOBILE_UA,
                     'Content-Type': 'application/json',
                     'X-Rewards-Country': this.bot.userData.geoLocale,
                     'X-Rewards-Language': 'en',

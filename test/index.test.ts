@@ -12,6 +12,7 @@ import { runLifecycleAndShutdownTests } from './lifecycleAndShutdown.test'
 import { runNetworkRecoveryTests } from './networkRecovery.test'
 import { runNetworkRecoveryDiagnosticsTests } from './networkRecoveryDiagnostics.test'
 import { runSessionPersistenceTests } from './sessionPersistence.test'
+import { runAntiAbuseRemediationTests } from './antiAbuseRemediation.test'
 
 async function runAll() {
     console.log('🧪 Starting Full Test Suite Execution...\n')
@@ -56,6 +57,9 @@ async function runAll() {
     console.log('')
 
     await runSessionPersistenceTests()
+    console.log('')
+
+    await runAntiAbuseRemediationTests()
     console.log('')
 
     console.log('🎉 ALL TESTS IN SUITE PASSED SUCCESSFULLY!')

@@ -23,7 +23,6 @@ class Browser {
         '--no-default-browser-check',
         '--disable-web-authentication-ui',
         '--disable-external-intent-requests',
-        '--disable-blink-features=Attestation',
         '--disable-features=WebAuthentication,PasswordManagerOnboarding,PasswordManager,EnablePasswordsAccountStorage,Passkeys,WebAuthenticationProxy,U2F,Translate,OptimizationHints,MediaRouter',
         '--disable-save-password-bubble',
         '--disable-background-networking',
@@ -187,15 +186,6 @@ class Browser {
 
             const context = await browser.newContext(contextOptions)
 
-            await context.addInitScript(() => {
-                Object.defineProperty(navigator, 'credentials', {
-                    value: {
-                        create: () => Promise.reject(new Error('WebAuthn disabled')),
-                        get: () => Promise.reject(new Error('WebAuthn disabled'))
-                    }
-                })
-            })
-
             context.setDefaultTimeout(this.bot.utils.stringToNumber(this.bot.config?.globalTimeout ?? 30000))
 
             // ==================== ULTRA DATA SAVER (HEMAT KUOTA 80%-90%) ====================
@@ -204,13 +194,48 @@ class Browser {
                 const type = req.resourceType()
                 const url = req.url().toLowerCase()
 
-                // 1. Blokir resource tipe berat (Gambar, Video, Audio, Font, WebSocket)
-                if (type === 'image' || type === 'media' || type === 'font' || type === 'websocket') {
+                // Whitelist telemetri penting & verifikasi poin: JANGAN PERNAH dibatalkan
+                const isRewardsTelemetry =
+                    url.includes('/fd/ls/') ||
+                    url.includes('/rewards/api/') ||
+                    url.includes('c.bing.com') ||
+                    url.includes('rewards.bing.com') ||
+                    url.includes('activityid=') ||
+                    url.includes('/rewards/log') ||
+                    url.includes('/fd/ls/lsp.aspx')
+
+                if (isRewardsTelemetry) {
+                    return route.continue().catch(() => {})
+                }
+
+                // 1. Blokir resource tipe berat non-telemetri (Video, Audio, Font, WebSocket)
+                if (type === 'media' || type === 'font' || type === 'websocket') {
                     this.bot.trackBlockedRequest()
                     return route.abort().catch(() => {})
                 }
 
-                // 2. Blokir domain iklan, tracker non-Microsoft, copilot, dan aset berat non-Rewards
+                // 2. Blokir gambar umum/berat (format file banner/konten visual besar), tapi izinkan tracking pixel 1x1
+                if (type === 'image') {
+                    const isHeavyImage =
+                        url.endsWith('.png') ||
+                        url.endsWith('.jpg') ||
+                        url.endsWith('.jpeg') ||
+                        url.endsWith('.webp') ||
+                        url.endsWith('.svg') ||
+                        url.includes('.png?') ||
+                        url.includes('.jpg?') ||
+                        url.includes('.jpeg?') ||
+                        url.includes('.webp?') ||
+                        url.includes('bing.com/th?id=') ||
+                        url.includes('static-news.msn.com')
+
+                    if (isHeavyImage) {
+                        this.bot.trackBlockedRequest()
+                        return route.abort().catch(() => {})
+                    }
+                }
+
+                // 3. Blokir domain iklan dan tracker pihak ketiga eksternal
                 if (
                     url.includes('clarity.ms') ||
                     url.includes('adnxs.com') ||
@@ -228,11 +253,8 @@ class Browser {
                     url.includes('bing.com/maps') ||
                     url.includes('bing.com/shop') ||
                     url.includes('bing.com/widget') ||
-                    url.includes('bing.com/th?id=') ||
                     url.includes('tiles.virtualearth.net') ||
-                    url.includes('assets.msn.com') ||
                     url.includes('edgeservices.bing.com') ||
-                    url.includes('c.bing.com') ||
                     url.includes('c.clarity.ms') ||
                     url.includes('bing.com/as/suggestions') ||
                     url.includes('nav.smartscreen.microsoft.com')
