@@ -1446,44 +1446,95 @@ export class MicrosoftRewardsBot {
                             this.logger.info('main', 'IP-INTERCEPTOR', 'Memeriksa perubahan IP publik baru...')
                         } else {
                             const execSync = require('child_process').execSync
+                            const serial = this.config.networkRecovery?.adbSerial?.trim()
+                            const adbPrefix = serial ? `adb -s ${serial}` : 'adb'
+
                             this.logger.info('main', 'IP-INTERCEPTOR', 'ADB -> Mengaktifkan Mode Pesawat...')
+
+                            // 1. Coba cmd connectivity (Android 11+ AOSP)
+                            let airplaneActivated = false
                             try {
-                                const out = execSync('adb shell cmd connectivity airplane-mode enable', { encoding: 'utf-8' })
-                                if (out && out.includes('No shell command implementation')) {
-                                    throw new Error(out.trim())
+                                const out = execSync(`${adbPrefix} shell cmd connectivity airplane-mode enable`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] })
+                                const outLower = (out || '').toLowerCase()
+                                if (!outLower.includes('unknown') &&
+                                    !outLower.includes('error') &&
+                                    !outLower.includes('no shell command') &&
+                                    !outLower.includes('can\'t find service') &&
+                                    !outLower.includes('permission')) {
+                                    try {
+                                        const state = execSync(`${adbPrefix} shell settings get global airplane_mode_on`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim()
+                                        if (state === '1') airplaneActivated = true
+                                    } catch {}
                                 }
-                            } catch {
-                                execSync('adb shell settings put global airplane_mode_on 1')
-                                execSync('adb shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state true')
+                            } catch {}
+
+                            // 2. Fallback: Settings put global 1 + am broadcast (Universal Android)
+                            if (!airplaneActivated) {
+                                try {
+                                    execSync(`${adbPrefix} shell settings put global airplane_mode_on 1`, { stdio: ['pipe', 'pipe', 'pipe'] })
+                                    execSync(`${adbPrefix} shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state true`, { stdio: ['pipe', 'pipe', 'pipe'] })
+                                } catch {}
                             }
-                            await this.utils.wait(5000)
+
+                            // 3. Fallback jika device memiliki akses root (su)
+                            try {
+                                execSync(`${adbPrefix} shell su -c "cmd connectivity airplane-mode enable || (settings put global airplane_mode_on 1 && am broadcast -a android.intent.action.AIRPLANE_MODE --ez state true)"`, { stdio: ['pipe', 'pipe', 'pipe'] })
+                            } catch {}
+
+                            // 4. Force cut radio data (svc data disable) agar koneksi BTS seluler pasti terputus
+                            try {
+                                execSync(`${adbPrefix} shell svc data disable`, { stdio: ['pipe', 'pipe', 'pipe'] })
+                            } catch {}
+
+                            this.logger.info('main', 'IP-INTERCEPTOR', 'Menunggu 8 detik agar sesi IP provider ter-reset...')
+                            await this.utils.wait(8000)
 
                             this.logger.info(
                                 'main',
                                 'IP-INTERCEPTOR',
                                 'ADB -> Mematikan Mode Pesawat (Mencari Sinyal Baru)...'
                             )
+
+                            // 1. Coba cmd connectivity disable
                             try {
-                                const out = execSync('adb shell cmd connectivity airplane-mode disable', { encoding: 'utf-8' })
-                                if (out && out.includes('No shell command implementation')) {
-                                    throw new Error(out.trim())
-                                }
-                            } catch {
-                                execSync('adb shell settings put global airplane_mode_on 0')
-                                execSync('adb shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state false')
-                            }
+                                execSync(`${adbPrefix} shell cmd connectivity airplane-mode disable`, { stdio: ['pipe', 'pipe', 'pipe'] })
+                            } catch {}
+
+                            // 2. Settings put global 0 + am broadcast
+                            try {
+                                execSync(`${adbPrefix} shell settings put global airplane_mode_on 0`, { stdio: ['pipe', 'pipe', 'pipe'] })
+                                execSync(`${adbPrefix} shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state false`, { stdio: ['pipe', 'pipe', 'pipe'] })
+                            } catch {}
+
+                            // 3. Fallback root (su) disable
+                            try {
+                                execSync(`${adbPrefix} shell su -c "cmd connectivity airplane-mode disable || (settings put global airplane_mode_on 0 && am broadcast -a android.intent.action.AIRPLANE_MODE --ez state false)"`, { stdio: ['pipe', 'pipe', 'pipe'] })
+                            } catch {}
+
+                            // 4. Nyalakan kembali radio data seluler
+                            try {
+                                execSync(`${adbPrefix} shell svc data enable`, { stdio: ['pipe', 'pipe', 'pipe'] })
+                            } catch {}
 
                             this.logger.info(
                                 'main',
                                 'IP-INTERCEPTOR',
-                                'Menunggu 12 detik agar interface sinyal stabil...'
+                                'Menunggu 10 detik agar radio seluler stabil...'
                             )
-                            await this.utils.wait(12000)
+                            await this.utils.wait(10000)
 
+                            // 5. Pastikan USB Tethering / RNDIS aktif kembali
                             try {
-                                execSync('adb shell cmd tethering tether usb')
-                                execSync('adb shell svc usb setFunctions rndis')
+                                execSync(`${adbPrefix} shell cmd tethering tether usb`, { stdio: ['pipe', 'pipe', 'pipe'] })
+                                execSync(`${adbPrefix} shell svc usb setFunctions rndis`, { stdio: ['pipe', 'pipe', 'pipe'] })
                             } catch {}
+
+                            this.logger.info(
+                                'main',
+                                'IP-INTERCEPTOR',
+                                'Menunggu 5 detik agar Windows mendeteksi adapter USB Tethering...'
+                            )
+                            await this.utils.wait(5000)
                         }
 
                         const checkNewIp = await this.getCurrentIP(this.localProxyPort || undefined)
