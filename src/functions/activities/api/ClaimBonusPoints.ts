@@ -32,7 +32,7 @@ export class ClaimBonusPoints extends Workers {
                 ['bing.com', 'live.com', 'microsoftonline.com']
             )
 
-            const fingerprintHeaders = { ...this.bot.fingerprint.headers }
+            const fingerprintHeaders = { ...(this.bot.fingerprint?.headers ?? {}) }
             delete fingerprintHeaders['Cookie']
             delete fingerprintHeaders['cookie']
             this.fingerprintHeader = fingerprintHeaders
