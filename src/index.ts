@@ -219,6 +219,7 @@ export class MicrosoftRewardsBot {
     public browserFactory: Browser = new Browser(this)
     private login = new Login(this)
     private searchManager: SearchManager
+    public searchCooldownActive = false
     public axios!: AxiosClient
 
     public bandwidthTracker = {
@@ -273,6 +274,7 @@ export class MicrosoftRewardsBot {
     }
 
     public resetAccountState() {
+        this.searchCooldownActive = false
         this.userData = {
             userName: '',
             geoLocale: 'US',

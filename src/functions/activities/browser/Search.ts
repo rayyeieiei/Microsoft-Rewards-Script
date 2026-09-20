@@ -80,6 +80,15 @@ export class Search extends Workers {
                 )
             }
 
+            if (this.bot.searchCooldownActive) {
+                this.bot.logger.warn(
+                    isMobile,
+                    'SEARCH-BING',
+                    `[COOLDOWN-DETECTED] Search cooldown is active for this account, skipping ${isMobile ? 'Mobile' : 'Desktop'} searches.`
+                )
+                return totalGainedPoints
+            }
+
             this.topicalChainer.resetChain()
 
             // Go to bing
@@ -89,10 +98,21 @@ export class Search extends Workers {
             await this.bot.browser.utils.tryDismissAllMessages(page)
 
             let stagnantLoop = 0
-            const stagnantLoopMax = 10
+            const stagnantLoopMax = 3
+            let isCooldownDetected = false
 
             for (let i = 0; i < queries.length; i++) {
                 const query = queries[i] as string
+                const trimmedQuery = query?.trim() ?? ''
+                if (trimmedQuery.length < 5 || !trimmedQuery.includes(' ')) {
+                    this.bot.logger.debug(
+                        isMobile,
+                        'SEARCH-BING',
+                        `Skipping short or single-word query: "${trimmedQuery}"`
+                    )
+                    continue
+                }
+
                 searchCount++
 
                 searchCounters = await this.bingSearch(page, query, isMobile, searchCount)
@@ -124,6 +144,37 @@ export class Search extends Workers {
                         'SEARCH-BING',
                         `No points gained ${stagnantLoop}/${stagnantLoopMax} | query="${query}" | remaining=${newMissingPointsTotal}`
                     )
+
+                    if (stagnantLoop >= stagnantLoopMax) {
+                        this.bot.logger.info(
+                            isMobile,
+                            'SEARCH-BING',
+                            `Stagnant threshold reached (${stagnantLoop}/${stagnantLoopMax}), performing server hard-verification...`
+                        )
+                        const verifyRes = await this.verifyPointsWithServer(page, isMobile)
+                        if (verifyRes.verifiedGained && verifyRes.newBalance) {
+                            const actualGained = verifyRes.gained ?? 0
+                            this.bot.logger.info(
+                                isMobile,
+                                'SEARCH-BING',
+                                `Hard-verification SUCCESS: Server points increased by +${actualGained} (new balance: ${verifyRes.newBalance}). Resetting stagnant loop.`,
+                                'green'
+                            )
+                            this.bot.userData.currentPoints = verifyRes.newBalance
+                            this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + actualGained
+                            totalGainedPoints += actualGained
+                            stagnantLoop = 0
+                        } else {
+                            this.bot.logger.warn(
+                                isMobile,
+                                'SEARCH-BING',
+                                `[COOLDOWN-DETECTED] Microsoft 15-Minute Search Cooldown aktif pada akun ini (Server verified points stagnant after ${stagnantLoopMax} queries). Aborting search loop for graceful hand-off.`
+                            )
+                            this.bot.searchCooldownActive = true
+                            isCooldownDetected = true
+                            break
+                        }
+                    }
                 } else {
                     stagnantLoop = 0
                     void Database.getInstance().recordActivity(
@@ -163,16 +214,6 @@ export class Search extends Workers {
                     }
                 }
 
-                if (stagnantLoop > stagnantLoopMax) {
-                    this.bot.logger.warn(
-                        isMobile,
-                        'SEARCH-BING',
-                        `Search did not gain points for ${stagnantLoopMax} iterations, aborting search loop`
-                    )
-                    stagnantLoop = 0
-                    break
-                }
-
                 const remainingQueries = queries.length - (i + 1)
                 const minBuffer = 20
                 if (missingPointsTotal > 0 && remainingQueries < minBuffer) {
@@ -198,7 +239,7 @@ export class Search extends Workers {
                 }
             }
 
-            if (missingPointsTotal > 0) {
+            if (missingPointsTotal > 0 && !isCooldownDetected) {
                 this.bot.logger.info(
                     isMobile,
                     'SEARCH-BING',
@@ -206,9 +247,9 @@ export class Search extends Workers {
                 )
 
                 let stagnantLoop = 0
-                const stagnantLoopMax = 5
+                const stagnantLoopMax = 3
 
-                while (missingPointsTotal > 0) {
+                while (missingPointsTotal > 0 && !isCooldownDetected) {
                     const extra = await queryCore.queryManager({
                         shuffle: true,
                         related: false,
@@ -228,6 +269,11 @@ export class Search extends Workers {
                     )
 
                     for (const query of queries) {
+                        const trimmedQuery = query?.trim() ?? ''
+                        if (trimmedQuery.length < 5 || !trimmedQuery.includes(' ')) {
+                            continue
+                        }
+
                         this.bot.logger.info(
                             isMobile,
                             'SEARCH-BING-EXTRA',
@@ -248,6 +294,37 @@ export class Search extends Workers {
                                 'SEARCH-BING-EXTRA',
                                 `No points gained ${stagnantLoop}/${stagnantLoopMax} | query="${query}" | remaining=${newMissingPointsTotal}`
                             )
+
+                            if (stagnantLoop >= stagnantLoopMax) {
+                                this.bot.logger.info(
+                                    isMobile,
+                                    'SEARCH-BING-EXTRA',
+                                    `Stagnant threshold reached (${stagnantLoop}/${stagnantLoopMax}), performing server hard-verification...`
+                                )
+                                const verifyRes = await this.verifyPointsWithServer(page, isMobile)
+                                if (verifyRes.verifiedGained && verifyRes.newBalance) {
+                                    const actualGained = verifyRes.gained ?? 0
+                                    this.bot.logger.info(
+                                        isMobile,
+                                        'SEARCH-BING-EXTRA',
+                                        `Hard-verification SUCCESS: Server points increased by +${actualGained} (new balance: ${verifyRes.newBalance}). Resetting stagnant loop.`,
+                                        'green'
+                                    )
+                                    this.bot.userData.currentPoints = verifyRes.newBalance
+                                    this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + actualGained
+                                    totalGainedPoints += actualGained
+                                    stagnantLoop = 0
+                                } else {
+                                    this.bot.logger.warn(
+                                        isMobile,
+                                        'SEARCH-BING-EXTRA',
+                                        `[COOLDOWN-DETECTED] Microsoft 15-Minute Search Cooldown aktif pada akun ini (Server verified points stagnant after ${stagnantLoopMax} queries). Aborting extra searches.`
+                                    )
+                                    this.bot.searchCooldownActive = true
+                                    isCooldownDetected = true
+                                    break
+                                }
+                            }
                         } else {
                             stagnantLoop = 0
 
@@ -273,21 +350,10 @@ export class Search extends Workers {
                             )
                             break
                         }
+                    }
 
-                        if (stagnantLoop > stagnantLoopMax) {
-                            this.bot.logger.warn(
-                                isMobile,
-                                'SEARCH-BING-EXTRA',
-                                `Search did not gain points for ${stagnantLoopMax} iterations, aborting extra searches`
-                            )
-                            const finalBalance = Number(this.bot.userData.currentPoints ?? startBalance)
-                            this.bot.logger.info(
-                                isMobile,
-                                'SEARCH-BING',
-                                `Aborted extra searches | startBalance=${startBalance} | finalBalance=${finalBalance}`
-                            )
-                            return totalGainedPoints
-                        }
+                    if (isCooldownDetected) {
+                        break
                     }
                 }
             }
@@ -492,5 +558,41 @@ export class Search extends Workers {
                 `An error occurred during random click | message=${error instanceof Error ? error.message : String(error)}`
             )
         }
+    }
+
+    private async verifyPointsWithServer(
+        page: Page,
+        _isMobile: boolean
+    ): Promise<{ verifiedGained: boolean; newBalance?: number; gained?: number }> {
+        try {
+            const ctx = page.context()
+            if (ctx && ctx.request) {
+                const cacheBuster = Date.now()
+                const res = await ctx.request.get(
+                    `https://rewards.bing.com/api/getuserinfo?type=1&_=${cacheBuster}`,
+                    { timeout: 5000, failOnStatusCode: false }
+                )
+                if (res && typeof res.ok === 'function' && res.ok()) {
+                    const data = await res.json().catch(() => null)
+                    const availablePoints =
+                        data?.dashboard?.userStatus?.availablePoints ??
+                        data?.userStatus?.availablePoints
+                    const currentBalance =
+                        typeof availablePoints === 'number'
+                            ? availablePoints
+                            : Number(this.bot.userData.currentPoints ?? 0)
+                    const oldRecordedPoints = Number(this.bot.userData.currentPoints ?? 0)
+
+                    if (currentBalance > oldRecordedPoints) {
+                        return {
+                            verifiedGained: true,
+                            newBalance: currentBalance,
+                            gained: currentBalance - oldRecordedPoints
+                        }
+                    }
+                }
+            }
+        } catch {}
+        return { verifiedGained: false }
     }
 }

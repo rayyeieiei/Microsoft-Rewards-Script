@@ -111,27 +111,24 @@ export class SearchManager {
         )
 
         if (useParallel) {
-            return await this.doParallelSearches(
-                data,
-                missingSearchPoints,
-                mobileSession,
-                account,
-                accountEmail,
-                executionContext
-            )
-        } else {
-            return await this.doSequentialSearches(
-                data,
-                missingSearchPoints,
-                mobileSession,
-                account,
-                accountEmail,
-                executionContext
+            this.bot.logger.warn(
+                'main',
+                'SEARCH-MANAGER',
+                'Parallel searching is strictly discouraged due to immediate Microsoft bot-detection and 15-minute search cooldown penalties. Enforcing safe sequential search mode.'
             )
         }
+
+        return await this.doSequentialSearches(
+            data,
+            missingSearchPoints,
+            mobileSession,
+            account,
+            accountEmail,
+            executionContext
+        )
     }
 
-    private async doParallelSearches(
+    public async doParallelSearches(
         data: DashboardData,
         missingSearchPoints: MissingSearchPoints,
         mobileSession: BrowserSession,
@@ -367,20 +364,28 @@ export class SearchManager {
         }
 
         if (shouldDoDesktop) {
-            this.bot.logger.info('main', 'SEARCH-MANAGER', 'Step 2: desktop')
-            this.bot.logger.debug(
-                'main',
-                'SEARCH-MANAGER',
-                `Sequential desktop | target=${missingSearchPoints.desktopPoints}`
-            )
-            desktopPoints = await this.doDesktopSearchSequential(
-                data,
-                missingSearchPoints,
-                account,
-                accountEmail,
-                executionContext
-            )
-            this.bot.logger.info('main', 'SEARCH-MANAGER', `Step 2: desktop done | earned=${desktopPoints}`)
+            if (this.bot.searchCooldownActive) {
+                this.bot.logger.warn(
+                    'main',
+                    'SEARCH-MANAGER',
+                    '[COOLDOWN-DETECTED] Skipping desktop searches because search cooldown is active on this account.'
+                )
+            } else {
+                this.bot.logger.info('main', 'SEARCH-MANAGER', 'Step 2: desktop')
+                this.bot.logger.debug(
+                    'main',
+                    'SEARCH-MANAGER',
+                    `Sequential desktop | target=${missingSearchPoints.desktopPoints}`
+                )
+                desktopPoints = await this.doDesktopSearchSequential(
+                    data,
+                    missingSearchPoints,
+                    account,
+                    accountEmail,
+                    executionContext
+                )
+                this.bot.logger.info('main', 'SEARCH-MANAGER', `Step 2: desktop done | earned=${desktopPoints}`)
+            }
         } else {
             const reason = !this.bot.config.workers.doDesktopSearch ? 'disabled' : 'no-points'
             this.bot.logger.info('main', 'SEARCH-MANAGER', `Step 2: skip desktop (${reason})`)

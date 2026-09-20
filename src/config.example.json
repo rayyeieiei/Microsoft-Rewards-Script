@@ -62,9 +62,9 @@
     "searchOnBingLocalQueries": false,
     "globalTimeout": "30sec",
     "searchSettings": {
-        "scrollRandomResults": false,
+        "scrollRandomResults": true,
         "clickRandomResults": false,
-        "parallelSearching": true,
+        "parallelSearching": false,
         "queryEngines": ["google", "wikipedia", "reddit", "local"],
         "searchResultVisitTime": "10sec",
         "searchDelay": {
