@@ -187,6 +187,9 @@ export class QueryCore {
             const trimmed = q.trim()
             if (!trimmed) continue
 
+            // Filter kueri yang terlalu pendek (< 5 karakter atau 1 kata seperti "test")
+            if (trimmed.length < 5 || !trimmed.includes(' ')) continue
+
             const norm = trimmed.replace(/\s+/g, ' ').toLowerCase()
             if (seen.has(norm)) continue
 
