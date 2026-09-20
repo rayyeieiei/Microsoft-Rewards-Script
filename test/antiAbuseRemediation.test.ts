@@ -166,5 +166,100 @@ export async function runAntiAbuseRemediationTests() {
         console.log('✅ Test 5 Passed: Search typing jitter and clean URL fallback verified')
     }
 
-    console.log('🎉 ALL 5 ANTI-ABUSE REMEDIATION TESTS PASSED SUCCESSFULLY!')
+    // Test 6: Undefined bot.fingerprint Safe Navigation (ClaimBonusPoints & Quiz crash fix)
+    {
+        const claimBonusPath = path.join(process.cwd(), 'src', 'functions', 'activities', 'api', 'ClaimBonusPoints.ts')
+        const claimBonusSource = fs.readFileSync(claimBonusPath, 'utf-8')
+        assert.strictEqual(
+            claimBonusSource.includes('{ ...this.bot.fingerprint.headers }'),
+            false,
+            'ClaimBonusPoints must not access this.bot.fingerprint.headers without optional chaining'
+        )
+        assert.strictEqual(
+            claimBonusSource.includes('{ ...(this.bot.fingerprint?.headers ?? {}) }'),
+            true,
+            'ClaimBonusPoints must use safe optional chaining with fallback object for fingerprint headers'
+        )
+
+        const quizPath = path.join(process.cwd(), 'src', 'functions', 'activities', 'api', 'Quiz.ts')
+        const quizSource = fs.readFileSync(quizPath, 'utf-8')
+        assert.strictEqual(
+            quizSource.includes('{ ...this.bot.fingerprint.headers }'),
+            false,
+            'Quiz must not access this.bot.fingerprint.headers without optional chaining'
+        )
+        assert.strictEqual(
+            quizSource.includes('{ ...(this.bot.fingerprint?.headers ?? {}) }'),
+            true,
+            'Quiz must use safe optional chaining with fallback object for fingerprint headers'
+        )
+
+        console.log('✅ Test 6 Passed: ClaimBonusPoints and Quiz safely handle undefined bot.fingerprint')
+    }
+
+    // Test 7: QueryEngine Short Query & Single-Word Filtering
+    {
+        const queryEnginePath = path.join(process.cwd(), 'src', 'functions', 'QueryEngine.ts')
+        const queryEngineSource = fs.readFileSync(queryEnginePath, 'utf-8')
+        assert.strictEqual(
+            queryEngineSource.includes("trimmed.length < 5 || !trimmed.includes(' ')"),
+            true,
+            'QueryEngine must filter queries shorter than 5 chars or lacking whitespace'
+        )
+
+        console.log('✅ Test 7 Passed: QueryEngine filters short and single-word queries')
+    }
+
+    // Test 8: Adaptive Cooldown with Hard-Verification & Stagnant Loop Guard
+    {
+        const searchPath = path.join(process.cwd(), 'src', 'functions', 'activities', 'browser', 'Search.ts')
+        const searchSource = fs.readFileSync(searchPath, 'utf-8')
+
+        assert.strictEqual(
+            searchSource.includes('const stagnantLoopMax = 3'),
+            true,
+            'Search.ts must enforce stagnantLoopMax = 3'
+        )
+        assert.strictEqual(
+            searchSource.includes('verifyPointsWithServer(page, isMobile)'),
+            true,
+            'Search.ts must call verifyPointsWithServer before aborting search loop'
+        )
+        assert.strictEqual(
+            searchSource.includes('[COOLDOWN-DETECTED]'),
+            true,
+            'Search.ts must log [COOLDOWN-DETECTED] when cooldown is verified'
+        )
+
+        console.log('✅ Test 8 Passed: Search adaptive cooldown and server hard-verification verified')
+    }
+
+    // Test 9: Config Defaults & Parallel Search Enforcement
+    {
+        const configExamplePath = path.join(process.cwd(), 'src', 'config.example.json')
+        const configExample = JSON.parse(fs.readFileSync(configExamplePath, 'utf-8'))
+
+        assert.strictEqual(
+            configExample.searchSettings.parallelSearching,
+            false,
+            'config.example.json must default parallelSearching to false'
+        )
+        assert.strictEqual(
+            configExample.searchSettings.scrollRandomResults,
+            true,
+            'config.example.json must enable scrollRandomResults for organic SERP interaction'
+        )
+
+        const searchManagerPath = path.join(process.cwd(), 'src', 'functions', 'SearchManager.ts')
+        const searchManagerSource = fs.readFileSync(searchManagerPath, 'utf-8')
+        assert.strictEqual(
+            searchManagerSource.includes('Enforcing safe sequential search mode'),
+            true,
+            'SearchManager must warn and enforce sequential searches when parallel is configured'
+        )
+
+        console.log('✅ Test 9 Passed: Configuration defaults and sequential search enforcement verified')
+    }
+
+    console.log('🎉 ALL 9 ANTI-ABUSE REMEDIATION TESTS PASSED SUCCESSFULLY!')
 }
