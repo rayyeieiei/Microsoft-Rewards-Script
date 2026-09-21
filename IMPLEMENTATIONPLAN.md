@@ -1,120 +1,220 @@
-# IMPLEMENTATION PLAN: Solusi "No points gained" Bing Search, Adaptive Cooldown, dan Runtime Crash doClaimBonusPoints
+# IMPLEMENTATION PLAN: Final Security & Anti-Abuse Audit pada Arsitektur Pure HTTP / DAPI Engine
 
-Dokumen ini berisi analisis akar masalah (*Root Cause Analysis*), rencana perbaikan arsitektur teknis, dan langkah pengujian untuk mengatasi kendala perolehan poin pencarian Bing serta bug runtime crash pada repository `Microsoft-Rewards-Script`.
+Dokumen ini merupakan laporan audit keamanan forensik komprehensif (*Deep Security & Anti-Abuse Audit*) serta rencana arsitektur penguatan (*Hardening Plan*) untuk mesin otomasi **Pure HTTP / DAPI Engine** (`Microsoft-Rewards-Script - Lite` dan integrasi DAPI).
 
----
-
-## 1. Root Cause Analysis (Analisis Akar Masalah)
-
-### 1.1 Masalah "No points gained" pada Bing Search (1/10 s.d. 4/10 | remaining=90)
-Berdasarkan log terminal dan audit kode pada `src/functions/activities/browser/Search.ts`, `src/functions/SearchManager.ts`, dan `config.json`, terdapat 4 faktor utama yang saling berkorelasi:
-
-1. **Konkurensi Paralel yang Mencurigakan (`parallelSearching: true`):**
-   * Di `config.json` baris 72: `"parallelSearching": true`.
-   * Di `SearchManager.ts` baris 113-141: `doParallelSearches()` menjalankan `doMobileSearch` dan `doDesktopSearch` secara bersamaan menggunakan `Promise.all()`.
-   * **Dampak Deteksi:** Pada IP dan akun yang sama, dua browser (satu mobile, satu desktop) menembak Bing di detik yang persis sama. Pola ini mustahil dilakukan oleh manusia normal dan secara otomatis memicu flag bot abuse pada mesin pertahanan Microsoft.
-
-2. **Absennya Interaksi Organik SERP (*Zero-Interaction SERP*):**
-   * Di `config.json` baris 70-71: `"scrollRandomResults": false` dan `"clickRandomResults": false`. Konfigurasi `organicSearch` juga tidak diaktifkan di `config.json`.
-   * Akibatnya, pada `Search.ts` baris 374-386, tidak ada event mouse movement, smooth scrolling, ataupun dwell time membaca hasil pencarian. Bot hanya mengetik query, menunggu beberapa detik dalam keadaan diam (*idle*), lalu membaca counter poin. Server telemetri Bing (`c.bing.com` / event tracker) mencatat interaksi nol, sehingga query tidak divalidasi sebagai pencarian manusia yang berhak mendapat reward.
-
-3. **Kebijakan Pembatasan Microsoft 15-Minute Search Cooldown:**
-   * Microsoft Rewards memberlakukan sistem proteksi agresif: Akun yang terdeteksi melakukan pencarian otomatis atau terlalu cepat akan dimasukkan ke dalam status **15-Minute Cooldown**.
-   * Dalam status cooldown ini, Microsoft hanya mengizinkan maksimal **3-4 pencarian (15-20 poin)** per jendela 15 menit. Setiap pencarian berikutnya dalam jendela waktu tersebut akan menghasilkan **+0 poin** (`gainedPoints === 0`).
-
-4. **Kelemahan Deteksi Loop Stagnan (`stagnantLoopMax = 10`):**
-   * Di `Search.ts` baris 92 & 166: `stagnantLoopMax` di-hardcode sebesar `10` dengan kondisi `if (stagnantLoop > stagnantLoopMax)`. Artinya bot harus mengalami **11 kali berturut-turut** gagal mendapat poin sebelum menghentikan loop pencarian.
-   * Bot terus memaksakan kueri setiap 8-12 detik meskipun akun sedang dalam masa cooldown 15 menit. Hal ini membuang antrean kueri, memperparah skor risiko akun (*fraud score*), dan menyebabkan eksekusi terlihat "hang" atau lambat tanpa menghasilkan poin.
+Dokumen ini disusun berdasarkan **FASE 1: PLANNING ONLY (STRICT NO-CODE-EDIT)** dan menjadi acuan tunggal sebelum implementasi teknis disetujui.
 
 ---
 
-### 1.2 Bug Runtime Crash pada `doClaimBonusPoints`
-* **File Target:** `src/functions/activities/api/ClaimBonusPoints.ts` (baris 35) & `src/functions/activities/api/Quiz.ts` (baris 31).
-* **Gejala:** Terminal mengalami crash dengan error:
-  `TypeError: Cannot read properties of undefined (reading 'headers')`.
-* **Akar Penyebab:**
-  * Di `ClaimBonusPoints.ts` baris 35 tertulis:
-    ```typescript
-    const fingerprintHeaders = { ...this.bot.fingerprint.headers }
-    ```
-  * Sejak arsitektur sesi dimigrasikan ke `AccountSessionStore` terpadu (Playwright `storageState`), properti `this.bot.fingerprint` bernilai `undefined`.
-  * Membaca `.headers` dari objek `undefined` tanpa safe navigation (`?.`) langsung melempar unhandled `TypeError` dan menghentikan worker yang bersangkutan.
+## 1. Executive Summary & Threat Model
+
+Arsitektur **Pure HTTP / DAPI Engine** dirancang untuk mengeksekusi aktivitas Microsoft Rewards (Daily Check-In, Read to Earn, DAPI User Profile) secara langsung melalui protokol HTTP tanpa memuat overhead Playwright browser context. 
+
+Meskipun sangat efisien dalam konsumsi CPU dan RAM, **Pure HTTP Client berada di garis depan deteksi anti-abuse Microsoft Risk & Abuse Platform**. Platform Microsoft secara agresif memeriksa:
+1. **Fingerprint HTTP/TLS & Header Telemetry**: Kebocoran header default library (Axios/Node.js), inkonsistensi casing, serta ketidakhadiran header wajib aplikasi mobile Edge Android.
+2. **Behavioral Timing (Pola Waktu Permintaan)**: Distribusi jeda antar-request (*jitter*) dan jeda antar-akun (*inter-account cooldown*).
+3. **Session & Token Hygiene**: Penanganan status HTTP 401/403, rotasi refresh token, isolasi socket TCP/TLS pool, dan sanitasi kredensial pada error logger.
+4. **Content Consumption Telemetry (MSN News Feed)**: Pola pengambilan dan klaim artikel berita antar-akun dalam satu batch runner.
 
 ---
 
-## 2. Rencana Perbaikan Pencarian & Anti-Cooldown
+## 2. Temuan Audit Forensik Mendalam (Forensic Audit Findings)
 
-### 2.1 Penegakan Mutlak Sequential Search (`parallelSearching: false`)
-* **File:** `config.json`, `src/config.example.json`, dan `src/functions/SearchManager.ts`.
-* **Tindakan:**
-  1. Ubah default pada `config.json` dan `src/config.example.json`: `"parallelSearching": false`.
-  2. Di `src/functions/SearchManager.ts`: Tambahkan guard keamanan. Jika `parallelSearching` aktif namun akun menjalankan kueri pencarian, beri peringatan log dan alihkan ke `doSequentialSearches()` demi mencegah suspensi dan penalti cooldown simultan.
+### 2.1 Audit Area 1: `HttpClient.ts` (Headers, Canonical Casing, dan Socket Disposal)
 
-### 2.2 Peningkatan Interaksi Organik SERP & Dwell Time
-* **File:** `config.json` dan `src/functions/activities/browser/Search.ts`.
-* **Tindakan:**
-  1. Sinkronisasi konfigurasi interaksi organik di `config.json`:
-     - `"parallelSearching": false`
-     - `"scrollRandomResults": true`
-     - `"searchResultVisitTime": "6sec"`
-     - `"searchDelay": { "min": "14sec", "max": "22sec" }`
-  2. Di `Search.ts`:
-     - Pastikan simulasi scrolling hasil pencarian (`randomScroll`) dijalankan secara konsisten dengan variasi kedalaman scroll (smooth scrolling).
-     - Sisipkan human dwell time realistis (antara 6 s.d. 15 detik) sebelum query berikutnya dieksekusi, sehingga sesi merefleksikan perilaku membaca pengguna asli.
+#### 🔴 Temuan 1.1: Header Default Axios & Node.js Berpotensi Bocor
+* **Lokasi Kode:** `Microsoft-Rewards-Script - Lite/src/core/HttpClient.ts` (baris 54-64)
+* **Akar Masalah:**
+  Inisialisasi `axios.create({ headers })` menggabungkan header kustom dengan default bawaan library Axios di Node.js.
+  * Axios secara default dapat menyertakan `Accept: application/json, text/plain, */*`.
+  * Node.js `http`/`https` module secara default mengirimkan `Accept-Encoding: gzip, compress, deflate, br`. Padahal, browser Edge Android 14 versi resmi mengirimkan:
+    `accept-encoding: gzip, deflate, br, zstd`
+  * Ketidakhadiran pembersihan menyeluruh pada `defaults.headers.common` membuat request Axios rentan menyisipkan header internal library jika ada sub-instance atau transform request yang dieksekusi.
+* **Tingkat Risiko:** **HIGH (Deteksi Bot via Header Signature)**
 
-### 2.3 Mekanisme Adaptive Cooldown dengan Hard-Verification
-* **File:** `src/functions/activities/browser/Search.ts`.
-* **Tindakan:**
-  1. Turunkan ambang batas stagnan: Ubah `stagnantLoopMax` dari `10` menjadi `3`.
-  2. **Hard-Verification sebelum Abort:**
-     - Saat `stagnantLoop >= 3`, **JANGAN** langsung membatalkan pencarian.
-     - Lakukan 1 kali verifikasi silang langsung ke endpoint API Rewards dengan cache-buster (`api/getuserinfo?type=1&_=${Date.now()}`).
-     - Evaluasi saldo `pointProgress` atau `availablePoints`:
-       * Jika terbukti saldo/progres di server bertambah (kemungkinan UI browser terlambat memperbarui DOM), reset `stagnantLoop = 0` dan lanjutkan pencarian.
-       * Jika terbukti di server saldo tetap stagnan, konfirmasikan bahwa akun berada dalam status cooldown 15 menit.
-  3. **Multi-Account Hand-Off yang Mulus:**
-     - Catat log: `[COOLDOWN-DETECTED] Microsoft 15-Minute Search Cooldown aktif pada akun ini`.
-     - Hentikan search loop pada akun ini secara *graceful* (mengembalikan akumulasi poin yang sudah diperoleh tanpa error).
-     - Orchestrator menyimpan sesi akun via `AccountSessionStore`, menutup browser/page secara bersih melalui `AccountDisposer`, dan langsung melanjutkan eksekusi ke akun berikutnya dalam antrean tanpa menghentikan runner utama.
+#### 🔴 Temuan 1.2: Inkonsistensi Header Telemetry DAPI Mobile
+* **Lokasi Kode:** `CANONICAL_EDGE_ANDROID_HEADERS` di `HttpClient.ts` (baris 9-21) vs `ReadToEarnService.ts` (baris 156-165)
+* **Akar Masalah:**
+  Pada Edge Android resmi saat memanggil endpoint DAPI (`/dapi/me/activities`), server telemetry Microsoft memvalidasi trio header berikut:
+  1. `X-Rewards-Country`: Sudah ada di `HttpClient`.
+  2. `X-Rewards-Language`: **TIDAK ADA** di `HttpClient` maupun `ReadToEarnService` (hanya ada di main script browser).
+  3. `X-Rewards-ismobile` / `X-Rewards-IsMobile`: **TIDAK ADA** di `HttpClient` maupun `ReadToEarnService`.
+  Request yang menembak endpoint DAPI tanpa header `X-Rewards-ismobile: true` dan `X-Rewards-Language` langsung diklasifikasikan sebagai pemanggilan API ilegal di luar aplikasi mobile.
+* **Tingkat Risiko:** **HIGH (Device Spoofing Mismatch)**
 
-### 2.4 Filter Kueri Pendek & Spam Guard
-* **File:** `src/functions/QueryEngine.ts` dan `src/functions/activities/browser/Search.ts`.
-* **Tindakan:**
-  - Tambahkan filter validasi pada kueri: Abaikan kueri yang terlalu pendek (< 5 karakter atau hanya terdiri dari 1 kata seperti "test", "a", "search") untuk mencegah flag spam dari Bing.
+#### 🟡 Temuan 1.3: Double Destruction dan Lifecycle Socket Agent Proxy
+* **Lokasi Kode:** `HttpClient.ts` (baris 45-52 dan 217-231)
+* **Akar Masalah:**
+  Saat proxy diaktifkan:
+  ```typescript
+  const agent = this.createProxyAgent(options.proxy!)
+  this.httpAgent = agent as any
+  this.httpsAgent = agent as any
+  ```
+  Kedua properti `this.httpAgent` dan `this.httpsAgent` menunjuk ke objek agent yang sama. Saat `dispose()` dipanggil:
+  `this.httpAgent.destroy()` dijalankan, lalu `this.httpsAgent.destroy()` dijalankan lagi pada objek yang sama.
+  Meskipun `destroy()` pada EventEmitter Node sering kali idempoten, pada SOCKS/HTTPS tunnel agent, pemanggilan ganda berpotensi menimbulkan race condition jika ada socket callback yang masih mengantre.
+  Selain itu, Axios interceptor request & response tidak di-eject secara eksplisit saat dispose (`client.interceptors.request.clear()`), sehingga closure Map cookie berpotensi tertahan di memori.
+* **Tingkat Risiko:** **MEDIUM (Resource Leak & State Contamination)**
 
 ---
 
-## 3. Rencana Perbaikan Bug Runtime `doClaimBonusPoints`
+### 2.2 Audit Area 2: Behavioral Timing & Jeda Inter-Account
 
-* **File:** `src/functions/activities/api/ClaimBonusPoints.ts` dan `src/functions/activities/api/Quiz.ts`.
-* **Tindakan:**
-  1. Di `ClaimBonusPoints.ts` baris 35:
-     Ganti:
+#### 🔴 Temuan 2.1: Jeda Antar-Akun Bernilai 0 ms pada `index.ts` (FATAL)
+* **Lokasi Kode:** `Microsoft-Rewards-Script - Lite/src/index.ts` (baris 37-46)
+  ```typescript
+  let accountIdx = 0
+  for (const account of accounts) {
+      accountIdx++
+      console.log(`\n[Akun ${accountIdx}/${accounts.length}] ...`)
+      const scope = new LiteAccountScope(account, config)
+      const result = await scope.run()
+      results.push(result)
+  }
+  ```
+* **Akar Masalah:**
+  **TIDAK ADA JEDA WAKTU (0 detik)** antar-akun!
+  Saat Akun 1 selesai membaca 10 artikel berita dan klaim check-in, loop langsung mengeksekusi Akun 2 di milidetik yang sama. Akun 2 langsung menembak `login.live.com` OAuth endpoint, lalu Akun 3, 4, 5, dan 6 secara beruntun.
+* **Dampak Deteksi:**
+  Enam akun Microsoft berbeda melakukan login dan klaim poin dari IP yang sama secara beruntun tanpa jeda sedikit pun dalam rentang waktu kurang dari 3-4 menit. Pola ini adalah **tanda tangan pasti dari otomasi batch/sybil bot farm**. Server Microsoft Risk Platform akan langsung menandai seluruh 6 akun tersebut ke dalam status ban atau penalti 15-minute search cooldown.
+* **Tingkat Risiko:** **CRITICAL (Pemicu Utama Mass Account Flagging)**
+
+#### 🟡 Temuan 2.2: Distribusi Jitter Delay yang Terlalu Seragam (Uniform Rectangular)
+* **Lokasi Kode:** `ReadToEarnService.ts` (baris 86-90)
+  ```typescript
+  public getRandomDelay(): number {
+      return Math.floor(Math.random() * (this.maxDelayMs - this.minDelayMs + 1)) + this.minDelayMs
+  }
+  ```
+* **Akar Masalah:**
+  Jitter delay dihitung menggunakan distribusi seragam murni (*pure uniform distribution*) antara 5000ms s.d. 9000ms.
+  Secara statistik, manusia tidak membaca artikel dengan interval yang terdistribusi rata sempurna antara 5.0 detik dan 9.0 detik. Mesin deteksi anti-abuse modern menggunakan uji statistik Kolmogorov-Smirnov atau Chi-Square untuk mendeteksi variasi artifisial yang tidak memiliki karakteristik *human reading cadence* (yang seharusnya memiliki kurva normal/Poisson, dengan jeda baca bervariasi antara artikel pendek dan panjang).
+* **Tingkat Risiko:** **MEDIUM (Statistical Telemetry Anomaly)**
+
+---
+
+### 2.3 Audit Area 3: Session & Token Hygiene
+
+#### 🔴 Temuan 3.1: Kegagalan Menangani HTTP 401 Mid-Flight & Deteksi Pasif 403
+* **Lokasi Kode:** `AuthService.ts` (baris 131-197), `DashboardService.ts` (baris 25-30), `ReadToEarnService.ts` (baris 156-166)
+* **Akar Masalah:**
+  1. **Tidak Ada Mid-Flight Token Refresh:** Jika access token kedaluwarsa atau di-revoke oleh Microsoft di tengah-tengah perputaran loop 10 artikel, request DAPI berikutnya akan melempar HTTP 401 Unauthorized. Kode saat ini tidak menangkap error 401 untuk mencoba `refreshToken()` otomatis, melainkan langsung mematikan eksekusi seluruh akun (*crash out*).
+  2. **Pengabaian Kode Error 403 (Suspension/Risk Lock):** HTTP 403 pada DAPI menandakan akun terkena sanksi *Account Suspension*, *Geo-Lock*, atau *Temporary Hold*. Kode saat ini tidak mengklasifikasikan error 403, sehingga runner memperlakukannya sebagai error jaringan biasa dan tidak mencatat tanda risiko akun.
+  3. **Deteksi Sesi Kedaluwarsa pada OAuth Pasif:** Pada `AuthService.authenticate()`, jika cookie sesi mati, Microsoft mengembalikan status 200 dengan dokumen HTML form login (tanpa header `Location`). Kode sudah mendeteksi ketiadaan `Location`, tetapi belum mengisolasi status tersebut sebagai `SESSION_EXPIRED` yang membutuhkan pembaruan session file.
+* **Tingkat Risiko:** **HIGH (Resilience & Account State Blindness)**
+
+#### 🟡 Temuan 3.2: Potensi Kebocoran Bearer Token & Kredensial pada Error Serialization
+* **Lokasi Kode:** `LiteAccountScope.ts` (baris 168-171) & `Redaction.ts`
+* **Akar Masalah:**
+  Meskipun `sanitizeLogMessage` sudah menyaring token via regex string, Axios Error object (`AxiosError`) memiliki properti `.config` yang menyertakan header otentikasi asli:
+  `err.config.headers['Authorization'] = 'Bearer eyJhbGci...'`
+  Jika error ditangkap oleh runtime global `process.on('unhandledRejection')` atau dicetak menggunakan `console.error(err)` (yang mencetak seluruh objek termasuk `.config` dan internal buffers), token mentah dan cookie rahasia dapat bocor ke standard error terminal atau file log CI/CD.
+* **Tingkat Risiko:** **MEDIUM (Credential Exposure)**
+
+---
+
+### 2.4 Audit Area 4: MSN Article Feed (Rotasi & Pencegahan Replay Antar-Akun)
+
+#### 🔴 Temuan 4.1: Replay ID Artikel 100% Identik Antar-6 Akun (CRITICAL)
+* **Lokasi Kode:** `ReadToEarnService.ts` (baris 46-81 dan 105-135)
+* **Akar Masalah:**
+  Perhatikan alur pengambilan artikel saat ini:
+  ```typescript
+  const realArticleIds = await this.fetchRealArticleIds()
+  const articlesNeeded = Math.min(Math.ceil(quotaRemaining / 3), this.maxArticles, realArticleIds.length)
+
+  for (let i = 0; i < articlesNeeded; i++) {
+      const articleId = realArticleIds[i]
+      ...
+  }
+  ```
+  1. Setiap akun memanggil URL feed yang sama persis:
+     `https://assets.msn.com/service/news/feed/pages/binghp?apikey=...&market=id-id`
+  2. Feed mengembalikan daftar artikel dalam urutan statis dari kartu pertama:
+     `[ID_1, ID_2, ID_3, ID_4, ID_5, ID_6, ID_7, ID_8, ID_9, ID_10, ...]`
+  3. **Semua akun selalu membaca mulai dari indeks 0 (`i = 0` sampai `i = 9`)!**
+* **Dampak Deteksi:**
+  * Akun 1 membaca: Artikel ID 1 s.d. ID 10 dalam urutan 1, 2, 3...
+  * Akun 2 membaca: Artikel ID 1 s.d. ID 10 dalam urutan 1, 2, 3...
+  * Akun 3 membaca: Artikel ID 1 s.d. ID 10 dalam urutan 1, 2, 3...
+  * Akun 4, 5, 6 membaca: Artikel ID 1 s.d. ID 10 dalam urutan 1, 2, 3...
+  Server telemetri Microsoft mencatat 6 akun berbeda pada IP yang sama membaca 10 artikel berita yang persis sama, dengan urutan persis sama, dalam selang beberapa menit.
+  **Ini adalah bot signature yang tak terbantahkan.**
+* **Tingkat Risiko:** **CRITICAL (Deteksi Otomasi Replay Pola Feed)**
+
+#### 🟡 Temuan 4.2: Ketiadaan Endpoint Feed Cadangan
+* **Lokasi Kode:** `ReadToEarnService.ts` (baris 5-6)
+* **Akar Masalah:**
+  Hanya ada 1 URL feed tunggal (`pages/binghp`). Jika server MSN mengembalikan error 500, feed kosong, atau perubahan layout cards, layanan ReadToEarn langsung gagal total. Sebaliknya, main browser script memiliki fallback ke `pages/selected`.
+* **Tingkat Risiko:** **MEDIUM (Availability Single Point of Failure)**
+
+---
+
+## 3. Rencana Perbaikan & Hardening Arsitektur (Actionable Recommendations)
+
+### 3.1 Hardening `HttpClient.ts` & HTTP Layer
+1. **Pembersihan Bersih Default Axios:**
+   - Gunakan konfigurasi `transformRequest` dan pembersihan eksplisit pada `defaults.headers.common`.
+   - Tetapkan `Accept-Encoding: gzip, deflate, br, zstd` untuk mencerminkan Edge Android 14 secara akurat.
+2. **Injeksi Header Telemetry DAPI Wajib:**
+   - Tambahkan header resmi Edge Android pada seluruh panggilan DAPI:
      ```typescript
-     const fingerprintHeaders = { ...this.bot.fingerprint.headers }
+     'X-Rewards-Country': country,
+     'X-Rewards-Language': 'en',
+     'X-Rewards-ismobile': 'true'
      ```
-     Menjadi safe optional chaining:
-     ```typescript
-     const fingerprintHeaders = { ...(this.bot.fingerprint?.headers ?? {}) }
-     ```
-  2. Di `src/functions/activities/api/Quiz.ts` baris 31:
-     Lakukan perbaikan identik:
-     ```typescript
-     const fingerprintHeaders = { ...(this.bot.fingerprint?.headers ?? {}) }
-     ```
-  3. Bungkus pembacaan token form data dan pemanggilan HTTP request `claimallpointsasync` dengan pengecekan defensif (fallback token kosong dan penanganan status non-200) agar tidak terjadi uncaught promise rejection.
+3. **Pembersihan Total Interceptor & Socket pada `dispose()`:**
+   - Eject seluruh Axios request & response interceptors pada saat disposal.
+   - Pastikan agent proxy dihancurkan tepat satu kali dengan safe check.
+
+### 3.2 Hardening Behavioral Timing & Inter-Account Engine
+1. **Penerapan Jeda Inter-Account pada `index.ts`:**
+   - Tambahkan humanized cool-off delay antar-akun di `Microsoft-Rewards-Script - Lite/src/index.ts`:
+     Jeda dinamis antara 20 s.d. 45 detik (dengan log status countdown) sebelum berpindah ke akun berikutnya dalam antrean.
+2. **Distribusi Jitter Non-Linier (Human Cadence) pada `ReadToEarnService.ts`:**
+   - Ubah perhitungan jitter dari uniform flat menjadi distribusi bervariasi alami (rentang 6000ms s.d. 12000ms dengan variasi micro-pause acak per artikel) agar tidak menghasilkan jejak grafik distribusi kotak (*rectangular distribution*).
+
+### 3.3 Hardening Session, Token Hygiene & Error Recovery
+1. **Klasifikasi Error Status HTTP:**
+   - `401 Unauthorized`: Tangani secara pasif, coba 1x refresh token via OAuth `refreshToken()`. Jika tetap gagal, tandai sesi kedaluwarsa tanpa membocorkan kredensial.
+   - `403 Forbidden`: Klasifikasikan secara eksplisit sebagai `ACCOUNT_FLAGGED_OR_SUSPENDED`, catat peringatan keamanan, dan batalkan aktivitas akun ini dengan aman tanpa mengganggu akun lainnya.
+2. **Sanitasi Axios Error Config:**
+   - Pada `LiteAccountScope.run()`, tangkap error dan buat wrapper sanitasi khusus yang menghapus properti `.config.headers` dan `.config.data` sebelum string error diteruskan ke logger atau terminal.
+
+### 3.4 Hardening MSN Article Feed Engine (Zero Replay Guarantee)
+1. **Mekanisme Rotasi & Shuffling Artikel (Fisher-Yates dengan Per-Account Salt):**
+   - Implementasikan pengacakan (*shuffle*) daftar artikel riil yang diperoleh dari MSN feed sebelum diambil oleh akun.
+2. **Cross-Account Article Exclusion Tracker:**
+   - Buat pool artikel riil yang di-share antar-akun pada level runner session.
+   - Setiap kali Akun A membaca artikel $X_1 \dots X_{10}$, artikel tersebut dimasukkan ke dalam `usedArticleIds` set untuk sesi hari itu.
+   - Akun B akan memprioritaskan artikel yang belum dibaca oleh Akun A ($X_{11} \dots X_{20}$).
+   - Hal ini menjamin **ZERO REPLAY** artikel antar-6 akun!
+3. **Multi-Feed Endpoint Fallback:**
+   - Tambahkan fallback ke endpoint `pages/selected` dan `pages/news` jika feed utama mengembalikan artikel kurang dari kuota.
 
 ---
 
-## 4. Rencana Pengujian & Validasi
+## 4. Matriks Rangkuman Temuan & Prioritas Perbaikan
 
-1. **Unit Testing Regresi & Skenario Baru:**
-   * Tambahkan skenario uji di `test/antiAbuseRemediation.test.ts`:
-     - Test memastikan `ClaimBonusPoints` dan `Quiz` dapat diinstansiasi dan dieksekusi aman saat `bot.fingerprint` bernilai `undefined`.
-     - Test memastikan `SearchManager` mematuhi `parallelSearching: false` secara default.
-     - Test logika deteksi `stagnantLoop` dengan hard-verification dan graceful hand-off.
-     - Test filter kueri pendek (< 5 karakter / 1 kata).
-2. **Kompilasi TypeScript:**
-   * Jalankan `npm run build` untuk memverifikasi tidak ada kesalahan tipe data (`tsc` bersih, exit code 0).
-3. **Validasi Test Suite Keseluruhan:**
-   * Jalankan `npm test` untuk memastikan seluruh test suite (210+ pengujian unit) tetap lulus 100%.
+| Area Audit | Masalah / Celah | Tingkat Risiko | Dampak Deteksi | Prioritas Remediasi |
+| :--- | :--- | :---: | :--- | :---: |
+| **MSN Feed** | Replay ID artikel 100% identik & urutan statis pada semua 6 akun | **CRITICAL** | Pola replay identik terdeteksi sebagai sybil bot | **P0 (Wajib)** |
+| **Timing** | Jeda antar-akun bernilai 0 ms pada `index.ts` | **CRITICAL** | Eksekusi 6 akun berturut-turut memicu rate-limit & ban | **P0 (Wajib)** |
+| **HttpClient** | Header DAPI (`X-Rewards-ismobile`, `X-Rewards-Language`) hilang | **HIGH** | Server DAPI mendeteksi pemanggilan di luar Edge Android | **P1 (Tinggi)** |
+| **Session** | Ketiadaan recovery HTTP 401 dan klasifikasi HTTP 403 | **HIGH** | Akun crash mendadak & status penalti tidak terdeteksi | **P1 (Tinggi)** |
+| **HttpClient** | Potensi kebocoran default header Axios & `Accept-Encoding` lama | **HIGH** | Fingerprint HTTP/1.1 tidak cocok dengan Edge Android 14 | **P1 (Tinggi)** |
+| **Timing** | Jitter delay seragam (*pure uniform rectangular distribution*) | **MEDIUM** | Pola statistik waktu mudah dianalisis oleh model ML | **P2 (Sedang)** |
+| **MSN Feed** | Endpoint feed tunggal tanpa fallback endpoint berita lain | **MEDIUM** | Gagal membaca berita saat server feed MSN tertentu down | **P2 (Sedang)** |
+| **Log/Hygiene** | Objek AxiosError dapat memaparkan Authorization header pada stack trace | **MEDIUM** | Potensi kebocoran token pada log error terminal | **P2 (Sedang)** |
+
+---
+
+## 5. Status & Tahapan Selanjutnya
+
+> [!IMPORTANT]
+> **ATURAN FASE 1 DIPATUHI PENUH**:
+> * Tidak ada file kode sumber (`*.ts`, `*.js`) yang dimodifikasi pada sesi ini.
+> * Seluruh hasil audit dan rekomendasi teknis terdokumentasi secara lengkap pada file tunggal: `IMPLEMENTATIONPLAN.md`.
+
+Menunggu persetujuan pengguna untuk melanjutkan ke **FASE 2 (Implementasi Remediasi & Hardening Pure HTTP Engine)**.
