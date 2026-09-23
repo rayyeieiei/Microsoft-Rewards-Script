@@ -210,11 +210,279 @@ Meskipun sangat efisien dalam konsumsi CPU dan RAM, **Pure HTTP Client berada di
 
 ---
 
-## 5. Status & Tahapan Selanjutnya
+## 5. Status & Tahapan Selesai (Pure HTTP Engine)
+
+> [!NOTE]
+> Audit dan hardening Pure HTTP / DAPI Engine pada Bab 1 s.d. 4 telah berhasil diimplementasikan, diverifikasi 100% lolos unit test, dan telah di-push ke GitHub (`631d322` & `24a3d0a`).
+
+---
+
+## 10. Audit Kerusakan Integrasi Discord Webhook & Rencana Streamlining Embed Log
+
+### 10.1 Ringkasan Eksekutif & Status Endpoint Webhook
+
+Bot saat ini mengalami kegagalan total dalam mengirimkan notifikasi apapun ke channel Discord operator (*webhook mati total*). Berdasarkan audit forensik terhadap konfigurasi dan modul logging, ditemukan bahwa **penyebab utama webhook mati bukanlah masalah pada server Discord**, melainkan kombinasi fatal dari:
+1. **Typo / Corrupted Key** pada file konfigurasi `config.json`.
+2. **Skema Zod yang men-drop key asing** sehingga konfigurasi Discord bernilai `undefined`.
+3. **Whitelist filter logger yang terlalu agresif** (`webhookLogFilter`) yang mencegat hampir seluruh log event.
+4. **Ketidakcocokan pola (*Regex Mismatch*) 100%** antara string yang dicatat oleh runner `src/index.ts` dengan regex yang dicari oleh `src/logging/Discord.ts`.
+5. **Silent try-catch** pada pengiriman axios yang menelan seluruh error HTTP.
+
+> [!NOTE]
+> **Status Verifikasi Endpoint Discord Webhook:**
+> Dilakukan uji verifikasi aktif secara pasif (`GET /api/webhooks/1508365339287621742/...`) langsung ke endpoint Discord:
+> * **Status HTTP:** `200 OK`
+> * **Webhook Name:** `Microsoft retard bot`
+> * **ID Webhook:** `1508365339287621742`
+> * **Channel ID:** `1508365227207430244`
+> * **Guild ID:** `1508365156558569572`
+>
+> **Kesimpulan:** URL Discord Webhook milik operator **100% aktif, valid, dan sehat di server Discord**. Kerusakan murni terjadi di sisi aplikasi lokal (*code & config logic*).
+
+---
+
+### 10.2 Bedah Forensik Akar Masalah (Root Causes & Code Locations)
+
+#### 🔴 Akar Masalah 1: Typo / Corrupted Key pada `config.json`
+* **Lokasi Kode:** `config.json` (baris 103)
+* **Kondisi Kode Saat Ini:**
+  ```json
+  "webhook": {
+      "disc Yeah.ord": {
+          "enabled": true,
+          "url": "https://discord.com/api/webhooks/1508365339287621742/LGVlX15YmrRYhLNcGxjiXq89R8kQkNcJtPv9VK3oAm4ghYYrirGEhjPQGhnfSCJNjqUN"
+      },
+  ```
+* **Mekanisme Kegagalan:**
+  Key JSON yang seharusnya `"discord"` rusak menjadi `"disc Yeah.ord"` (kemungkinan akibat typo atau ketidaksengajaan saat pengeditan konfigurasi sebelumnya).
+
+#### 🔴 Akar Masalah 2: Skema Zod Men-strip Key dan Mengabaikan Webhook
+* **Lokasi Kode:** `src/util/Validator.ts` (baris 26-32)
+* **Kondisi Kode:**
+  ```typescript
+  const WebhookSchema = z.object({
+      discord: z.object({
+          enabled: z.boolean(),
+          url: z.string()
+      }).optional(),
+      ntfy: ...
+  })
+  ```
+* **Mekanisme Kegagalan:**
+  Karena properti `discord` bersifat `.optional()`, parser Zod mengabaikan dan membuang key `"disc Yeah.ord"`. Objek konfigurasi yang divalidasi menghasilkan `config.webhook.discord === undefined`.
+
+#### 🔴 Akar Masalah 3: Guard Check di Logger Mengabaikan Pemanggilan Webhook
+* **Lokasi Kode:** `src/logging/Logger.ts` (baris 138-141) & `src/index.ts` (baris 1092-1094)
+* **Kondisi Kode:**
+  ```typescript
+  // src/logging/Logger.ts:138
+  if (config.webhook.discord?.enabled && config.webhook.discord.url) {
+      if (level === 'debug') return
+      sendDiscord(config.webhook.discord.url, cleanMsg, level)
+  }
+
+  // src/index.ts:1092 (Worker IPC)
+  if (webhook.discord?.enabled && webhook.discord.url) {
+      sendDiscord(webhook.discord.url, content, level)
+  }
+  ```
+* **Mekanisme Kegagalan:**
+  Karena `config.webhook.discord` bernilai `undefined`, kondisi guard bernilai `false`. Fungsi `sendDiscord()` **TIDAK PERNAH DIPANGGIL SAMA SEKALI** (0 eksekusi) sepanjang siklus program.
+
+#### 🔴 Akar Masalah 4: Whitelist Filter Terlalu Ketat (`webhookLogFilter`)
+* **Lokasi Kode:** `config.json` (baris 119-132) & `src/logging/Logger.ts` (baris 127, 152-195)
+* **Kondisi Kode Saat Ini:**
+  ```json
+  "webhookLogFilter": {
+      "enabled": true,
+      "mode": "whitelist",
+      "levels": ["error", "warn"],
+      "keywords": ["gainedPoints", "Completed", "Summary"],
+      "regexPatterns": []
+  }
+  ```
+* **Mekanisme Kegagalan:**
+  * Di `Logger.ts`, `shouldPassFilter()` mengevaluasi pesan. Jika mode `whitelist`, log level `info` akan ditolak kecuali mengandung salah satu kata kunci.
+  * Banyak event penting seperti `[COOLDOWN-DETECTED]`, `Starting account`, `Stealth delay`, `ADB IP rotation`, `Punch card`, `Quiz`, dan `Star bonus` tidak mengandung kata kunci tersebut, sehingga langsung di-drop sebelum sampai ke Discord.
+
+#### 🔴 Akar Masalah 5: Regex Mismatch 100% pada `src/logging/Discord.ts`
+Bahkan jika webhook aktif dan filter diloloskan, parser regex di `src/logging/Discord.ts` tidak cocok dengan format log nyata di `src/index.ts`:
+
+1. **Laporan Akun Selesai (`accountEndMatch`):**
+   * *Di `Discord.ts` (baris 76):*
+     ```typescript
+     const accountEndMatch = content.match(/Completed account: (.*?) \| Total: \+(\d+) \| Old: (\d+) → New: (\d+) \| Duration: (.*)/)
+     ```
+   * *Log Nyata di `src/index.ts` (baris 1283):*
+     ```typescript
+     `[ACCOUNT-FINISH] Completed workflow for: ${redactAccountKey(accountEmail)} | Total: +${collectedPoints} | Old: ${accountInitialPoints} → New: ${accountFinalPoints} | Duration: ${durationSeconds}s`
+     ```
+   * *Akibat:* Pola `"Completed account:"` tidak pernah ditemukan karena runner mencatat `"[ACCOUNT-FINISH] Completed workflow for:"`. **Laporan akun selesai tidak pernah terkirim!**
+
+2. **Rekap Akhir Seluruh Akun (`runEndMatch`):**
+   * *Di `Discord.ts` (baris 68):*
+     ```typescript
+     const runEndMatch = content.match(/Completed all accounts \| Accounts processed: (\d+) \| Total points collected: \+(\d+) \| Old total: (\d+) → New total: (\d+) \| Total runtime: (.*)/)
+     ```
+   * *Log Nyata di `src/index.ts` (baris 1606):*
+     ```typescript
+     `Completed all accounts | Accounts: ${accountStats.length} | Points: +${totalCollected} | Bandwidth: ${totalBandwidth} MB total (avg ${avgBandwidth} MB/acc) | Old: ${totalInitial} → New: ${totalFinal} | Runtime: ${totalDuration}min`
+     ```
+   * *Akibat:* Regex mencari `"Accounts processed:"` dan `"Total points collected:"`, sementara runner mencatat `"Accounts:"` dan `"Points:"`. **Rekap grand total semalam tidak pernah terkirim!**
+
+3. **Mulai Akun Baru (`accountStartMatch`):**
+   * *Di `Discord.ts` (baris 85):* Mencari `Starting account: ... | geoLocale: ...`. Runner di `src/index.ts` tidak pernah memancarkan teks tersebut.
+
+#### 🟡 Akar Masalah 6: Silent Error Swallowing pada Axios Post Webhook
+* **Lokasi Kode:** `src/logging/Discord.ts` (baris 239-246)
+* **Kondisi Kode:**
+  ```typescript
+  await discordQueue.add(async () => {
+      try {
+          await axios(request)
+      } catch (err: any) {
+          const status = err?.response?.status
+          if (status === 429) return
+      }
+  })
+  ```
+* **Mekanisme Kegagalan:**
+  Jika terjadi HTTP 400 Bad Request (misal payload invalid), HTTP 404 (webhook dihapus), HTTP 500 (server Discord down), atau timeout jaringan pada host Lubuntu, error ditelan mentah-mentah (*swallowed*) tanpa log peringatan apapun di console. Operator tidak mengetahui alasan webhook gagal.
+
+#### 🟡 Akar Masalah 7: Ketiadaan Format Rich Embed & Kerentanan Chat Spam
+* **Lokasi Kode:** `src/logging/Discord.ts` (baris 206-212 dan 228-237)
+* **Akar Masalah:**
+  * Saat ini payload Discord dikirim dalam format plain text biasa (`{ content: finalContent }`), bukan Discord Rich Embeds.
+  * Terdapat fallback berbahaya pada baris 206-212 yang mengubah setiap pesan `[INFO]` menjadi `🔹 ${clean}`. Jika filter dinonaktifkan, Discord akan dibanjiri ratusan pesan tidak berguna per menit (seperti kueri pencarian, scroll trace, dsb.), yang memicu rate-limit Discord (HTTP 429).
+
+---
+
+### 10.3 Rencana Desain Streamlining Log Embed Discord (Arsitektur Baru)
+
+Untuk mengatasi spam dan menyajikan informasi yang ringkas, profesional, dan informatif bagi operator, integrasi Discord akan dirombak menggunakan **Discord Rich Embeds (Clean & Concise)**:
+
+```mermaid
+flowchart TD
+    LogEmitter["Runner / Logger Log Event"] --> FilterHook{"Tipe Event Penting?"}
+    FilterHook -- "Bukan (Query, Scroll, Noise)" --> Drop["Abaikan (Zero Chat Spam)"]
+    FilterHook -- "Account Finished" --> Embed1["Embed Hijau: Laporan Akun Selesai"]
+    FilterHook -- "Batch Finished (Run-End)" --> Embed2["Embed Ungu: Rekap Total Peternakan"]
+    FilterHook -- "Critical Alert (Cooldown/Lock)" --> Embed3["Embed Merah: Peringatan Kritis + Ping Operator"]
+    
+    Embed1 --> DiscordQueue["P-Queue Rate-Limiter (2 req/s)"]
+    Embed2 --> DiscordQueue
+    Embed3 --> DiscordQueue
+    DiscordQueue --> DiscordAPI["Discord Webhook API (HTTP POST Embed)"]
+```
+
+#### 📋 1. Struktur Embed 1: Laporan Akun Selesai (`ACCOUNT_FINISHED`)
+* **Warna:** Hijau (`0x2ECC71`)
+* **Trigger:** Event `[ACCOUNT-FINISH]` pada `src/index.ts` (baris 1283).
+* **Payload Embed:**
+  ```json
+  {
+    "embeds": [
+      {
+        "title": "✅ Laporan Akun Selesai",
+        "color": 3066993,
+        "fields": [
+          { "name": "👤 Akun", "value": "`use***@domain.com`", "inline": true },
+          { "name": "📈 Poin Diperoleh", "value": "**+150 Poin**", "inline": true },
+          { "name": "💰 Saldo Total", "value": "12,450 → **12,600**", "inline": true },
+          { "name": "⏱️ Durasi", "value": "3.2 menit", "inline": true },
+          { "name": "📶 Bandwidth", "value": "4.12 MB", "inline": true },
+          { "name": "🌐 IP Selesai", "value": "`114.122.x.x`", "inline": true }
+        ],
+        "footer": { "text": "Microsoft Rewards Automation • v3.1.4" },
+        "timestamp": "2026-09-23T00:15:00.000Z"
+      }
+    ]
+  }
+  ```
+
+#### 📋 2. Struktur Embed 2: Rekap Akhir Seluruh Akun (`BATCH_SUMMARY`)
+* **Warna:** Ungu / Diamond (`0x9B59B6`)
+* **Trigger:** Event `RUN-END` / `Completed all accounts` pada `src/index.ts` (baris 1606).
+* **Payload Embed:**
+  ```json
+  {
+    "content": "<@877734448685260820>",
+    "embeds": [
+      {
+        "title": "🏆 REKAP AKHIR PETERNAKAN (SEMUA AKUN SELESAI)",
+        "color": 10181046,
+        "description": "Seluruh antrean akun telah berhasil diproses oleh sistem.",
+        "fields": [
+          { "name": "👥 Akun Diproses", "value": "**6 Akun**", "inline": true },
+          { "name": "🔥 Total Poin Panen", "value": "**+920 Poin**", "inline": true },
+          { "name": "💎 Grand Total Saldo", "value": "77,530 → **78,450 Poin**", "inline": true },
+          { "name": "⏱️ Total Waktu", "value": "24.5 menit", "inline": true },
+          { "name": "📊 Total Kuota Terpakai", "value": "28.4 MB (avg 4.7 MB/acc)", "inline": true }
+        ],
+        "footer": { "text": "Microsoft Rewards Farm Automation • Completed" },
+        "timestamp": "2026-09-23T00:35:00.000Z"
+      }
+    ]
+  }
+  ```
+
+#### 📋 3. Struktur Embed 3: Peringatan Kritis (`CRITICAL_ALERT`)
+* **Warna:** Merah (`0xE74C3C`) / Oranye (`0xE67E22`)
+* **Trigger:** Deteksi 15-Minute Cooldown, Account Suspended / Locked, Passkey / 2FA Verification, Kegagalan Rotasi IP ADB.
+* **Payload Embed:**
+  ```json
+  {
+    "content": "<@877734448685260820>",
+    "embeds": [
+      {
+        "title": "🚨 PERINGATAN KRITIS: Microsoft 15-Minute Search Cooldown",
+        "color": 15158332,
+        "description": "Microsoft mendeteksi pencarian terlalu cepat dan membekukan perolehan poin selama 15 menit.",
+        "fields": [
+          { "name": "👤 Akun Terdampak", "value": "`use***@domain.com`", "inline": true },
+          { "name": "🛡️ Tindakan Bot", "value": "Graceful abort dieksekusi. Sesi ditutup aman dan bot berpindah ke akun berikutnya.", "inline": false }
+        ],
+        "footer": { "text": "Anti-Abuse Protection Guard" },
+        "timestamp": "2026-09-23T00:20:00.000Z"
+      }
+    ]
+  }
+  ```
+
+#### 🗑️ 4. Eliminasi Total Log Mentah (Spam Prevention)
+* **Daftar log yang TIDAK PERNAH dikirim ke Discord:**
+  * Kueri pencarian per-kata (*"Submitted query to Bing: ..."*).
+  * Safe scroll trace, Bezier curve, Ghost-click.
+  * Cookie storage & session loading.
+  * Browser context creation / page navigation.
+  * Request interceptor trace & data saver filtering logs.
+  * Log rutin `[INFO]` umum.
+
+---
+
+### 10.4 Rencana Tindakan Teknis Remediasi (Action Plan)
+
+1. **Perbaikan `config.json`:**
+   * Ubah key `"disc Yeah.ord"` menjadi `"discord"`.
+   * Sesuaikan `webhookLogFilter` agar tidak memblokir event `ACCOUNT-FINISH`, `RUN-END`, dan alert `error`/`warn`.
+2. **Refactor `src/logging/Discord.ts`:**
+   * Implementasikan fungsi builder `sendDiscordEmbed(url, embedPayload, mentionUser)`.
+   * Sinkronkan regex `accountEndMatch` agar mengenali `[ACCOUNT-FINISH] Completed workflow for: ...`.
+   * Sinkronkan regex `runEndMatch` agar mengenali `Completed all accounts | Accounts: ... | Points: ...`.
+   * Tambahkan deteksi khusus `[COOLDOWN-DETECTED]`, `ACCOUNT_LOCKED`, `PASSKEY_ERROR`.
+   * Tambahkan error logging defensif pada blok catch Axios (dengan penanganan backoff `retry-after` jika terkena HTTP 429).
+3. **Pengujian & Validasi:**
+   * Buat unit test pada `test/discordEmbed.test.ts` untuk memverifikasi formatting embed dan kecocokan regex dengan string log nyata `src/index.ts`.
+   * Lakukan validasi `npm test` dan `npm run build` (harus exit code 0).
+
+---
+
+## 11. Status Persetujuan
 
 > [!IMPORTANT]
 > **ATURAN FASE 1 DIPATUHI PENUH**:
-> * Tidak ada file kode sumber (`*.ts`, `*.js`) yang dimodifikasi pada sesi ini.
-> * Seluruh hasil audit dan rekomendasi teknis terdokumentasi secara lengkap pada file tunggal: `IMPLEMENTATIONPLAN.md`.
+> * Tidak ada file program (`*.ts`, `*.js`) atau konfigurasi yang disentuh pada fase audit ini.
+> * Dokumentasi diperbarui secara eksklusif pada file tunggal: `IMPLEMENTATIONPLAN.md` (Bab 10).
 
-Menunggu persetujuan pengguna untuk melanjutkan ke **FASE 2 (Implementasi Remediasi & Hardening Pure HTTP Engine)**.
+Menunggu instruksi dan persetujuan dari operator untuk mengeksekusi **FASE 2 (Perbaikan Konfigurasi & Refactor Modul Discord Embed)**.
+
