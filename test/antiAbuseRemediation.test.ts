@@ -4,6 +4,7 @@ import path from 'path'
 import { BrowserEnvironmentPolicy } from '../src/runtime/environment/BrowserEnvironmentPolicy'
 import { UserAgentManager } from '../src/browser/UserAgent'
 import AxiosClient from '../src/util/Axios'
+import { buildDiscordPayload, MY_DISCORD_ID } from '../src/logging/Discord'
 
 export async function runAntiAbuseRemediationTests() {
     console.log('--- Running Anti-Abuse Detection Remediation Test Suite ---')
@@ -261,5 +262,73 @@ export async function runAntiAbuseRemediationTests() {
         console.log('✅ Test 9 Passed: Configuration defaults and sequential search enforcement verified')
     }
 
-    console.log('🎉 ALL 9 ANTI-ABUSE REMEDIATION TESTS PASSED SUCCESSFULLY!')
+    // Test 10: Discord Streamlined Rich Embed Generator & Zero Spam
+    {
+        // 10a. Account Finished Embed (Green)
+        const accountFinishLog = '[ACCOUNT-FINISH] Completed workflow for: use***@gmail.com | Total: +165 | Old: 14200 → New: 14365 | Duration: 142.3s'
+        const accPayload = buildDiscordPayload(accountFinishLog, 'info')
+        assert.ok(accPayload, 'Must build payload for account finish log')
+        assert.ok(accPayload.embeds && accPayload.embeds.length === 1, 'Must contain exactly 1 embed')
+        const accEmbed = accPayload.embeds[0]!
+        assert.strictEqual(accEmbed.color, 0x2ECC71, 'Account finish embed must be green (0x2ECC71)')
+        assert.strictEqual(accEmbed.title, '✅ Laporan Akun Selesai')
+        assert.strictEqual(accEmbed.fields?.some(f => f.name === '👤 Akun' && f.value.includes('use***@gmail.com')), true)
+        assert.strictEqual(accEmbed.fields?.some(f => f.name === '📈 Poin Hari Ini' && f.value.includes('+165 Poin')), true)
+        assert.strictEqual(accEmbed.fields?.some(f => f.name === '💰 Saldo Total' && f.value.includes('14,200 → **14,365 Poin**')), true)
+
+        // 10b. Batch Summary Run-End Embed (Purple)
+        const runEndLog = 'Completed all accounts | Accounts: 6 | Points: +950 | Bandwidth: 28.5 MB total (avg 4.75 MB/acc) | Old: 65400 → New: 66350 | Runtime: 22.4min'
+        const batchPayload = buildDiscordPayload(runEndLog, 'info')
+        assert.ok(batchPayload, 'Must build payload for batch run-end log')
+        assert.ok(batchPayload.embeds && batchPayload.embeds.length === 1)
+        const batchEmbed = batchPayload.embeds[0]!
+        assert.strictEqual(batchEmbed.color, 0x9B59B6, 'Batch summary embed must be purple (0x9B59B6)')
+        assert.strictEqual(batchPayload.content, `<@${MY_DISCORD_ID}>`, 'Batch summary must mention operator')
+        assert.strictEqual(batchEmbed.fields?.some(f => f.name === '👥 Akun Diproses' && f.value.includes('6 Akun')), true)
+        assert.strictEqual(batchEmbed.fields?.some(f => f.name === '🔥 Total Poin Panen' && f.value.includes('+950 Poin')), true)
+        assert.strictEqual(batchEmbed.fields?.some(f => f.name === '💎 Grand Total Saldo' && f.value.includes('65,400 → **66,350 Poin**')), true)
+        assert.strictEqual(batchEmbed.fields?.some(f => f.name === '📊 Konsumsi Kuota' && f.value.includes('28.5 MB total')), true)
+
+        // 10c. 15-Minute Cooldown Alert (Red)
+        const cooldownLog = '[COOLDOWN-DETECTED] Microsoft 15-Minute Search Cooldown aktif pada akun ini (Server verified points stagnant after 3 queries). Aborting search loop for graceful hand-off.'
+        const cooldownPayload = buildDiscordPayload(cooldownLog, 'warn')
+        assert.ok(cooldownPayload, 'Must build payload for cooldown alert')
+        const cdEmbed = cooldownPayload.embeds![0]!
+        assert.strictEqual(cdEmbed.color, 0xE74C3C, 'Cooldown alert embed must be red (0xE74C3C)')
+        assert.ok(cdEmbed.title?.includes('15-Minute Search Cooldown'))
+        assert.strictEqual(cooldownPayload.content, `<@${MY_DISCORD_ID}>`, 'Cooldown alert must mention operator')
+
+        // 10d. Account Locked / Suspended Alert (Red)
+        const lockedLog = 'Fatal error: Account is locked (ACCOUNT_LOCKED)'
+        const lockedPayload = buildDiscordPayload(lockedLog, 'error')
+        assert.ok(lockedPayload, 'Must build payload for account locked error')
+        const lockEmbed = lockedPayload.embeds![0]!
+        assert.strictEqual(lockEmbed.color, 0xE74C3C, 'Account locked embed must be red')
+        assert.ok(lockEmbed.title?.includes('Akun Terkunci'))
+
+        // 10e. Zero Spam: Search queries, scroll trace, and generic info must return null
+        assert.strictEqual(buildDiscordPayload('Submitted query to Bing: resep masakan enak', 'info'), null)
+        assert.strictEqual(buildDiscordPayload('Simulating safe scroll on SERP results...', 'info'), null)
+        assert.strictEqual(buildDiscordPayload('Saving cookies to disk...', 'info'), null)
+        assert.strictEqual(buildDiscordPayload('[INFO] [BROWSER] Browser ready in 1200ms', 'info'), null)
+        assert.strictEqual(buildDiscordPayload('Ghost-Click performed at 142, 350', 'info'), null)
+
+        console.log('✅ Test 10 Passed: Discord streamlined rich embeds, accurate regex parsing, and zero spam verified')
+    }
+
+    // Test 11: Discord Configuration Integrity in config.json
+    {
+        const configPath = path.join(process.cwd(), 'config.json')
+        const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'))
+
+        assert.strictEqual(typeof config.webhook.discord, 'object', 'config.json must contain discord object')
+        assert.strictEqual('disc Yeah.ord' in config.webhook, false, 'config.json must NOT contain typo disc Yeah.ord')
+        assert.strictEqual(config.webhook.discord.enabled, true, 'config.json discord must be enabled')
+        assert.ok(config.webhook.discord.url.startsWith('https://discord.com/api/webhooks/'), 'Webhook URL must be valid')
+        assert.strictEqual(config.webhook.webhookLogFilter.enabled, false, 'webhookLogFilter must be disabled to delegate to Discord embed builder')
+
+        console.log('✅ Test 11 Passed: config.json Discord webhook configuration and typo fix verified')
+    }
+
+    console.log('🎉 ALL 11 ANTI-ABUSE REMEDIATION & DISCORD EMBED TESTS PASSED SUCCESSFULLY!')
 }
