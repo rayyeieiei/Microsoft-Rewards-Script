@@ -178,13 +178,66 @@ class Browser {
             }
 
             // Resolve clean environment profile & context options (strict TLS, zero synthetic spoofing)
-            const profile = BrowserEnvironmentPolicy.resolveProfile(this.bot.isMobile ? 'mobile' : 'desktop')
+            const deviceProfile = this.bot.isMobile ? this.bot.accountScope?.deviceProfile : undefined
+            const profile = BrowserEnvironmentPolicy.resolveProfile(
+                this.bot.isMobile ? 'mobile' : 'desktop',
+                undefined,
+                deviceProfile
+            )
             const contextOptions = BrowserEnvironmentPolicy.toContextOptions(profile)
             if (storageStateForContext) {
                 contextOptions.storageState = storageStateForContext
             }
 
             const context = await browser.newContext(contextOptions)
+
+            // Guardrail 2: Hardware Concurrency Clamping to 8 (octa-core Android standard)
+            await context.addInitScript(() => {
+                try {
+                    Object.defineProperty(navigator, 'hardwareConcurrency', {
+                        get: () => 8,
+                        configurable: true
+                    })
+                } catch {}
+            })
+
+            // Guardrail 1: Injeksi CDP Client Hints via Network.setUserAgentOverride
+            if (this.bot.isMobile && deviceProfile) {
+                const applyCdpOverride = async (page: any) => {
+                    try {
+                        const cdp = await (context as any).newCDPSession(page)
+                        if (this.bot.accountScope) {
+                            this.bot.accountScope.trackCdpSession(cdp)
+                        }
+                        await cdp.send('Network.setUserAgentOverride', {
+                            userAgent: deviceProfile.userAgent,
+                            acceptLanguage: 'en-US,en;q=0.9',
+                            platform: 'Android',
+                            userAgentMetadata: {
+                                brands: [
+                                    { brand: 'Not_A Brand', version: '8' },
+                                    { brand: 'Chromium', version: '128' },
+                                    { brand: 'Microsoft Edge', version: '128' }
+                                ],
+                                fullVersion: '128.0.2739.79',
+                                platform: 'Android',
+                                platformVersion: '14.0.0',
+                                architecture: 'arm',
+                                model: deviceProfile.deviceModel,
+                                mobile: true,
+                                bitness: '64'
+                            }
+                        })
+                    } catch {}
+                }
+
+                ;(context as any).on('page', (page: any) => {
+                    applyCdpOverride(page).catch(() => {})
+                })
+                for (const p of context.pages()) {
+                    applyCdpOverride(p).catch(() => {})
+                }
+            }
 
             context.setDefaultTimeout(this.bot.utils.stringToNumber(this.bot.config?.globalTimeout ?? 30000))
 

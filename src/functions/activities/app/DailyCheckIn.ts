@@ -144,7 +144,8 @@ export class DailyCheckIn extends Workers {
                 method: 'POST',
                 headers: {
                     Authorization: `Bearer ${this.bot.accessToken}`,
-                    'User-Agent': UserAgentManager.DEFAULT_MOBILE_UA,
+                    'User-Agent':
+                        this.bot.accountScope?.deviceProfile?.userAgent || UserAgentManager.DEFAULT_MOBILE_UA,
                     'Content-Type': 'application/json',
                     'X-Rewards-Country': this.bot.userData.geoLocale,
                     'X-Rewards-Language': 'en',

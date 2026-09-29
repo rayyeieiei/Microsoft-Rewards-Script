@@ -24,8 +24,8 @@ export class Workers {
         this.bot = bot
     }
 
-    public async doClaimPendingPoints(page: Page, isRecheck: boolean = false) {
-        if (!page || page.isClosed()) return
+    public async doClaimPendingPoints(page: Page, isRecheck: boolean = false): Promise<boolean> {
+        if (!page || page.isClosed()) return false
         try {
             const currentUrl = page.url().toLowerCase()
             if (!currentUrl.includes('rewards.bing.com')) {
@@ -37,7 +37,7 @@ export class Workers {
                 await page
                     .goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 15000 })
                     .catch(() => {})
-                await this.bot.utils.wait(2500)
+                await this.bot.utils.wait(500)
             }
 
             const prefix = isRecheck ? '[RE-CHECK] ' : ''
@@ -47,7 +47,7 @@ export class Workers {
                 `${prefix}Scanning Rewards dashboard for pending coins / "Ready to claim" cards...`
             )
 
-            // 1. Deteksi spesifik kartu "Ready to claim" (Hindari kartu "Available points" dan bagian bawah)
+            // 1. Deteksi & Buka Panel Slide / Klik Klaim langsung di DOM (evaluasi instan JS < 500ms)
             const cardInfo = await page
                 .evaluate(() => {
                     const allElements = Array.from(
@@ -63,7 +63,13 @@ export class Workers {
                             const m = txt.match(/(\d+)/)
                             const pts = m && m[1] ? parseInt(m[1], 10) : 0
                             if (pts > 0 && pts < 5000) {
-                                return { hasReadyCard: true, hasPanelOpen: false, pts }
+                                // Klik elemen klaim langsung di dalam browser JavaScript context
+                                const target = (el.querySelector('a, button, [role="button"]') || el) as HTMLElement
+                                target.click()
+                                target.dispatchEvent(
+                                    new MouseEvent('click', { bubbles: true, cancelable: true, view: window })
+                                )
+                                return { hasReadyCard: true, hasPanelOpen: true, pts }
                             }
                         }
                     }
@@ -81,7 +87,7 @@ export class Workers {
                     'DASHBOARD',
                     `${prefix}✅ Pengecekan koin selesai: Tidak ada koin nyangkut (0 pending claims).`
                 )
-                return
+                return false
             }
 
             const ptsLabel = cardInfo.pts > 0 ? ` (+${cardInfo.pts} Poin)` : ''
@@ -92,60 +98,10 @@ export class Workers {
                 'green'
             )
 
-            // 2. Buka Panel Slide "Claim points" JIKA belum terbuka
-            const panelHeader = page
-                .locator('text="Claim points", text="First search of the day", button:has-text("Claim points")')
-                .first()
-            const isPanelAlreadyOpen = await panelHeader.isVisible().catch(() => false)
+            // Jeda singkat animasi drawer
+            await this.bot.utils.wait(500)
 
-            if (!isPanelAlreadyOpen) {
-                // Targetkan secara terisolasi kartu "Ready to claim" (eksklusi Available points / Redeem)
-                const readyCard = page
-                    .locator('div, section, .card, .p-card, .c-card, [class*="card"]')
-                    .filter({ hasText: 'Ready to claim' })
-                    .filter({ hasNotText: 'Available points' })
-                    .first()
-                const claimLink = readyCard
-                    .locator('a, button, [role="button"], span')
-                    .filter({ hasText: /^Claim(\s*>)?$/i })
-                    .first()
-
-                if (await claimLink.isVisible().catch(() => false)) {
-                    await claimLink.scrollIntoViewIfNeeded().catch(() => {})
-                    await claimLink.click({ force: true }).catch(() => {})
-                } else if (await readyCard.isVisible().catch(() => false)) {
-                    await readyCard.scrollIntoViewIfNeeded().catch(() => {})
-                    await readyCard.click({ force: true }).catch(() => {})
-                } else {
-                    await page
-                        .evaluate(() => {
-                            const allElements = Array.from(
-                                document.querySelectorAll('div, section, .card, .p-card, .c-card, [class*="card"]')
-                            )
-                            for (const el of allElements) {
-                                const txt = (el.textContent || '').trim()
-                                if (
-                                    (txt.includes('Ready to claim') || txt.includes('Siap diklaim')) &&
-                                    !txt.includes('Available points') &&
-                                    txt.length < 150
-                                ) {
-                                    const target = (el.querySelector('a, button, [role="button"]') || el) as HTMLElement
-                                    target.click()
-                                    target.dispatchEvent(
-                                        new MouseEvent('click', { bubbles: true, cancelable: true, view: window })
-                                    )
-                                    break
-                                }
-                            }
-                        })
-                        .catch(() => {})
-                }
-
-                await panelHeader.waitFor({ state: 'visible', timeout: 4000 }).catch(() => {})
-                await this.bot.utils.wait(1500)
-            }
-
-            // 3. TEKAN TOMBOL BESAR [ Claim points ] DI DALAM PANEL (Sesuai Screenshot media_1788187521263.png)
+            // 2. TEKAN TOMBOL [ Claim points ] DI DALAM PANEL VIA DOM EVENT INSTAN
             this.bot.logger.info(
                 this.bot.isMobile,
                 'DASHBOARD',
@@ -153,18 +109,6 @@ export class Workers {
                 'green'
             )
 
-            // a. Native Playwright Click pada tombol Claim points
-            const modalClaimButton = page
-                .locator(
-                    'button:has-text("Claim points"), [role="button"]:has-text("Claim points"), button:has-text("Klaim poin"), div[role="button"]:has-text("Claim points")'
-                )
-                .first()
-            if (await modalClaimButton.isVisible().catch(() => false)) {
-                await modalClaimButton.scrollIntoViewIfNeeded().catch(() => {})
-                await modalClaimButton.click({ force: true, timeout: 5000 }).catch(() => {})
-            }
-
-            // b. Fallback DOM Click Event dengan bounding rect nyata
             await page
                 .evaluate(() => {
                     const btns = Array.from(document.querySelectorAll('button, a, div[role="button"]'))
@@ -174,7 +118,9 @@ export class Workers {
                             txt === 'claim points' ||
                             txt === 'klaim poin' ||
                             txt === 'claim all' ||
-                            txt === 'klaim semua'
+                            txt === 'klaim semua' ||
+                            txt.includes('claim points') ||
+                            txt.includes('klaim poin')
                         ) {
                             ;(b as HTMLElement).click()
                             b.dispatchEvent(
@@ -184,28 +130,29 @@ export class Workers {
                                 new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window })
                             )
                             b.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
+                            break
                         }
                     }
                 })
                 .catch(() => {})
 
-            await this.bot.utils.wait(2500)
+            await this.bot.utils.wait(600)
 
-            // 4. Tutup Panel Modal (Klik tombol Close X)
-            try {
-                const closeBtn = page
-                    .locator(
+            // 3. Tutup Panel Modal (Klik tombol Close X)
+            await page
+                .evaluate(() => {
+                    const closeBtn = document.querySelector(
                         'button[aria-label*="close" i], button[aria-label*="tutup" i], button.ms-Panel-closeButton, [data-icon-name="Cancel"], [aria-label="Close"]'
-                    )
-                    .first()
-                if (await closeBtn.isVisible().catch(() => false)) {
-                    await closeBtn.click({ force: true }).catch(() => {})
-                }
-            } catch {}
+                    ) as HTMLElement
+                    if (closeBtn) {
+                        closeBtn.click()
+                    }
+                })
+                .catch(() => {})
 
-            await this.bot.utils.wait(1500)
+            await this.bot.utils.wait(300)
 
-            // 5. RE-CHECK VERIFIKASI AKHIR: Pastikan koin di dashboard sudah bersih
+            // 4. RE-CHECK VERIFIKASI AKHIR: Pastikan koin di dashboard sudah bersih
             const finalVerify = await page
                 .evaluate(() => {
                     const allElements = Array.from(
@@ -228,7 +175,7 @@ export class Workers {
                 })
                 .catch(() => ({ isClean: true }))
 
-            // 6. Validasi Nyata Saldo (HANYA BERDASARKAN DELTA SERVER NYATA)
+            // 5. Validasi Nyata Saldo (HANYA BERDASARKAN DELTA SERVER NYATA)
             const oldBalance = Number(this.bot.userData.currentPoints ?? 0)
             const newBalance = await this.bot.browser.func.getCurrentPoints(page).catch(() => oldBalance)
             const gainedPoints = Math.max(0, newBalance - oldBalance)
@@ -261,8 +208,10 @@ export class Workers {
                     `${prefix}⚠️ Re-check mendeteksi masih ada ${(finalVerify as any).remaining} koin pending di dashboard.`
                 )
             }
+            return true
         } catch {
             this.bot.logger.debug(this.bot.isMobile, 'DASHBOARD', 'Pengecekan koin nyangkut selesai.')
+            return false
         }
     }
 
