@@ -80,11 +80,14 @@ export class Search extends Workers {
                 )
             }
 
-            if (this.bot.searchCooldownActive) {
+            const isDualWorkerMode = this.bot.config?.executionMode === 'staggered-dual' || (this.bot.config?.executionMode as string) === 'dual'
+            const isBatchCooldownActive = isDualWorkerMode && Boolean(this.bot.sharedBatchSignal?.isCooldownTriggered)
+
+            if (this.bot.searchCooldownActive || isBatchCooldownActive) {
                 this.bot.logger.warn(
                     isMobile,
                     'SEARCH-BING',
-                    `[COOLDOWN-DETECTED] Search cooldown is active for this account, skipping ${isMobile ? 'Mobile' : 'Desktop'} searches.`
+                    `[COOLDOWN-DETECTED] Search cooldown is active (or batch circuit breaker triggered), skipping ${isMobile ? 'Mobile' : 'Desktop'} searches.`
                 )
                 return totalGainedPoints
             }
@@ -102,6 +105,24 @@ export class Search extends Workers {
             let isCooldownDetected = false
 
             for (let i = 0; i < queries.length; i++) {
+                if (this.bot.accountScope?.abortController.signal.aborted) {
+                    this.bot.logger.warn(
+                        isMobile,
+                        'ABORT',
+                        '🚨 Pencarian dibatalkan seketika oleh sinyal abort/deadline timeout.'
+                    )
+                    break
+                }
+
+                if (isDualWorkerMode && this.bot.sharedBatchSignal?.isCooldownTriggered) {
+                    this.bot.logger.warn(
+                        isMobile,
+                        'CIRCUIT-BREAKER',
+                        '🚨 [DUAL-WORKER CIRCUIT BREAKER] Menghentikan pencarian: Rekan worker dalam batch ini terkena cooldown 15 menit. Melindungi IP seluler bersama.'
+                    )
+                    break
+                }
+
                 const query = queries[i] as string
                 const trimmedQuery = query?.trim() ?? ''
                 if (trimmedQuery.length < 5 || !trimmedQuery.includes(' ')) {
@@ -172,6 +193,14 @@ export class Search extends Workers {
                             )
                             this.bot.searchCooldownActive = true
                             isCooldownDetected = true
+                            if (isDualWorkerMode && this.bot.sharedBatchSignal) {
+                                this.bot.sharedBatchSignal.isCooldownTriggered = true
+                                this.bot.logger.warn(
+                                    isMobile,
+                                    'CIRCUIT-BREAKER',
+                                    '🚨 [DUAL-WORKER CIRCUIT BREAKER] Cooldown 15 menit terdeteksi pada worker ini! Menyalakan sinyal abort untuk melindungi reputasi IP seluler bersama.'
+                                )
+                            }
                             break
                         }
                     }
@@ -420,9 +449,9 @@ export class Search extends Workers {
                 if (isReady) {
                     await searchBox.click({ timeout: 1500 }).catch(() => {})
                     await searchBox.fill('')
-                    // Pengetikan realistis dengan random jitter 70ms - 190ms per karakter
+                    // Pengetikan terakselerasi aman: random jitter 25ms - 55ms per karakter
                     for (const char of query) {
-                        const charDelay = Math.floor(Math.random() * (190 - 70 + 1)) + 70
+                        const charDelay = Math.floor(Math.random() * (55 - 25 + 1)) + 25
                         await searchPage.keyboard.type(char, { delay: charDelay })
                     }
                     await searchPage.keyboard.press('Enter')
@@ -439,30 +468,34 @@ export class Search extends Workers {
                     `Submitted query to Bing | attempt=${i + 1}/${maxAttempts} | query="${query}"`
                 )
 
-                await this.bot.utils.wait(2000)
+                // Jeda natural navigasi SERP termuat
+                await this.bot.utils.wait(800)
 
                 if (this.bot.config.searchSettings.organicSearch?.enabled) {
                     await this.organicEngine.simulateOrganicCTR(searchPage, isMobile)
                 } else {
                     if (this.bot.config.searchSettings.scrollRandomResults) {
-                        await this.bot.utils.wait(2000)
                         await this.randomScroll(searchPage, isMobile)
                     }
 
                     if (this.bot.config.searchSettings.clickRandomResults) {
-                        await this.bot.utils.wait(2000)
                         await this.clickRandomLink(searchPage, isMobile)
                     }
                 }
 
-                await this.bot.utils.wait(
-                    this.bot.utils.randomDelay(
-                        this.bot.config.searchSettings.searchDelay.min,
-                        this.bot.config.searchSettings.searchDelay.max
-                    )
-                )
+                // Rentang aman dinamis 10 - 14 detik (rata-rata 12s, tetap aman di atas ambang batas cooldown Microsoft >6s)
+                const configuredMin = this.bot.config.searchSettings.searchDelay?.min
+                    ? this.bot.utils.stringToNumber(this.bot.config.searchSettings.searchDelay.min)
+                    : 10000
+                const configuredMax = this.bot.config.searchSettings.searchDelay?.max
+                    ? this.bot.utils.stringToNumber(this.bot.config.searchSettings.searchDelay.max)
+                    : 14000
+                const safeMin = Math.max(10000, Math.min(configuredMin, 12000))
+                const safeMax = Math.max(safeMin, Math.min(configuredMax, 14000))
+                const dynamicSearchDelay = Math.floor(Math.random() * (safeMax - safeMin + 1)) + safeMin
+                await this.bot.utils.wait(dynamicSearchDelay)
 
-                const counters = await this.bot.browser.func.getSearchPoints(searchPage)
+                const counters = await this.bot.browser.func.getSearchPoints(searchPage, false, isMobile)
 
                 this.bot.logger.debug(
                     isMobile,
@@ -493,7 +526,7 @@ export class Search extends Workers {
                     `Retrying search | attempt=${i + 1}/${maxAttempts} | query="${query}"`
                 )
 
-                await this.bot.utils.wait(2000)
+                await this.bot.utils.wait(1500)
             }
         }
 
@@ -503,7 +536,7 @@ export class Search extends Workers {
             `Returning current search counters after failed retries | query="${query}"`
         )
 
-        return await this.bot.browser.func.getSearchPoints(searchPage)
+        return await this.bot.browser.func.getSearchPoints(searchPage, true, isMobile)
     }
 
     private async randomScroll(page: Page, isMobile: boolean) {

@@ -268,11 +268,22 @@ export default class BrowserFunc {
         }
     }
 
+    private cachedCounters: Counters | null = null
+    private syncCounter: number = 0
+
+    public resetCounters(): void {
+        this.cachedCounters = null
+        this.syncCounter = 0
+    }
+
     /**
      * Get search point counters
      * @param {Page} [page] Optional active page to extract fast in-page counters from
+     * @param {boolean} [forceNetwork] Force network sync with dashboard API
+     * @param {boolean} [isMobile] Current search mode for optimistic counter progression
      */
-    async getSearchPoints(page?: Page): Promise<Counters> {
+    async getSearchPoints(page?: Page, forceNetwork: boolean = false, isMobile?: boolean): Promise<Counters> {
+        // 1. Fast in-page evaluation if on rewards.bing.com
         if (page && !page.isClosed() && page.url().includes('rewards.bing.com')) {
             const inPageCounters = await page.evaluate(() => {
                 const dash = (window as any).dashboard
@@ -280,31 +291,81 @@ export default class BrowserFunc {
                 return null
             }).catch(() => null)
 
-            if (inPageCounters) return inPageCounters
+            if (inPageCounters) {
+                this.cachedCounters = inPageCounters
+                this.syncCounter = 0
+                return inPageCounters
+            }
         }
 
+        // 2. Fast in-page evaluation on Bing SERP (reads in-page rewards data or header counter)
+        if (page && !page.isClosed() && page.url().includes('bing.com')) {
+            const inPageData = await page.evaluate(() => {
+                const dash = (window as any).dashboard || (window as any).rewardsUser
+                if (dash?.userStatus?.counters) return dash.userStatus.counters
+                return null
+            }).catch(() => null)
+
+            if (inPageData) {
+                this.cachedCounters = inPageData
+                this.syncCounter = 0
+                return inPageData
+            }
+        }
+
+        // 3. Responsive Optimistic Delta Counter:
+        // Avoid heavy cascading HTTP fallback (getDashboardData) on every single query
+        this.syncCounter++
+        if (!forceNetwork && this.cachedCounters && this.syncCounter < 4) {
+            if (typeof isMobile === 'boolean') {
+                const targetList = isMobile ? this.cachedCounters.mobileSearch : this.cachedCounters.pcSearch
+                if (targetList && targetList.length > 0 && targetList[0]) {
+                    const currentProgress = targetList[0].pointProgress || 0
+                    const maxProgress = targetList[0].pointProgressMax || 0
+                    if (currentProgress < maxProgress) {
+                        targetList[0].pointProgress = Math.min(maxProgress, currentProgress + 3)
+                    }
+                }
+            }
+            return this.cachedCounters
+        }
+
+        // 4. Periodic or forced network sync via getDashboardData
         try {
             const dashboardData = await this.getDashboardData()
             const counters = dashboardData?.userStatus?.counters
             if (counters && (counters.pcSearch?.length || counters.mobileSearch?.length)) {
+                const pcMax = counters.pcSearch?.[0]?.pointProgressMax ?? 0
+                if (pcMax === 0 && (!counters.mobileSearch || counters.mobileSearch.length === 0)) {
+                    // Level 1 or uninitialized counters: enforce sensible lower-bound quota of 30 PC points
+                    counters.pcSearch = [{ pointProgress: 0, pointProgressMax: 30 }] as any
+                }
+                this.cachedCounters = counters
+                this.syncCounter = 0
                 return counters
             }
             const dailySearchPts = Number(dashboardData?.userStatus?.levelInfo?.bingSearchDailyPoints || 0)
             if (dailySearchPts > 0) {
-                return {
+                const fallbackCounters = {
                     pcSearch: [{ pointProgress: 0, pointProgressMax: dailySearchPts }],
                     mobileSearch: []
                 } as unknown as Counters
+                this.cachedCounters = fallbackCounters
+                this.syncCounter = 0
+                return fallbackCounters
             }
-            return counters || ({
-                pcSearch: [{ pointProgress: 0, pointProgressMax: 60 }],
-                mobileSearch: []
-            } as unknown as Counters)
-        } catch {
-            return {
-                pcSearch: [{ pointProgress: 0, pointProgressMax: 60 }],
+            const defaultLevel1Counters = {
+                pcSearch: [{ pointProgress: 0, pointProgressMax: 30 }],
                 mobileSearch: []
             } as unknown as Counters
+            this.cachedCounters = defaultLevel1Counters
+            this.syncCounter = 0
+            return defaultLevel1Counters
+        } catch {
+            return this.cachedCounters || ({
+                pcSearch: [{ pointProgress: 0, pointProgressMax: 30 }],
+                mobileSearch: []
+            } as unknown as Counters)
         }
     }
 
