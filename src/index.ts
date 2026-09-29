@@ -13,6 +13,7 @@ import { IpcLog, Logger } from './logging/Logger'
 import Utils from './util/Utils'
 import { loadAccounts, loadConfig } from './util/Load'
 import { checkNodeVersion } from './util/Validator'
+import { AirplaneMode } from './util/AirplaneMode'
 
 import { Login } from './browser/auth/Login'
 import { Workers } from './functions/Workers'
@@ -33,7 +34,6 @@ import {
 import { ManualQuestQueue } from './runtime/manual/ManualQuestQueue'
 import { resolveAccountIdentity, validateUniqueAccountIdentities } from './runtime/identity/AccountIdentity'
 import { OnboardingEvidence } from './functions/onboarding/NewAccountOnboardingTypes'
-import { redactAccountKey } from './util/Redaction'
 import { DataSaverManager, mapResourceTypeToCategory } from './util/DataSaver'
 import { Database } from './util/Database'
 import { AccountScope } from './runtime/AccountScope'
@@ -84,27 +84,36 @@ import { sendDiscord, flushDiscordQueue } from './logging/Discord'
 import { sendNtfy, flushNtfyQueue } from './logging/Ntfy'
 import type { DashboardData } from './interface/DashboardData'
 import type { AppDashboardData } from './interface/AppDashBoardData'
-import readline from 'readline'
 
 let manualIpConfirmResolver: (() => void) | null = null
 
 function waitForUserConfirmation(): Promise<void> {
     return new Promise(resolve => {
-        manualIpConfirmResolver = resolve
+        let isResolved = false
+        const cleanup = () => {
+            if (isResolved) return
+            isResolved = true
+            manualIpConfirmResolver = null
+            try {
+                process.stdin.removeListener('data', onData)
+                process.stdin.pause()
+            } catch {}
+            resolve()
+        }
 
-        const rl = readline.createInterface({
-            input: process.stdin,
-            output: process.stdout
-        })
+        manualIpConfirmResolver = cleanup
 
-        rl.question('', () => {
-            rl.close()
-            if (manualIpConfirmResolver) {
-                const res = manualIpConfirmResolver
-                manualIpConfirmResolver = null
-                res()
+        const onData = (data: Buffer) => {
+            const str = data.toString()
+            if (str.includes('\r') || str.includes('\n')) {
+                cleanup()
             }
-        })
+        }
+
+        try {
+            process.stdin.resume()
+        } catch {}
+        process.stdin.on('data', onData)
     })
 }
 
@@ -220,6 +229,8 @@ export class MicrosoftRewardsBot {
     private login = new Login(this)
     private searchManager: SearchManager
     public searchCooldownActive = false
+    public sharedBatchSignal?: { isCooldownTriggered: boolean }
+    public activeDeadlineAdjuster: ((missingPoints: number) => void) | null = null
     public axios!: AxiosClient
 
     public bandwidthTracker = {
@@ -275,6 +286,7 @@ export class MicrosoftRewardsBot {
 
     public resetAccountState() {
         this.searchCooldownActive = false
+        this.browser?.func?.resetCounters()
         this.userData = {
             userName: '',
             geoLocale: 'US',
@@ -894,6 +906,8 @@ export class MicrosoftRewardsBot {
                 useDynamicWifiProxy: !!this.config.useDynamicWifiProxy,
                 useAdbIpRotation: !!this.config.useAdbIpRotation,
                 useGhostCursor: this.config.useGhostCursor ?? true,
+                executionMode: this.config.executionMode || 'sequential',
+                staggerOffsetSeconds: this.config.staggerOffsetSeconds ?? 45,
                 loadedAccounts: this.accounts.map(a => a.email),
                 isRunning: false,
                 startTime: 0
@@ -938,14 +952,14 @@ export class MicrosoftRewardsBot {
                     }
                     const targetAcc = this.accounts.find(a => a.email.toLowerCase() === cmd.email!.toLowerCase())
                     if (!targetAcc) {
-                        this.logger.error('main', 'C2-CONTROL', `Account with email ${redactAccountKey(cmd.email)} not found!`)
+                        this.logger.error('main', 'C2-CONTROL', `Account with email ${cmd.email} not found!`)
                         return
                     }
 
                     this.logger.info(
                         'main',
                         'C2-CONTROL',
-                        `Starting execution for single account: ${redactAccountKey(targetAcc.email)}...`
+                        `Starting execution for single account: ${targetAcc.email}...`
                     )
                     this.isRunning = true
                     this.stopRequested = false
@@ -958,7 +972,7 @@ export class MicrosoftRewardsBot {
                         this.logger.error(
                             'main',
                             'C2-CONTROL-ERROR',
-                            `Execution failed for ${redactAccountKey(targetAcc.email)}: ${errMsg}`
+                            `Execution failed for ${targetAcc.email}: ${errMsg}`
                         )
                     } finally {
                         this.isRunning = false
@@ -973,7 +987,9 @@ export class MicrosoftRewardsBot {
                 this.updateDashboardGlobal({
                     useDynamicWifiProxy: !!this.config.useDynamicWifiProxy,
                     useAdbIpRotation: !!this.config.useAdbIpRotation,
-                    useGhostCursor: this.config.useGhostCursor ?? true
+                    useGhostCursor: this.config.useGhostCursor ?? true,
+                    executionMode: this.config.executionMode || 'sequential',
+                    staggerOffsetSeconds: this.config.staggerOffsetSeconds ?? 45
                 })
                 this.logger.info('main', 'C2-CONFIG', 'Configuration reloaded and applied successfully.')
             })
@@ -1025,6 +1041,8 @@ export class MicrosoftRewardsBot {
             } else {
                 this.runWorker(runStartTime)
             }
+        } else if (this.config.executionMode === 'staggered-dual') {
+            await this.runStaggeredDualBatchTasks(this.accounts, runStartTime)
         } else {
             await this.runTasks(this.accounts, runStartTime)
         }
@@ -1168,10 +1186,387 @@ export class MicrosoftRewardsBot {
         })
     }
 
+    public createWorkerBot(sharedBatchSignal?: { isCooldownTriggered: boolean }): MicrosoftRewardsBot {
+        const workerBot = new MicrosoftRewardsBot()
+        workerBot.config = this.config
+        workerBot.localProxy = this.localProxy
+        workerBot.localProxyPort = this.localProxyPort
+        workerBot.dashboardServer = this.dashboardServer
+        workerBot.networkRecoveryController = this.networkRecoveryController
+        workerBot.manualNetworkRecoveryAdapter = this.manualNetworkRecoveryAdapter
+        workerBot.adbNetworkRecoveryAdapter = this.adbNetworkRecoveryAdapter
+        workerBot.sharedBatchSignal = sharedBatchSignal
+        workerBot.runId = this.runId
+        return workerBot
+    }
+
+    public async executeSingleAccount(
+        account: Account,
+        customStartDelayMs?: number
+    ): Promise<AccountStats> {
+        let scope: AccountScope | null = null
+        const accountStartTime = Date.now()
+        const accountEmail = account.email
+        try {
+            this.resetAccountState()
+            scope = await AccountScope.create({
+                account,
+                bot: this,
+                runId: this.runId
+            })
+            this.accountScope = scope
+            this.userData.userName = this.utils.getEmailUsername(accountEmail)
+            this.activeAccount = account
+
+            this.updateDashboardAccount(accountEmail, {
+                email: accountEmail,
+                status: 'Stealth Delay',
+                initialPoints: 0,
+                collectedPoints: 0,
+                desktopProgress: '0/0',
+                mobileProgress: '0/0'
+            })
+
+            const startDelay = customStartDelayMs !== undefined
+                ? customStartDelayMs
+                : Math.floor(Math.random() * (60000 - 10000 + 1)) + 10000
+
+            if (startDelay > 0) {
+                this.logger.info(
+                    'main',
+                    'STEALTH',
+                    `Menunggu ${(startDelay / 1000).toFixed(0)} detik sebelum buka browser biar keliatan natural...`,
+                    'cyan'
+                )
+                this.updateDashboardAccount(accountEmail, { status: 'Stealth Delay' })
+                await this.utils.wait(startDelay)
+            }
+
+            this.logger.info(
+                'main',
+                'ACCOUNT-START',
+                `[ACCOUNT-START] Starting workflow for: ${accountEmail} | geoLocale: ${account.geoLocale}`
+            )
+            this.updateDashboardAccount(accountEmail, { status: 'Starting Browser' })
+            DataSaverManager.getInstance().beginAccountQuota(accountEmail)
+            this.axios = new AxiosClient(
+                account.proxy,
+                this.localProxyPort,
+                bytes => this.trackBandwidth(bytes),
+                err => { void this.notifySuspectedConnectivityFailure('axios', err) }
+            )
+
+            const result = await this.Main(account, scope).catch(error => {
+                const errMsg = error instanceof Error ? error.message : String(error)
+                void this.logger.error(
+                    true,
+                    'FLOW',
+                    `Mobile flow failed for ${accountEmail}: ${errMsg}`
+                )
+                this.updateDashboardAccount(accountEmail, { status: 'Error', error: errMsg })
+                return undefined
+            })
+
+            const durationSeconds = ((Date.now() - accountStartTime) / 1000).toFixed(1)
+            const mbConsumed = (this.bandwidthTracker.totalBytes / (1024 * 1024)).toFixed(2)
+
+            const quotaReport = DataSaverManager.getInstance().finishAccountQuota(accountEmail)
+            const bRes = quotaReport.budgetResult
+            const statusColor = bRes.status === 'PASS' ? 'cyan' : 'yellow'
+
+            if (result) {
+                const collectedPoints = result.collectedPoints ?? 0
+                const accountInitialPoints = result.initialPoints ?? 0
+                const accountFinalPoints = accountInitialPoints + collectedPoints
+
+                const stat: AccountStats = {
+                    email: accountEmail,
+                    initialPoints: accountInitialPoints,
+                    finalPoints: accountFinalPoints,
+                    collectedPoints: collectedPoints,
+                    duration: parseFloat(durationSeconds),
+                    bandwidthMb: parseFloat(mbConsumed),
+                    success: true
+                }
+
+                this.logger.info(
+                    'main',
+                    'ACCOUNT-FINISH',
+                    `[ACCOUNT-FINISH] Completed workflow for: ${accountEmail} | Total: +${collectedPoints} | Old: ${accountInitialPoints} → New: ${accountFinalPoints} | Duration: ${durationSeconds}s`,
+                    'green'
+                )
+                this.logger.info(
+                    'main',
+                    'DATA-SAVER',
+                    `[DATA-SAVER] Quota=${bRes.consumedMb.toFixed(2)}MB budget=${bRes.budgetMb.toFixed(2)}MB usage=${bRes.percentage.toFixed(1)}% status=${bRes.status}${bRes.status === 'OVER_BUDGET' ? ` overBy=${bRes.overMb.toFixed(2)}MB` : ''}`,
+                    statusColor
+                )
+                const bd = quotaReport.breakdown
+                this.logger.info(
+                    'main',
+                    'DATA-SAVER',
+                    `[DATA-SAVER] Breakdown: document=${(bd.document.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.document.requests} req) | script=${(bd.script.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.script.requests} req) | xhr/fetch=${(bd['xhr/fetch'].bytes / (1024 * 1024)).toFixed(2)}MB (${bd['xhr/fetch'].requests} req) | image=${(bd.image.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.image.requests} req) | media=${(bd.media.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.media.requests} req) | font=${(bd.font.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.font.requests} req) | other=${(bd.other.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.other.requests} req)`
+                )
+                this.updateDashboardAccount(accountEmail, {
+                    status: 'Completed',
+                    collectedPoints: collectedPoints,
+                    bandwidth: `${mbConsumed} MB`
+                })
+                return stat
+            } else {
+                this.logger.info(
+                    'main',
+                    'DATA-SAVER',
+                    `[DATA-SAVER] Quota=${bRes.consumedMb.toFixed(2)}MB budget=${bRes.budgetMb.toFixed(2)}MB usage=${bRes.percentage.toFixed(1)}% status=${bRes.status}${bRes.status === 'OVER_BUDGET' ? ` overBy=${bRes.overMb.toFixed(2)}MB` : ''}`,
+                    statusColor
+                )
+                const bd = quotaReport.breakdown
+                this.logger.info(
+                    'main',
+                    'DATA-SAVER',
+                    `[DATA-SAVER] Breakdown: document=${(bd.document.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.document.requests} req) | script=${(bd.script.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.script.requests} req) | xhr/fetch=${(bd['xhr/fetch'].bytes / (1024 * 1024)).toFixed(2)}MB (${bd['xhr/fetch'].requests} req) | image=${(bd.image.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.image.requests} req) | media=${(bd.media.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.media.requests} req) | font=${(bd.font.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.font.requests} req) | other=${(bd.other.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.other.requests} req)`
+                )
+                const stat: AccountStats = {
+                    email: accountEmail,
+                    initialPoints: 0,
+                    finalPoints: 0,
+                    collectedPoints: 0,
+                    duration: parseFloat(durationSeconds),
+                    bandwidthMb: parseFloat(mbConsumed),
+                    success: false,
+                    error: 'Flow failed'
+                }
+                this.updateDashboardAccount(accountEmail, {
+                    status: 'Failed',
+                    error: 'Flow failed',
+                    bandwidth: `${mbConsumed} MB`
+                })
+                return stat
+            }
+        } catch (error) {
+            const durationSeconds = ((Date.now() - accountStartTime) / 1000).toFixed(1)
+            const errMsg = error instanceof Error ? error.message : String(error)
+            this.logger.error('main', 'ACCOUNT-ERROR', `${accountEmail}: ${errMsg}`)
+            const stat: AccountStats = {
+                email: accountEmail,
+                initialPoints: 0,
+                finalPoints: 0,
+                collectedPoints: 0,
+                duration: parseFloat(durationSeconds),
+                success: false,
+                error: errMsg
+            }
+            this.updateDashboardAccount(accountEmail, {
+                status: 'Failed',
+                error: errMsg
+            })
+            return stat
+        } finally {
+            try {
+                if (scope) {
+                    await AccountDisposer.dispose(scope).catch(err => {
+                        this.logger.error(
+                            'main',
+                            'ACCOUNT-DISPOSE',
+                            `Disposal failed for ${accountEmail}: ${err instanceof Error ? err.message : String(err)}`
+                        )
+                    })
+                }
+            } finally {
+                if (this.accountScope === scope) {
+                    this.accountScope = null
+                    this.resetAccountState()
+                }
+                DataSaverManager.getInstance().resetAccountQuota(accountEmail)
+            }
+
+            if (this.pendingOperatorRecovery) {
+                const pending = this.pendingOperatorRecovery
+                this.pendingOperatorRecovery = null
+                const now = Date.now()
+                if (now - pending.receivedAt <= pending.ttlMs) {
+                    this.logger.info(
+                        'main',
+                        'NETWORK-RECOVERY',
+                        `dequeued checkpoint=account-scope-disposed source=${pending.source}`
+                    )
+                    await this.requestNetworkRecovery('operator-request')
+                } else {
+                    this.logger.info(
+                        'main',
+                        'NETWORK-RECOVERY',
+                        `discarded reason=expired receivedAt=${pending.receivedAt} ttlMs=${pending.ttlMs}`
+                    )
+                }
+            }
+        }
+    }
+
+    public async waitForManualIpConfirmation(isAdbFailed = false, oldIp = 'UNKNOWN_IP', batchDesc = ''): Promise<void> {
+        process.stdout.write('\x07')
+        this.logger.warn(
+            'main',
+            'MANUAL-IP-ROTATION',
+            '======================================================='
+        )
+        if (isAdbFailed) {
+            this.logger.warn(
+                'main',
+                'MANUAL-IP-ROTATION',
+                `⚠️ [ADB FAILED / DEVICE NOT FOUND] Mode otomatis gagal. Beralih ke Rotasi Manual! Ganti IP di HP/Hotspot lalu tekan ENTER di terminal atau klik "Confirm IP Rotated" di Dashboard (http://localhost:4000)...`
+            )
+        } else {
+            this.logger.warn(
+                'main',
+                'MANUAL-IP-ROTATION',
+                `🚨 [MANUAL IP ROTATION] Batch selesai${batchDesc} (2 akun diproses). Silakan ubah IP di HP/Hotspot! Tekan ENTER di terminal atau klik "Confirm IP Rotated" di Dashboard (http://localhost:4000)...`
+            )
+        }
+        this.logger.warn('main', 'MANUAL-IP-ROTATION', `IP Saat Ini: [ ${oldIp} ]`)
+        this.logger.warn(
+            'main',
+            'MANUAL-IP-ROTATION',
+            '======================================================='
+        )
+
+        try {
+            require('child_process').exec(
+                `powershell -c (New-Object Media.SoundPlayer "C:\\Windows\\Media\\notify.wav").PlaySync();`,
+                { windowsHide: true }
+            )
+        } catch {}
+
+        await waitForUserConfirmation()
+    }
+
+    public async onBatchComplete(
+        batchIndex: number,
+        currentIpOrBatch?: string | Account[],
+        batchOrTotal?: Account[] | number,
+        totalBatchesCount?: number
+    ): Promise<string> {
+        let currentIpAddress: string
+        let batch: Account[] = []
+        let totalBatches: number = 0
+
+        if (typeof currentIpOrBatch === 'string') {
+            currentIpAddress = currentIpOrBatch
+            if (Array.isArray(batchOrTotal)) {
+                batch = batchOrTotal
+            }
+            if (typeof totalBatchesCount === 'number') {
+                totalBatches = totalBatchesCount
+            }
+        } else if (Array.isArray(currentIpOrBatch)) {
+            batch = currentIpOrBatch
+            if (typeof batchOrTotal === 'number') {
+                totalBatches = batchOrTotal
+            }
+            currentIpAddress = await this.getCurrentIP(this.localProxyPort || undefined)
+        } else {
+            currentIpAddress = await this.getCurrentIP(this.localProxyPort || undefined)
+        }
+
+        const oldIp = currentIpAddress
+        const serial = this.config.networkRecovery?.adbSerial?.trim()
+        const batchDesc = batch.length > 0 ? ` (${batch.map(a => a.email).join(', ')})` : ''
+
+        if (this.config.useAdbIpRotation && !this.config.useDynamicWifiProxy) {
+            this.logger.warn(
+                'main',
+                'IP-INTERCEPTOR',
+                '=======================================================',
+                'yellow'
+            )
+            this.logger.warn(
+                'main',
+                'IP-INTERCEPTOR',
+                `🔥 BATCH [${batchIndex}${totalBatches > 0 ? `/${totalBatches}` : ''}] SELESAI${batchDesc}! ROTASI IP AUTO (ADB AIRPLANE MODE) DIMULAI... 🔥`,
+                'yellow'
+            )
+            this.logger.warn('main', 'IP-INTERCEPTOR', `IP Saat Ini: [ ${oldIp} ]`, 'yellow')
+            this.logger.warn(
+                'main',
+                'IP-INTERCEPTOR',
+                '=======================================================',
+                'yellow'
+            )
+
+            let adbSuccess = false
+            try {
+                adbSuccess = await AirplaneMode.toggle(8000, 15000, serial)
+            } catch (err) {
+                this.logger.error('main', 'IP-INTERCEPTOR', `ADB Execution error: ${err}`)
+                adbSuccess = false
+            }
+
+            if (adbSuccess) {
+                const newCheck = await this.getCurrentIP(this.localProxyPort || undefined)
+                if (newCheck !== 'UNKNOWN_IP') {
+                    currentIpAddress = newCheck
+                }
+                this.logger.info(
+                    'main',
+                    'IP-INTERCEPTOR',
+                    `🚀 SUKSES! IP Baru Terdeteksi: [ ${currentIpAddress} ]`,
+                    'green'
+                )
+                this.updateDashboardGlobal({ currentIP: currentIpAddress })
+                await this.utils.wait(3000)
+                return currentIpAddress
+            } else {
+                // JIKA ADB GAGAL / HP TIDAK TERDETEKSI:
+                this.logger.error(
+                    'main',
+                    'IP-INTERCEPTOR',
+                    `🚨 [ADB FAILED / DEVICE NOT FOUND] Mode otomatis gagal merotasi IP. Alihkan seketika ke Rotasi Manual!`,
+                    'red'
+                )
+                await this.waitForManualIpConfirmation(true, oldIp, batchDesc)
+                this.logger.info('main', 'MANUAL-IP-ROTATION', 'Konfirmasi diterima. Memeriksa IP aktif...')
+                const newCheck = await this.getCurrentIP(this.localProxyPort || undefined)
+                if (newCheck !== 'UNKNOWN_IP') {
+                    currentIpAddress = newCheck
+                }
+                this.logger.info('main', 'MANUAL-IP-ROTATION', `IP aktif saat ini: [ ${currentIpAddress} ]`, 'green')
+                this.updateDashboardGlobal({ currentIP: currentIpAddress })
+                await this.utils.wait(1000)
+                return currentIpAddress
+            }
+        } else {
+            // Mode Manual: useAdbIpRotation === false
+            await this.waitForManualIpConfirmation(false, oldIp, batchDesc)
+            this.logger.info('main', 'MANUAL-IP-ROTATION', 'Konfirmasi diterima. Memeriksa IP aktif...')
+            const newCheck = await this.getCurrentIP(this.localProxyPort || undefined)
+            if (newCheck !== 'UNKNOWN_IP') {
+                currentIpAddress = newCheck
+            }
+            this.logger.info('main', 'MANUAL-IP-ROTATION', `IP aktif saat ini: [ ${currentIpAddress} ]`, 'green')
+            this.updateDashboardGlobal({ currentIP: currentIpAddress })
+            await this.utils.wait(1000)
+            return currentIpAddress
+        }
+    }
+
+    /**
+     * Compute dynamic adaptive deadline based on missing search points.
+     * Formula:
+     * - Base Pre-Search: 8 minutes (login, daily set, read to earn)
+     * - Search Budget: Math.ceil(missingPoints / 3) * 20 seconds
+     * - Safety Buffer: 4 minutes network latency tolerance
+     * - Clamp: minimal 14 minutes, maksimal 25 minutes
+     */
+    public calculateDynamicAccountDeadline(missingPoints: number = 90): number {
+        const basePreSearchMs = 8 * 60 * 1000
+        const searchBudgetMs = Math.ceil(Math.max(0, missingPoints) / 3) * 20 * 1000
+        const safetyBufferMs = 4 * 60 * 1000
+        const totalMs = basePreSearchMs + searchBudgetMs + safetyBufferMs
+        return Math.min(25 * 60 * 1000, Math.max(14 * 60 * 1000, totalMs))
+    }
+
     private async runTasks(accounts: Account[], runStartTime: number): Promise<AccountStats[]> {
         this.runId = `run_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`
         const accountStats: AccountStats[] = []
-        let processedCount = 0
 
         // Start dynamic outbound local proxy if enabled
         if (this.config.useDynamicWifiProxy) {
@@ -1193,400 +1588,104 @@ export class MicrosoftRewardsBot {
         this.logger.info('main', 'NETWORK', `Current Active IP: [ ${currentIpAddress} ]`)
         this.updateDashboardGlobal({ currentIP: currentIpAddress })
 
-        for (const account of accounts) {
+        const batches = this.utils.chunkBySize(accounts, 2)
+
+        for (let bIdx = 0; bIdx < batches.length; bIdx++) {
             if (this.stopRequested) {
                 this.logger.warn('main', 'C2-CONTROL', 'Execution stopped/paused by user request.')
                 break
             }
-            let scope: AccountScope | null = null
-            const accountStartTime = Date.now()
-            const accountEmail = account.email
-            try {
-                this.resetAccountState()
-                scope = await AccountScope.create({
-                    account,
-                    bot: this,
-                    runId: this.runId
-                })
-                this.accountScope = scope
-                this.userData.userName = this.utils.getEmailUsername(accountEmail)
-                this.activeAccount = account
 
-                this.updateDashboardAccount(accountEmail, {
-                    email: accountEmail,
-                    status: 'Stealth Delay',
-                    initialPoints: 0,
-                    collectedPoints: 0,
-                    desktopProgress: '0/0',
-                    mobileProgress: '0/0'
-                })
-                const randomStartDelay = Math.floor(Math.random() * (60000 - 10000 + 1)) + 10000
-                this.logger.info(
-                    'main',
-                    'STEALTH',
-                    `Menunggu ${(randomStartDelay / 1000).toFixed(0)} detik sebelum buka browser biar keliatan natural...`,
-                    'cyan'
-                )
-                this.updateDashboardAccount(accountEmail, { status: 'Stealth Delay' })
-                await this.utils.wait(randomStartDelay)
+            const batch = batches[bIdx]!
+            const batchNum = bIdx + 1
 
-                this.logger.info(
-                    'main',
-                    'ACCOUNT-START',
-                    `[ACCOUNT-START] Starting workflow for: ${redactAccountKey(accountEmail)} | geoLocale: ${account.geoLocale}`
-                )
-                this.updateDashboardAccount(accountEmail, { status: 'Starting Browser' })
-                DataSaverManager.getInstance().beginAccountQuota(accountEmail)
-                this.axios = new AxiosClient(
-                    account.proxy,
-                    this.localProxyPort,
-                    bytes => this.trackBandwidth(bytes),
-                    err => { void this.notifySuspectedConnectivityFailure('axios', err) }
-                )
+            for (const account of batch) {
+                if (this.stopRequested) {
+                    this.logger.warn('main', 'C2-CONTROL', 'Execution stopped/paused by user request.')
+                    break
+                }
 
-                const result = await this.Main(account, scope).catch(error => {
-                    const errMsg = error instanceof Error ? error.message : String(error)
-                    void this.logger.error(
-                        true,
-                        'FLOW',
-                        `Mobile flow failed for ${redactAccountKey(accountEmail)}: ${errMsg}`
+                const accountStartTime = Date.now()
+                // Dynamic Adaptive Account Deadline (default estimasi 90 missing pts = 18m, clamped 14m - 25m)
+                let accountDeadlineMs = this.calculateDynamicAccountDeadline(90)
+                let deadlineTimer: NodeJS.Timeout | null = null
+                let deadlineReject: ((err: Error) => void) | null = null
+
+                const deadlinePromise = new Promise<'DEADLINE_TIMEOUT'>((_, reject) => {
+                    deadlineReject = reject
+                    deadlineTimer = setTimeout(
+                        () => reject(new Error('SEQUENTIAL_DEADLINE_TIMEOUT_EXCEEDED')),
+                        accountDeadlineMs
                     )
-                    this.updateDashboardAccount(accountEmail, { status: 'Error', error: errMsg })
-                    return undefined
                 })
 
-                const durationSeconds = ((Date.now() - accountStartTime) / 1000).toFixed(1)
-                const mbConsumed = (this.bandwidthTracker.totalBytes / (1024 * 1024)).toFixed(2)
+                this.activeDeadlineAdjuster = (missingPoints: number) => {
+                    const newDeadline = this.calculateDynamicAccountDeadline(missingPoints)
+                    if (newDeadline !== accountDeadlineMs) {
+                        const elapsed = Date.now() - accountStartTime
+                        const remaining = Math.max(60000, newDeadline - elapsed)
+                        accountDeadlineMs = newDeadline
+                        if (deadlineTimer) clearTimeout(deadlineTimer)
+                        if (deadlineReject) {
+                            deadlineTimer = setTimeout(
+                                () => deadlineReject!(new Error('SEQUENTIAL_DEADLINE_TIMEOUT_EXCEEDED')),
+                                remaining
+                            )
+                        }
+                        this.logger.info(
+                            'main',
+                            'ACCOUNT-DEADLINE',
+                            `🎯 Dynamic Deadline disesuaikan: ${Math.round(newDeadline / 60000)} menit (sisa ~${Math.round(remaining / 60000)} menit) berdasarkan target ${missingPoints} poin pencarian.`
+                        )
+                    }
+                }
 
-                const quotaReport = DataSaverManager.getInstance().finishAccountQuota(accountEmail)
-                const bRes = quotaReport.budgetResult
-                const statusColor = bRes.status === 'PASS' ? 'cyan' : 'yellow'
-
-                if (result) {
-                    const collectedPoints = result.collectedPoints ?? 0
-                    const accountInitialPoints = result.initialPoints ?? 0
-                    const accountFinalPoints = accountInitialPoints + collectedPoints
-
+                try {
+                    const stat = await Promise.race<AccountStats>([
+                        this.executeSingleAccount(account),
+                        deadlinePromise as any
+                    ])
+                    if (deadlineTimer) clearTimeout(deadlineTimer)
+                    this.activeDeadlineAdjuster = null
+                    if (stat) accountStats.push(stat)
+                } catch (err) {
+                    if (deadlineTimer) clearTimeout(deadlineTimer)
+                    this.activeDeadlineAdjuster = null
+                    this.logger.error(
+                        'main',
+                        'ACCOUNT-DEADLINE',
+                        `🚨 Akun ${account.email} melebihi batas waktu maksimal dinamis (${Math.round(accountDeadlineMs / 60000)} menit)! Memaksa pembersihan & pembatalan...`
+                    )
+                    if (this.accountScope) {
+                        try {
+                            await AccountDisposer.forceKill(this.accountScope)
+                        } catch {}
+                        this.accountScope = null
+                    } else {
+                        try {
+                            if (this.mainMobilePage) await this.mainMobilePage.close({ runBeforeUnload: false }).catch(() => {})
+                            if (this.mainDesktopPage) await this.mainDesktopPage.close({ runBeforeUnload: false }).catch(() => {})
+                            if (this.browserFactory) await this.browserFactory.recycleBrowser().catch(() => {})
+                        } catch {}
+                    }
+                    this.resetAccountState()
                     accountStats.push({
-                        email: accountEmail,
-                        initialPoints: accountInitialPoints,
-                        finalPoints: accountFinalPoints,
-                        collectedPoints: collectedPoints,
-                        duration: parseFloat(durationSeconds),
-                        bandwidthMb: parseFloat(mbConsumed),
-                        success: true
-                    })
-
-                    this.logger.info(
-                        'main',
-                        'ACCOUNT-FINISH',
-                        `[ACCOUNT-FINISH] Completed workflow for: ${redactAccountKey(accountEmail)} | Total: +${collectedPoints} | Old: ${accountInitialPoints} → New: ${accountFinalPoints} | Duration: ${durationSeconds}s`,
-                        'green'
-                    )
-                    this.logger.info(
-                        'main',
-                        'DATA-SAVER',
-                        `[DATA-SAVER] Quota=${bRes.consumedMb.toFixed(2)}MB budget=${bRes.budgetMb.toFixed(2)}MB usage=${bRes.percentage.toFixed(1)}% status=${bRes.status}${bRes.status === 'OVER_BUDGET' ? ` overBy=${bRes.overMb.toFixed(2)}MB` : ''}`,
-                        statusColor
-                    )
-                    const bd = quotaReport.breakdown
-                    this.logger.info(
-                        'main',
-                        'DATA-SAVER',
-                        `[DATA-SAVER] Breakdown: document=${(bd.document.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.document.requests} req) | script=${(bd.script.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.script.requests} req) | xhr/fetch=${(bd['xhr/fetch'].bytes / (1024 * 1024)).toFixed(2)}MB (${bd['xhr/fetch'].requests} req) | image=${(bd.image.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.image.requests} req) | media=${(bd.media.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.media.requests} req) | font=${(bd.font.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.font.requests} req) | other=${(bd.other.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.other.requests} req)`
-                    )
-                    this.updateDashboardAccount(accountEmail, {
-                        status: 'Completed',
-                        collectedPoints: collectedPoints,
-                        bandwidth: `${mbConsumed} MB`
-                    })
-                } else {
-                    this.logger.info(
-                        'main',
-                        'DATA-SAVER',
-                        `[DATA-SAVER] Quota=${bRes.consumedMb.toFixed(2)}MB budget=${bRes.budgetMb.toFixed(2)}MB usage=${bRes.percentage.toFixed(1)}% status=${bRes.status}${bRes.status === 'OVER_BUDGET' ? ` overBy=${bRes.overMb.toFixed(2)}MB` : ''}`,
-                        statusColor
-                    )
-                    const bd = quotaReport.breakdown
-                    this.logger.info(
-                        'main',
-                        'DATA-SAVER',
-                        `[DATA-SAVER] Breakdown: document=${(bd.document.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.document.requests} req) | script=${(bd.script.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.script.requests} req) | xhr/fetch=${(bd['xhr/fetch'].bytes / (1024 * 1024)).toFixed(2)}MB (${bd['xhr/fetch'].requests} req) | image=${(bd.image.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.image.requests} req) | media=${(bd.media.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.media.requests} req) | font=${(bd.font.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.font.requests} req) | other=${(bd.other.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.other.requests} req)`
-                    )
-                    accountStats.push({
-                        email: accountEmail,
+                        email: account.email,
                         initialPoints: 0,
                         finalPoints: 0,
                         collectedPoints: 0,
-                        duration: parseFloat(durationSeconds),
-                        bandwidthMb: parseFloat(mbConsumed),
+                        duration: accountDeadlineMs / 1000,
                         success: false,
-                        error: 'Flow failed'
+                        error: 'SEQUENTIAL_DEADLINE_TIMEOUT_EXCEEDED'
                     })
-                    this.updateDashboardAccount(accountEmail, {
-                        status: 'Failed',
-                        error: 'Flow failed',
-                        bandwidth: `${mbConsumed} MB`
-                    })
-                }
-            } catch (error) {
-                const durationSeconds = ((Date.now() - accountStartTime) / 1000).toFixed(1)
-                const errMsg = error instanceof Error ? error.message : String(error)
-                this.logger.error('main', 'ACCOUNT-ERROR', `${redactAccountKey(accountEmail)}: ${errMsg}`)
-                accountStats.push({
-                    email: accountEmail,
-                    initialPoints: 0,
-                    finalPoints: 0,
-                    collectedPoints: 0,
-                    duration: parseFloat(durationSeconds),
-                    success: false,
-                    error: errMsg
-                })
-                this.updateDashboardAccount(accountEmail, {
-                    status: 'Failed',
-                    error: errMsg
-                })
-            } finally {
-                try {
-                    if (scope) {
-                        await AccountDisposer.dispose(scope).catch(err => {
-                            this.logger.error(
-                                'main',
-                                'ACCOUNT-DISPOSE',
-                                `Disposal failed for ${redactAccountKey(accountEmail)}: ${err instanceof Error ? err.message : String(err)}`
-                            )
-                        })
-                    }
-                } finally {
-                    if (this.accountScope === scope) {
-                        this.accountScope = null
-                        this.resetAccountState()
-                    }
-                    DataSaverManager.getInstance().resetAccountQuota(accountEmail)
-                }
-
-                if (this.pendingOperatorRecovery) {
-                    const pending = this.pendingOperatorRecovery
-                    this.pendingOperatorRecovery = null
-                    const now = Date.now()
-                    if (now - pending.receivedAt <= pending.ttlMs) {
-                        this.logger.info(
-                            'main',
-                            'NETWORK-RECOVERY',
-                            `dequeued checkpoint=account-scope-disposed source=${pending.source}`
-                        )
-                        await this.requestNetworkRecovery('operator-request')
-                    } else {
-                        this.logger.info(
-                            'main',
-                            'NETWORK-RECOVERY',
-                            `discarded reason=expired receivedAt=${pending.receivedAt} ttlMs=${pending.ttlMs}`
-                        )
-                    }
                 }
             }
 
-            processedCount++
-
             // =======================================================
-            // 🤖 AUTO-ROTATE DENGAN PROTECTION LOOP + DATA SAVER CLI
+            // 🤖 AUTO / MANUAL ROTATE PER 1 BATCH SELESAI (TEPAT 2 AKUN)
             // =======================================================
-            if (processedCount % 2 === 0 && processedCount < accounts.length) {
-                let ipChanged = false
-                const oldIp = currentIpAddress
-                const isManual = this.config.useDynamicWifiProxy || !this.config.useAdbIpRotation
-
-                while (!ipChanged) {
-                    if (this.stopRequested) {
-                        this.logger.warn('main', 'IP-INTERCEPTOR', 'IP rotation aborted due to user stop request.')
-                        break
-                    }
-
-                    this.logger.warn(
-                        'main',
-                        'IP-INTERCEPTOR',
-                        '=======================================================',
-                        'yellow'
-                    )
-                    this.logger.warn(
-                        'main',
-                        'IP-INTERCEPTOR',
-                        `🔥 BATCH [${processedCount / 2}] SELESAI! ROTASI IP ${isManual ? 'MANUAL (LAN / HOTSPOT)' : 'AUTO (ADB AIRPLANE MODE)'} DIMULAI... 🔥`,
-                        'yellow'
-                    )
-                    this.logger.warn('main', 'IP-INTERCEPTOR', `IP Saat Ini: [ ${oldIp} ]`, 'yellow')
-                    this.logger.warn(
-                        'main',
-                        'IP-INTERCEPTOR',
-                        '=======================================================',
-                        'yellow'
-                    )
-
-                    try {
-                        if (isManual) {
-                            try {
-                                require('child_process').exec(
-                                    `powershell -c (New-Object Media.SoundPlayer "C:\\Windows\\Media\\notify.wav").PlaySync();`
-                                )
-                            } catch {}
-
-                            this.logger.info(
-                                'main',
-                                'IP-INTERCEPTOR',
-                                '📌 SILAKAN MATIKAN & NYALAKAN MODE PESAWAT / HOTSPOT DI HP ANDA.',
-                                'cyan'
-                            )
-                            this.logger.info(
-                                'main',
-                                'IP-INTERCEPTOR',
-                                '👉 Tekan [ENTER] di terminal atau klik [Confirm IP Rotated] di Web UI setelah selesai...',
-                                'cyan'
-                            )
-
-                            await waitForUserConfirmation()
-
-                            this.logger.info('main', 'IP-INTERCEPTOR', 'Memeriksa perubahan IP publik baru...')
-                        } else {
-                            const execSync = require('child_process').execSync
-                            const serial = this.config.networkRecovery?.adbSerial?.trim()
-                            const adbPrefix = serial ? `adb -s ${serial}` : 'adb'
-
-                            this.logger.info('main', 'IP-INTERCEPTOR', 'ADB -> Mengaktifkan Mode Pesawat...')
-
-                            // 1. Coba cmd connectivity (Android 11+ AOSP)
-                            let airplaneActivated = false
-                            try {
-                                const out = execSync(`${adbPrefix} shell cmd connectivity airplane-mode enable`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] })
-                                const outLower = (out || '').toLowerCase()
-                                if (!outLower.includes('unknown') &&
-                                    !outLower.includes('error') &&
-                                    !outLower.includes('no shell command') &&
-                                    !outLower.includes('can\'t find service') &&
-                                    !outLower.includes('permission')) {
-                                    try {
-                                        const state = execSync(`${adbPrefix} shell settings get global airplane_mode_on`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim()
-                                        if (state === '1') airplaneActivated = true
-                                    } catch {}
-                                }
-                            } catch {}
-
-                            // 2. Fallback: Settings put global 1 + am broadcast (Universal Android)
-                            if (!airplaneActivated) {
-                                try {
-                                    execSync(`${adbPrefix} shell settings put global airplane_mode_on 1`, { stdio: ['pipe', 'pipe', 'pipe'] })
-                                    execSync(`${adbPrefix} shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state true`, { stdio: ['pipe', 'pipe', 'pipe'] })
-                                } catch {}
-                            }
-
-                            // 3. Fallback jika device memiliki akses root (su)
-                            try {
-                                execSync(`${adbPrefix} shell su -c "cmd connectivity airplane-mode enable || (settings put global airplane_mode_on 1 && am broadcast -a android.intent.action.AIRPLANE_MODE --ez state true)"`, { stdio: ['pipe', 'pipe', 'pipe'] })
-                            } catch {}
-
-                            // 4. Force cut radio data (svc data disable) agar koneksi BTS seluler pasti terputus
-                            try {
-                                execSync(`${adbPrefix} shell svc data disable`, { stdio: ['pipe', 'pipe', 'pipe'] })
-                            } catch {}
-
-                            this.logger.info('main', 'IP-INTERCEPTOR', 'Menunggu 8 detik agar sesi IP provider ter-reset...')
-                            await this.utils.wait(8000)
-
-                            this.logger.info(
-                                'main',
-                                'IP-INTERCEPTOR',
-                                'ADB -> Mematikan Mode Pesawat (Mencari Sinyal Baru)...'
-                            )
-
-                            // 1. Coba cmd connectivity disable
-                            try {
-                                execSync(`${adbPrefix} shell cmd connectivity airplane-mode disable`, { stdio: ['pipe', 'pipe', 'pipe'] })
-                            } catch {}
-
-                            // 2. Settings put global 0 + am broadcast
-                            try {
-                                execSync(`${adbPrefix} shell settings put global airplane_mode_on 0`, { stdio: ['pipe', 'pipe', 'pipe'] })
-                                execSync(`${adbPrefix} shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state false`, { stdio: ['pipe', 'pipe', 'pipe'] })
-                            } catch {}
-
-                            // 3. Fallback root (su) disable
-                            try {
-                                execSync(`${adbPrefix} shell su -c "cmd connectivity airplane-mode disable || (settings put global airplane_mode_on 0 && am broadcast -a android.intent.action.AIRPLANE_MODE --ez state false)"`, { stdio: ['pipe', 'pipe', 'pipe'] })
-                            } catch {}
-
-                            // 4. Nyalakan kembali radio data seluler
-                            try {
-                                execSync(`${adbPrefix} shell svc data enable`, { stdio: ['pipe', 'pipe', 'pipe'] })
-                            } catch {}
-
-                            this.logger.info(
-                                'main',
-                                'IP-INTERCEPTOR',
-                                'Menunggu 10 detik agar radio seluler stabil...'
-                            )
-                            await this.utils.wait(10000)
-
-                            // 5. Pastikan USB Tethering / RNDIS aktif kembali
-                            try {
-                                execSync(`${adbPrefix} shell cmd tethering tether usb`, { stdio: ['pipe', 'pipe', 'pipe'] })
-                                execSync(`${adbPrefix} shell svc usb setFunctions rndis`, { stdio: ['pipe', 'pipe', 'pipe'] })
-                            } catch {}
-
-                            this.logger.info(
-                                'main',
-                                'IP-INTERCEPTOR',
-                                'Menunggu 5 detik agar Windows mendeteksi adapter USB Tethering...'
-                            )
-                            await this.utils.wait(5000)
-                        }
-
-                        const checkNewIp = await this.getCurrentIP(this.localProxyPort || undefined)
-
-                        if (checkNewIp !== oldIp && checkNewIp !== 'UNKNOWN_IP') {
-                            currentIpAddress = checkNewIp
-                            ipChanged = true
-                            this.logger.info(
-                                'main',
-                                'IP-INTERCEPTOR',
-                                `🚀 SUKSES! IP Baru Terdeteksi: [ ${currentIpAddress} ]`,
-                                'green'
-                            )
-                            this.updateDashboardGlobal({ currentIP: currentIpAddress })
-                            await this.utils.wait(3000)
-                        } else {
-                            this.logger.error(
-                                'main',
-                                'IP-INTERCEPTOR',
-                                `❌ GAGAL! IP masih kembar [ ${checkNewIp} ]. Silakan coba matikan/nyalakan ulang hotspot...`,
-                                'red'
-                            )
-                            try {
-                                require('child_process').exec(
-                                    `powershell -c (New-Object Media.SoundPlayer "C:\\Windows\\Media\\notify.wav").PlaySync();`
-                                )
-                            } catch {}
-                            await this.utils.wait(3000)
-                        }
-                    } catch (adbError) {
-                        this.logger.error(
-                            'main',
-                            'IP-INTERCEPTOR',
-                            `🚨 Jalur Jaringan Lemot/IP Glitch / Device ADB Tidak Terdeteksi: ${adbError}`,
-                            'red'
-                        )
-                        try {
-                            require('child_process').exec(
-                                `powershell -c (New-Object Media.SoundPlayer "C:\\Windows\\Media\\notify.wav").PlaySync();`
-                            )
-                        } catch {}
-                        this.logger.info(
-                            'main',
-                            'IP-INTERCEPTOR',
-                            '📌 Pastikan device HP tercolok dan USB debugging aktif, atau ubah IP secara manual...',
-                            'cyan'
-                        )
-                        await this.utils.wait(3000)
-                    }
-                }
+            if (bIdx < batches.length - 1) {
+                currentIpAddress = await this.onBatchComplete(batchNum, currentIpAddress, batch, batches.length)
             }
         }
 
@@ -1621,9 +1720,177 @@ export class MicrosoftRewardsBot {
         return accountStats
     }
 
+    public async runStaggeredDualBatchTasks(
+        accounts: Account[],
+        runStartTime: number
+    ): Promise<AccountStats[]> {
+        this.runId = `run_dual_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`
+        const accountStats: AccountStats[] = []
+
+        // Start dynamic outbound local proxy if enabled
+        if (this.config.useDynamicWifiProxy) {
+            this.localProxy = new DynamicOutboundProxy(0, this.logger)
+            await this.localProxy.start()
+            this.localProxyPort = this.localProxy.getPort()
+            this.logger.info('main', 'PROXY', `Started dynamic outbound local proxy on port ${this.localProxyPort}`)
+        } else {
+            this.localProxyPort = 0
+            this.logger.info('main', 'PROXY', 'Dynamic outbound proxy is disabled. Using default network routing.')
+        }
+
+        this.updateDashboardGlobal({
+            useDynamicWifiProxy: !!this.config.useDynamicWifiProxy,
+            proxyMode: !!this.localProxyPort
+        })
+
+        let currentIpAddress = await this.getCurrentIP(this.localProxyPort || undefined)
+        this.logger.info('main', 'NETWORK', `Current Active IP: [ ${currentIpAddress} ]`)
+        this.updateDashboardGlobal({ currentIP: currentIpAddress })
+
+        const batches = this.utils.chunkBySize(accounts, 2)
+        const staggerOffsetMs = (this.config.staggerOffsetSeconds ?? 45) * 1000
+        const DUAL_BATCH_DEADLINE_MS = 10 * 60 * 1000 // 10 minutes hard deadline per batch
+
+        for (let bIdx = 0; bIdx < batches.length; bIdx++) {
+            if (this.stopRequested) {
+                this.logger.warn('main', 'C2-CONTROL', 'Execution stopped/paused by user request.')
+                break
+            }
+
+            const batch = batches[bIdx]!
+            const batchNum = bIdx + 1
+            this.logger.info(
+                'main',
+                'BATCH-DISPATCHER',
+                `⚡ [DUAL-WORKER] Menjalankan Batch ${batchNum}/${batches.length} (${batch.map(a => a.email).join(', ')}) | Stagger=${staggerOffsetMs / 1000}s`,
+                'cyan'
+            )
+
+            // Shared batch circuit breaker signal: Cooldown on worker 1 aborts worker 2
+            const sharedBatchSignal = { isCooldownTriggered: false }
+
+            const workerBots: MicrosoftRewardsBot[] = []
+            const workerPromises: Promise<AccountStats>[] = []
+
+            for (let i = 0; i < batch.length; i++) {
+                const acc = batch[i]!
+                const wBot = this.createWorkerBot(sharedBatchSignal)
+                workerBots.push(wBot)
+
+                const delayMs = i === 0 ? 0 : staggerOffsetMs
+                workerPromises.push(wBot.executeSingleAccount(acc, delayMs))
+            }
+
+            let deadlineTimer: NodeJS.Timeout | null = null
+            const deadlinePromise = new Promise<'DEADLINE_TIMEOUT'>((_, reject) => {
+                deadlineTimer = setTimeout(
+                    () => reject(new Error('BATCH_DEADLINE_TIMEOUT_EXCEEDED')),
+                    DUAL_BATCH_DEADLINE_MS
+                )
+            })
+
+            try {
+                const results = await Promise.race([
+                    Promise.allSettled(workerPromises),
+                    deadlinePromise
+                ])
+
+                if (deadlineTimer) clearTimeout(deadlineTimer)
+
+                if (Array.isArray(results)) {
+                    for (let i = 0; i < results.length; i++) {
+                        const res = results[i]!
+                        if (res.status === 'fulfilled') {
+                            accountStats.push(res.value)
+                        } else {
+                            const acc = batch[i]!
+                            accountStats.push({
+                                email: acc.email,
+                                initialPoints: 0,
+                                finalPoints: 0,
+                                collectedPoints: 0,
+                                duration: 0,
+                                success: false,
+                                error: res.reason instanceof Error ? res.reason.message : String(res.reason)
+                            })
+                        }
+                    }
+                }
+            } catch (err) {
+                if (deadlineTimer) clearTimeout(deadlineTimer)
+                this.logger.error(
+                    'main',
+                    'BATCH-DEADLINE',
+                    `🚨 Batch ${batchNum} melebihi batas waktu maksimal 10 menit! Memaksa pembersihan & pembatalan worker...`
+                )
+                for (const wBot of workerBots) {
+                    if (wBot.accountScope) {
+                        try {
+                            await AccountDisposer.forceKill(wBot.accountScope)
+                        } catch {}
+                        wBot.accountScope = null
+                    } else {
+                        try {
+                            if (wBot.mainMobilePage) await wBot.mainMobilePage.close({ runBeforeUnload: false }).catch(() => {})
+                            if (wBot.mainDesktopPage) await wBot.mainDesktopPage.close({ runBeforeUnload: false }).catch(() => {})
+                            if (wBot.browserFactory) await wBot.browserFactory.recycleBrowser().catch(() => {})
+                        } catch {}
+                    }
+                    wBot.resetAccountState()
+                }
+                for (const acc of batch) {
+                    accountStats.push({
+                        email: acc.email,
+                        initialPoints: 0,
+                        finalPoints: 0,
+                        collectedPoints: 0,
+                        duration: DUAL_BATCH_DEADLINE_MS / 1000,
+                        success: false,
+                        error: 'BATCH_DEADLINE_TIMEOUT_EXCEEDED'
+                    })
+                }
+            }
+
+            // Batch complete IP rotation hook
+            if (bIdx < batches.length - 1) {
+                currentIpAddress = await this.onBatchComplete(batchNum, currentIpAddress, batch, batches.length)
+            }
+        }
+
+        if (cluster.isPrimary) {
+            const totalCollected = accountStats.reduce((sum, s) => sum + s.collectedPoints, 0)
+            const totalInitial = accountStats.reduce((sum, s) => sum + s.initialPoints, 0)
+            const totalFinal = accountStats.reduce((sum, s) => sum + s.finalPoints, 0)
+            const totalDuration = ((Date.now() - runStartTime) / 1000 / 60).toFixed(1)
+            const totalBandwidth = accountStats.reduce((sum, s) => sum + (s.bandwidthMb ?? 0), 0).toFixed(2)
+            const avgBandwidth = (
+                accountStats.length > 0 ? parseFloat(totalBandwidth) / accountStats.length : 0
+            ).toFixed(2)
+
+            this.logger.info(
+                'main',
+                'RUN-END',
+                `Completed all accounts | Accounts: ${accountStats.length} | Points: +${totalCollected} | Bandwidth: ${totalBandwidth} MB total (avg ${avgBandwidth} MB/acc) | Old: ${totalInitial} → New: ${totalFinal} | Runtime: ${totalDuration}min`,
+                'green'
+            )
+            await flushAllWebhooks()
+            if (this.localProxy) {
+                await this.localProxy.stop()
+            }
+            this.teardownCliOperatorListener()
+            process.exit(0)
+        }
+
+        if (this.localProxy) {
+            await this.localProxy.stop()
+        }
+        this.teardownCliOperatorListener()
+        return accountStats
+    }
+
     async Main(account: Account, scope?: AccountScope): Promise<{ initialPoints: number; collectedPoints: number }> {
         const accountEmail = account.email
-        this.logger.info('main', 'FLOW', `Starting session for ${redactAccountKey(accountEmail)}`)
+        this.logger.info('main', 'FLOW', `Starting session for ${accountEmail}`)
 
         // Zero Leakage: Reset token and completed offers set for clean per-account isolation
         if (this.accountScope) {
@@ -1631,6 +1898,7 @@ export class MicrosoftRewardsBot {
         }
         this.activeAccount = account
         this.workers?.completedOffersInSession?.clear()
+        this.browser?.func?.resetCounters()
 
         let mobileSession: BrowserSession | null = null
         let mobileContextClosed = false
@@ -1648,7 +1916,7 @@ export class MicrosoftRewardsBot {
                 })
                 this.accountScope?.trackPage(this.mainMobilePage)
 
-                this.logger.info('main', 'BROWSER', `Mobile Browser started | ${redactAccountKey(accountEmail)}`)
+                this.logger.info('main', 'BROWSER', `Mobile Browser started | ${accountEmail}`)
 
                 await this.login.login(this.mainMobilePage, account)
 
@@ -1721,7 +1989,7 @@ export class MicrosoftRewardsBot {
                 this.logger.info(
                     'main',
                     'POINTS',
-                    `Earnable today | Mobile: ${browserEarnable.mobileSearchPoints} | Desktop: ${browserEarnable.desktopSearchPoints} | Daily Set: ${browserEarnable.dailySetPoints} | More: ${browserEarnable.morePromotionsPoints} | Total: ${browserEarnable.totalEarnablePoints} | ${redactAccountKey(accountEmail)}`
+                    `Earnable today | Mobile: ${browserEarnable.mobileSearchPoints} | Desktop: ${browserEarnable.desktopSearchPoints} | Daily Set: ${browserEarnable.dailySetPoints} | More: ${browserEarnable.morePromotionsPoints} | Total: ${browserEarnable.totalEarnablePoints} | ${accountEmail}`
                 )
 
                 const accountIdentity = resolveAccountIdentity(this.activeAccount || { email: accountEmail })
@@ -1753,8 +2021,9 @@ export class MicrosoftRewardsBot {
                     await this.activities.observeAppOnlyRewards(data)
                 }
 
+                let pass1HadCoins = false
                 if (this.mainMobilePage) {
-                    await this.workers.doClaimPendingPoints(this.mainMobilePage)
+                    pass1HadCoins = await this.workers.doClaimPendingPoints(this.mainMobilePage)
                 }
 
                 if (this.config.workers.doAppPromotions && appData) {
@@ -1815,13 +2084,26 @@ export class MicrosoftRewardsBot {
                     await this.workers.doPunchCards(punchCardData, this.mainMobilePage)
                 }
 
-                if (this.mainMobilePage) {
+                // Conditional Pass 2: Skip if Pass 1 had no coins and preceding activities were DAPI HTTP
+                if (this.mainMobilePage && pass1HadCoins) {
                     await this.workers.doClaimPendingPoints(this.mainMobilePage, true)
+                } else {
+                    this.logger.debug(
+                        this.isMobile,
+                        'DASHBOARD',
+                        '[PASS 2 SKIPPED] No pending coins detected in Pass 1 and prior activities ran via DAPI HTTP.'
+                    )
                 }
 
                 this.updateDashboardAccount(accountEmail, { status: 'Searching...' })
-                const searchPoints = await this.browser.func.getSearchPoints()
+                this.browser?.func?.resetCounters()
+                const searchPoints = await this.browser.func.getSearchPoints(undefined, true)
                 const missingSearchPoints = this.browser.func.missingSearchPoints(searchPoints)
+
+                // Inform dynamic deadline adjuster about exact missing search points
+                if (this.activeDeadlineAdjuster) {
+                    this.activeDeadlineAdjuster(missingSearchPoints.totalPoints)
+                }
 
                 // update search progress before search loop
                 const startPcProg = searchPoints.pcSearch?.[0]
@@ -1891,7 +2173,7 @@ export class MicrosoftRewardsBot {
                 this.logger.info(
                     'main',
                     'FLOW',
-                    `Collected: +${collectedPoints} | Mobile: +${mobilePoints} | Desktop: +${desktopPoints} | ${redactAccountKey(accountEmail)}`
+                    `Collected: +${collectedPoints} | Mobile: +${mobilePoints} | Desktop: +${desktopPoints} | ${accountEmail}`
                 )
 
                 return { initialPoints, collectedPoints: collectedPoints || 0 }

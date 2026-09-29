@@ -1,488 +1,467 @@
-# IMPLEMENTATION PLAN: Final Security & Anti-Abuse Audit pada Arsitektur Pure HTTP / DAPI Engine
+# IMPLEMENTATION PLAN: Single Source of Truth Arsitektur & Optimasi Eksekusi
 
-Dokumen ini merupakan laporan audit keamanan forensik komprehensif (*Deep Security & Anti-Abuse Audit*) serta rencana arsitektur penguatan (*Hardening Plan*) untuk mesin otomasi **Pure HTTP / DAPI Engine** (`Microsoft-Rewards-Script - Lite` dan integrasi DAPI).
-
-Dokumen ini disusun berdasarkan **FASE 1: PLANNING ONLY (STRICT NO-CODE-EDIT)** dan menjadi acuan tunggal sebelum implementasi teknis disetujui.
-
----
-
-## 1. Executive Summary & Threat Model
-
-Arsitektur **Pure HTTP / DAPI Engine** dirancang untuk mengeksekusi aktivitas Microsoft Rewards (Daily Check-In, Read to Earn, DAPI User Profile) secara langsung melalui protokol HTTP tanpa memuat overhead Playwright browser context. 
-
-Meskipun sangat efisien dalam konsumsi CPU dan RAM, **Pure HTTP Client berada di garis depan deteksi anti-abuse Microsoft Risk & Abuse Platform**. Platform Microsoft secara agresif memeriksa:
-1. **Fingerprint HTTP/TLS & Header Telemetry**: Kebocoran header default library (Axios/Node.js), inkonsistensi casing, serta ketidakhadiran header wajib aplikasi mobile Edge Android.
-2. **Behavioral Timing (Pola Waktu Permintaan)**: Distribusi jeda antar-request (*jitter*) dan jeda antar-akun (*inter-account cooldown*).
-3. **Session & Token Hygiene**: Penanganan status HTTP 401/403, rotasi refresh token, isolasi socket TCP/TLS pool, dan sanitasi kredensial pada error logger.
-4. **Content Consumption Telemetry (MSN News Feed)**: Pola pengambilan dan klaim artikel berita antar-akun dalam satu batch runner.
+> **DOKUMEN UTAMA ARSITEKTUR & PANDUAN PENGEMBANGAN SISTEM**  
+> Repositori: `Microsoft-Rewards-Script`  
+> Lingkungan Target: Windows 10/11 Host (Native PowerShell & Node.js 20+)  
+> Status Dokumen: **Single Source of Truth (SSOT)** aktif bagi Agen AI & Operator.
 
 ---
 
-## 2. Temuan Audit Forensik Mendalam (Forensic Audit Findings)
+## Daftar Isi (Table of Contents)
 
-### 2.1 Audit Area 1: `HttpClient.ts` (Headers, Canonical Casing, dan Socket Disposal)
-
-#### 🔴 Temuan 1.1: Header Default Axios & Node.js Berpotensi Bocor
-* **Lokasi Kode:** `Microsoft-Rewards-Script - Lite/src/core/HttpClient.ts` (baris 54-64)
-* **Akar Masalah:**
-  Inisialisasi `axios.create({ headers })` menggabungkan header kustom dengan default bawaan library Axios di Node.js.
-  * Axios secara default dapat menyertakan `Accept: application/json, text/plain, */*`.
-  * Node.js `http`/`https` module secara default mengirimkan `Accept-Encoding: gzip, compress, deflate, br`. Padahal, browser Edge Android 14 versi resmi mengirimkan:
-    `accept-encoding: gzip, deflate, br, zstd`
-  * Ketidakhadiran pembersihan menyeluruh pada `defaults.headers.common` membuat request Axios rentan menyisipkan header internal library jika ada sub-instance atau transform request yang dieksekusi.
-* **Tingkat Risiko:** **HIGH (Deteksi Bot via Header Signature)**
-
-#### 🔴 Temuan 1.2: Inkonsistensi Header Telemetry DAPI Mobile
-* **Lokasi Kode:** `CANONICAL_EDGE_ANDROID_HEADERS` di `HttpClient.ts` (baris 9-21) vs `ReadToEarnService.ts` (baris 156-165)
-* **Akar Masalah:**
-  Pada Edge Android resmi saat memanggil endpoint DAPI (`/dapi/me/activities`), server telemetry Microsoft memvalidasi trio header berikut:
-  1. `X-Rewards-Country`: Sudah ada di `HttpClient`.
-  2. `X-Rewards-Language`: **TIDAK ADA** di `HttpClient` maupun `ReadToEarnService` (hanya ada di main script browser).
-  3. `X-Rewards-ismobile` / `X-Rewards-IsMobile`: **TIDAK ADA** di `HttpClient` maupun `ReadToEarnService`.
-  Request yang menembak endpoint DAPI tanpa header `X-Rewards-ismobile: true` dan `X-Rewards-Language` langsung diklasifikasikan sebagai pemanggilan API ilegal di luar aplikasi mobile.
-* **Tingkat Risiko:** **HIGH (Device Spoofing Mismatch)**
-
-#### 🟡 Temuan 1.3: Double Destruction dan Lifecycle Socket Agent Proxy
-* **Lokasi Kode:** `HttpClient.ts` (baris 45-52 dan 217-231)
-* **Akar Masalah:**
-  Saat proxy diaktifkan:
-  ```typescript
-  const agent = this.createProxyAgent(options.proxy!)
-  this.httpAgent = agent as any
-  this.httpsAgent = agent as any
-  ```
-  Kedua properti `this.httpAgent` dan `this.httpsAgent` menunjuk ke objek agent yang sama. Saat `dispose()` dipanggil:
-  `this.httpAgent.destroy()` dijalankan, lalu `this.httpsAgent.destroy()` dijalankan lagi pada objek yang sama.
-  Meskipun `destroy()` pada EventEmitter Node sering kali idempoten, pada SOCKS/HTTPS tunnel agent, pemanggilan ganda berpotensi menimbulkan race condition jika ada socket callback yang masih mengantre.
-  Selain itu, Axios interceptor request & response tidak di-eject secara eksplisit saat dispose (`client.interceptors.request.clear()`), sehingga closure Map cookie berpotensi tertahan di memori.
-* **Tingkat Risiko:** **MEDIUM (Resource Leak & State Contamination)**
+1. [1. Historical Baseline & Resolved Architecture](#1-historical-baseline--resolved-architecture) *(Status: Selesai & Terkonsolidasi)*
+2. [Bab 13: Arsitektur Clustering, Web Dashboard (C2), Integrasi ADB IP Rotation, dan Sticky Device Fingerprint](#bab-13-arsitektur-clustering-web-dashboard-c2-integrasi-adb-ip-rotation-dan-sticky-device-fingerprint) *(Status: Active / Implemented)*
+3. [Bab 14: Integrasi 6 Safety Guardrails Host Windows](#bab-14-integrasi-6-safety-guardrails-host-windows) *(Status: Active / Implemented)*
+4. [Bab 15: Normalisasi URL & Logging Unmasking (Display Email Asli)](#bab-15-normalisasi-url--logging-unmasking-display-email-asli) *(Status: Active / Implemented)*
+5. [Bab 16: Penyelarasan Lingkungan Cross-Platform (Windows Host vs Linux/WSL)](#bab-16-penyelarasan-lingkungan-cross-platform-windows-host-vs-linuxwsl) *(Status: Active / Implemented)*
+6. [Bab 17: Audit Forensik Latensi Eksekusi & Profiling Bottleneck Alur Akun (Speedup Plan)](#bab-17-audit-forensik-latensi-eksekusi--profiling-bottleneck-alur-akun-speedup-plan) *(Status: Active / Implemented)*
+7. [Bab 18: Status Persetujuan & Next Steps (Speedup Optimization Plan)](#bab-18-status-persetujuan--next-steps-speedup-optimization-plan) *(Status: Selesai 100% & Terverifikasi)*
+8. [Bab 19: Audit Forensik & Mitigasi Pencarian Terlewati (Search Skipped)](#bab-19-audit-forensik--mitigasi-pencarian-terlewati-search-skipped) *(Status: Selesai 100% & Terverifikasi)*
+9. [Bab 20: Restorasi Hook ADB Batch Rotation & Anti-Bypass Manual Fallback](#bab-20-restorasi-hook-adb-batch-rotation--anti-bypass-manual-fallback) *(Status: Selesai 100% & Terverifikasi)*
 
 ---
 
-### 2.2 Audit Area 2: Behavioral Timing & Jeda Inter-Account
-
-#### 🔴 Temuan 2.1: Jeda Antar-Akun Bernilai 0 ms pada `index.ts` (FATAL)
-* **Lokasi Kode:** `Microsoft-Rewards-Script - Lite/src/index.ts` (baris 37-46)
-  ```typescript
-  let accountIdx = 0
-  for (const account of accounts) {
-      accountIdx++
-      console.log(`\n[Akun ${accountIdx}/${accounts.length}] ...`)
-      const scope = new LiteAccountScope(account, config)
-      const result = await scope.run()
-      results.push(result)
-  }
-  ```
-* **Akar Masalah:**
-  **TIDAK ADA JEDA WAKTU (0 detik)** antar-akun!
-  Saat Akun 1 selesai membaca 10 artikel berita dan klaim check-in, loop langsung mengeksekusi Akun 2 di milidetik yang sama. Akun 2 langsung menembak `login.live.com` OAuth endpoint, lalu Akun 3, 4, 5, dan 6 secara beruntun.
-* **Dampak Deteksi:**
-  Enam akun Microsoft berbeda melakukan login dan klaim poin dari IP yang sama secara beruntun tanpa jeda sedikit pun dalam rentang waktu kurang dari 3-4 menit. Pola ini adalah **tanda tangan pasti dari otomasi batch/sybil bot farm**. Server Microsoft Risk Platform akan langsung menandai seluruh 6 akun tersebut ke dalam status ban atau penalti 15-minute search cooldown.
-* **Tingkat Risiko:** **CRITICAL (Pemicu Utama Mass Account Flagging)**
-
-#### 🟡 Temuan 2.2: Distribusi Jitter Delay yang Terlalu Seragam (Uniform Rectangular)
-* **Lokasi Kode:** `ReadToEarnService.ts` (baris 86-90)
-  ```typescript
-  public getRandomDelay(): number {
-      return Math.floor(Math.random() * (this.maxDelayMs - this.minDelayMs + 1)) + this.minDelayMs
-  }
-  ```
-* **Akar Masalah:**
-  Jitter delay dihitung menggunakan distribusi seragam murni (*pure uniform distribution*) antara 5000ms s.d. 9000ms.
-  Secara statistik, manusia tidak membaca artikel dengan interval yang terdistribusi rata sempurna antara 5.0 detik dan 9.0 detik. Mesin deteksi anti-abuse modern menggunakan uji statistik Kolmogorov-Smirnov atau Chi-Square untuk mendeteksi variasi artifisial yang tidak memiliki karakteristik *human reading cadence* (yang seharusnya memiliki kurva normal/Poisson, dengan jeda baca bervariasi antara artikel pendek dan panjang).
-* **Tingkat Risiko:** **MEDIUM (Statistical Telemetry Anomaly)**
-
----
-
-### 2.3 Audit Area 3: Session & Token Hygiene
-
-#### 🔴 Temuan 3.1: Kegagalan Menangani HTTP 401 Mid-Flight & Deteksi Pasif 403
-* **Lokasi Kode:** `AuthService.ts` (baris 131-197), `DashboardService.ts` (baris 25-30), `ReadToEarnService.ts` (baris 156-166)
-* **Akar Masalah:**
-  1. **Tidak Ada Mid-Flight Token Refresh:** Jika access token kedaluwarsa atau di-revoke oleh Microsoft di tengah-tengah perputaran loop 10 artikel, request DAPI berikutnya akan melempar HTTP 401 Unauthorized. Kode saat ini tidak menangkap error 401 untuk mencoba `refreshToken()` otomatis, melainkan langsung mematikan eksekusi seluruh akun (*crash out*).
-  2. **Pengabaian Kode Error 403 (Suspension/Risk Lock):** HTTP 403 pada DAPI menandakan akun terkena sanksi *Account Suspension*, *Geo-Lock*, atau *Temporary Hold*. Kode saat ini tidak mengklasifikasikan error 403, sehingga runner memperlakukannya sebagai error jaringan biasa dan tidak mencatat tanda risiko akun.
-  3. **Deteksi Sesi Kedaluwarsa pada OAuth Pasif:** Pada `AuthService.authenticate()`, jika cookie sesi mati, Microsoft mengembalikan status 200 dengan dokumen HTML form login (tanpa header `Location`). Kode sudah mendeteksi ketiadaan `Location`, tetapi belum mengisolasi status tersebut sebagai `SESSION_EXPIRED` yang membutuhkan pembaruan session file.
-* **Tingkat Risiko:** **HIGH (Resilience & Account State Blindness)**
-
-#### 🟡 Temuan 3.2: Potensi Kebocoran Bearer Token & Kredensial pada Error Serialization
-* **Lokasi Kode:** `LiteAccountScope.ts` (baris 168-171) & `Redaction.ts`
-* **Akar Masalah:**
-  Meskipun `sanitizeLogMessage` sudah menyaring token via regex string, Axios Error object (`AxiosError`) memiliki properti `.config` yang menyertakan header otentikasi asli:
-  `err.config.headers['Authorization'] = 'Bearer eyJhbGci...'`
-  Jika error ditangkap oleh runtime global `process.on('unhandledRejection')` atau dicetak menggunakan `console.error(err)` (yang mencetak seluruh objek termasuk `.config` dan internal buffers), token mentah dan cookie rahasia dapat bocor ke standard error terminal atau file log CI/CD.
-* **Tingkat Risiko:** **MEDIUM (Credential Exposure)**
-
----
-
-### 2.4 Audit Area 4: MSN Article Feed (Rotasi & Pencegahan Replay Antar-Akun)
-
-#### 🔴 Temuan 4.1: Replay ID Artikel 100% Identik Antar-6 Akun (CRITICAL)
-* **Lokasi Kode:** `ReadToEarnService.ts` (baris 46-81 dan 105-135)
-* **Akar Masalah:**
-  Perhatikan alur pengambilan artikel saat ini:
-  ```typescript
-  const realArticleIds = await this.fetchRealArticleIds()
-  const articlesNeeded = Math.min(Math.ceil(quotaRemaining / 3), this.maxArticles, realArticleIds.length)
-
-  for (let i = 0; i < articlesNeeded; i++) {
-      const articleId = realArticleIds[i]
-      ...
-  }
-  ```
-  1. Setiap akun memanggil URL feed yang sama persis:
-     `https://assets.msn.com/service/news/feed/pages/binghp?apikey=...&market=id-id`
-  2. Feed mengembalikan daftar artikel dalam urutan statis dari kartu pertama:
-     `[ID_1, ID_2, ID_3, ID_4, ID_5, ID_6, ID_7, ID_8, ID_9, ID_10, ...]`
-  3. **Semua akun selalu membaca mulai dari indeks 0 (`i = 0` sampai `i = 9`)!**
-* **Dampak Deteksi:**
-  * Akun 1 membaca: Artikel ID 1 s.d. ID 10 dalam urutan 1, 2, 3...
-  * Akun 2 membaca: Artikel ID 1 s.d. ID 10 dalam urutan 1, 2, 3...
-  * Akun 3 membaca: Artikel ID 1 s.d. ID 10 dalam urutan 1, 2, 3...
-  * Akun 4, 5, 6 membaca: Artikel ID 1 s.d. ID 10 dalam urutan 1, 2, 3...
-  Server telemetri Microsoft mencatat 6 akun berbeda pada IP yang sama membaca 10 artikel berita yang persis sama, dengan urutan persis sama, dalam selang beberapa menit.
-  **Ini adalah bot signature yang tak terbantahkan.**
-* **Tingkat Risiko:** **CRITICAL (Deteksi Otomasi Replay Pola Feed)**
-
-#### 🟡 Temuan 4.2: Ketiadaan Endpoint Feed Cadangan
-* **Lokasi Kode:** `ReadToEarnService.ts` (baris 5-6)
-* **Akar Masalah:**
-  Hanya ada 1 URL feed tunggal (`pages/binghp`). Jika server MSN mengembalikan error 500, feed kosong, atau perubahan layout cards, layanan ReadToEarn langsung gagal total. Sebaliknya, main browser script memiliki fallback ke `pages/selected`.
-* **Tingkat Risiko:** **MEDIUM (Availability Single Point of Failure)**
-
----
-
-## 3. Rencana Perbaikan & Hardening Arsitektur (Actionable Recommendations)
-
-### 3.1 Hardening `HttpClient.ts` & HTTP Layer
-1. **Pembersihan Bersih Default Axios:**
-   - Gunakan konfigurasi `transformRequest` dan pembersihan eksplisit pada `defaults.headers.common`.
-   - Tetapkan `Accept-Encoding: gzip, deflate, br, zstd` untuk mencerminkan Edge Android 14 secara akurat.
-2. **Injeksi Header Telemetry DAPI Wajib:**
-   - Tambahkan header resmi Edge Android pada seluruh panggilan DAPI:
-     ```typescript
-     'X-Rewards-Country': country,
-     'X-Rewards-Language': 'en',
-     'X-Rewards-ismobile': 'true'
-     ```
-3. **Pembersihan Total Interceptor & Socket pada `dispose()`:**
-   - Eject seluruh Axios request & response interceptors pada saat disposal.
-   - Pastikan agent proxy dihancurkan tepat satu kali dengan safe check.
-
-### 3.2 Hardening Behavioral Timing & Inter-Account Engine
-1. **Penerapan Jeda Inter-Account pada `index.ts`:**
-   - Tambahkan humanized cool-off delay antar-akun di `Microsoft-Rewards-Script - Lite/src/index.ts`:
-     Jeda dinamis antara 20 s.d. 45 detik (dengan log status countdown) sebelum berpindah ke akun berikutnya dalam antrean.
-2. **Distribusi Jitter Non-Linier (Human Cadence) pada `ReadToEarnService.ts`:**
-   - Ubah perhitungan jitter dari uniform flat menjadi distribusi bervariasi alami (rentang 6000ms s.d. 12000ms dengan variasi micro-pause acak per artikel) agar tidak menghasilkan jejak grafik distribusi kotak (*rectangular distribution*).
-
-### 3.3 Hardening Session, Token Hygiene & Error Recovery
-1. **Klasifikasi Error Status HTTP:**
-   - `401 Unauthorized`: Tangani secara pasif, coba 1x refresh token via OAuth `refreshToken()`. Jika tetap gagal, tandai sesi kedaluwarsa tanpa membocorkan kredensial.
-   - `403 Forbidden`: Klasifikasikan secara eksplisit sebagai `ACCOUNT_FLAGGED_OR_SUSPENDED`, catat peringatan keamanan, dan batalkan aktivitas akun ini dengan aman tanpa mengganggu akun lainnya.
-2. **Sanitasi Axios Error Config:**
-   - Pada `LiteAccountScope.run()`, tangkap error dan buat wrapper sanitasi khusus yang menghapus properti `.config.headers` dan `.config.data` sebelum string error diteruskan ke logger atau terminal.
-
-### 3.4 Hardening MSN Article Feed Engine (Zero Replay Guarantee)
-1. **Mekanisme Rotasi & Shuffling Artikel (Fisher-Yates dengan Per-Account Salt):**
-   - Implementasikan pengacakan (*shuffle*) daftar artikel riil yang diperoleh dari MSN feed sebelum diambil oleh akun.
-2. **Cross-Account Article Exclusion Tracker:**
-   - Buat pool artikel riil yang di-share antar-akun pada level runner session.
-   - Setiap kali Akun A membaca artikel $X_1 \dots X_{10}$, artikel tersebut dimasukkan ke dalam `usedArticleIds` set untuk sesi hari itu.
-   - Akun B akan memprioritaskan artikel yang belum dibaca oleh Akun A ($X_{11} \dots X_{20}$).
-   - Hal ini menjamin **ZERO REPLAY** artikel antar-6 akun!
-3. **Multi-Feed Endpoint Fallback:**
-   - Tambahkan fallback ke endpoint `pages/selected` dan `pages/news` jika feed utama mengembalikan artikel kurang dari kuota.
-
----
-
-## 4. Matriks Rangkuman Temuan & Prioritas Perbaikan
-
-| Area Audit | Masalah / Celah | Tingkat Risiko | Dampak Deteksi | Prioritas Remediasi |
-| :--- | :--- | :---: | :--- | :---: |
-| **MSN Feed** | Replay ID artikel 100% identik & urutan statis pada semua 6 akun | **CRITICAL** | Pola replay identik terdeteksi sebagai sybil bot | **P0 (Wajib)** |
-| **Timing** | Jeda antar-akun bernilai 0 ms pada `index.ts` | **CRITICAL** | Eksekusi 6 akun berturut-turut memicu rate-limit & ban | **P0 (Wajib)** |
-| **HttpClient** | Header DAPI (`X-Rewards-ismobile`, `X-Rewards-Language`) hilang | **HIGH** | Server DAPI mendeteksi pemanggilan di luar Edge Android | **P1 (Tinggi)** |
-| **Session** | Ketiadaan recovery HTTP 401 dan klasifikasi HTTP 403 | **HIGH** | Akun crash mendadak & status penalti tidak terdeteksi | **P1 (Tinggi)** |
-| **HttpClient** | Potensi kebocoran default header Axios & `Accept-Encoding` lama | **HIGH** | Fingerprint HTTP/1.1 tidak cocok dengan Edge Android 14 | **P1 (Tinggi)** |
-| **Timing** | Jitter delay seragam (*pure uniform rectangular distribution*) | **MEDIUM** | Pola statistik waktu mudah dianalisis oleh model ML | **P2 (Sedang)** |
-| **MSN Feed** | Endpoint feed tunggal tanpa fallback endpoint berita lain | **MEDIUM** | Gagal membaca berita saat server feed MSN tertentu down | **P2 (Sedang)** |
-| **Log/Hygiene** | Objek AxiosError dapat memaparkan Authorization header pada stack trace | **MEDIUM** | Potensi kebocoran token pada log error terminal | **P2 (Sedang)** |
-
----
-
-## 5. Status & Tahapan Selesai (Pure HTTP Engine)
+## 1. Historical Baseline & Resolved Architecture
 
 > [!NOTE]
-> Audit dan hardening Pure HTTP / DAPI Engine pada Bab 1 s.d. 4 telah berhasil diimplementasikan, diverifikasi 100% lolos unit test, dan telah di-push ke GitHub (`631d322` & `24a3d0a`).
+> **STATUS: HISTORICAL BASELINE (SELESAI & TERKONSOLIDASI)**  
+> Bagian ini merangkum evolusi teknis dari Bab 1 s.d. Bab 12 terdahulu yang telah selesai diuji, diimplementasikan, dan di-merger ke codebase utama.
+
+1. **Pure HTTP / DAPI Engine & Security Hardening (Eks Bab 1–5 & 11–12)**:
+   - Audit mendalam pada layer HTTP Axios/Node.js, isolasi socket proxy, canonical casing header, hygiene token OAuth mid-flight refresh (HTTP 401/403), serta pencegahan pola feed replay pada berita MSN telah diselesaikan.
+   - Diputuskan arsitektur hibrida: Aktivitas ringan (`DailyCheckIn.ts` dan `ReadToEarn.ts`) menggunakan transmisi DAPI/HTTP murni, sedangkan aktivitas kompleks (Daily Set, kuis, dan SERP search) tetap menggunakan engine Playwright Chromium untuk menjamin anti-abuse resilience.
+2. **Discord Webhook Restoration & Streamlining (Eks Bab 10)**:
+   - Kerusakan webhook akibat typo konfigurasi (`"disc Yeah.ord"`) telah diperbaiki.
+   - Format pesan teks mentah yang berulang digantikan dengan **Discord Rich Embeds**:
+     - *Embed Hijau (`0x2ECC71`)*: Ringkasan perolehan poin per-akun (`[ACCOUNT-FINISH]`).
+     - *Embed Ungu (`0x9B59B6`)*: Rekapitulasi batch farm runner (`RUN-END`) disertai user mention.
+     - *Embed Merah (`0xE74C3C`)*: Notifikasi error kritis & peringatan cooldown 15 menit.
+   - Hardcoded bot token di `src/DiscordBot.ts` telah dibersihkan secara permanen dan dialihkan ke pembacaan dinamis dari `config.discord.botToken` / environment variable `DISCORD_BOT_TOKEN`.
 
 ---
 
-## 10. Audit Kerusakan Integrasi Discord Webhook & Rencana Streamlining Embed Log
-
-### 10.1 Ringkasan Eksekutif & Status Endpoint Webhook
-
-Bot saat ini mengalami kegagalan total dalam mengirimkan notifikasi apapun ke channel Discord operator (*webhook mati total*). Berdasarkan audit forensik terhadap konfigurasi dan modul logging, ditemukan bahwa **penyebab utama webhook mati bukanlah masalah pada server Discord**, melainkan kombinasi fatal dari:
-1. **Typo / Corrupted Key** pada file konfigurasi `config.json`.
-2. **Skema Zod yang men-drop key asing** sehingga konfigurasi Discord bernilai `undefined`.
-3. **Whitelist filter logger yang terlalu agresif** (`webhookLogFilter`) yang mencegat hampir seluruh log event.
-4. **Ketidakcocokan pola (*Regex Mismatch*) 100%** antara string yang dicatat oleh runner `src/index.ts` dengan regex yang dicari oleh `src/logging/Discord.ts`.
-5. **Silent try-catch** pada pengiriman axios yang menelan seluruh error HTTP.
-
-> [!NOTE]
-> **Status Verifikasi Endpoint Discord Webhook:**
-> Dilakukan uji verifikasi aktif secara pasif (`GET /api/webhooks/1508365339287621742/...`) langsung ke endpoint Discord:
-> * **Status HTTP:** `200 OK`
-> * **Webhook Name:** `Microsoft retard bot`
-> * **ID Webhook:** `1508365339287621742`
-> * **Channel ID:** `1508365227207430244`
-> * **Guild ID:** `1508365156558569572`
->
-> **Kesimpulan:** URL Discord Webhook milik operator **100% aktif, valid, dan sehat di server Discord**. Kerusakan murni terjadi di sisi aplikasi lokal (*code & config logic*).
-
----
-
-### 10.2 Bedah Forensik Akar Masalah (Root Causes & Code Locations)
-
-#### 🔴 Akar Masalah 1: Typo / Corrupted Key pada `config.json`
-* **Lokasi Kode:** `config.json` (baris 103)
-* **Kondisi Kode Saat Ini:**
-  ```json
-  "webhook": {
-      "disc Yeah.ord": {
-          "enabled": true,
-          "url": "https://discord.com/api/webhooks/1508365339287621742/LGVlX15YmrRYhLNcGxjiXq89R8kQkNcJtPv9VK3oAm4ghYYrirGEhjPQGhnfSCJNjqUN"
-      },
-  ```
-* **Mekanisme Kegagalan:**
-  Key JSON yang seharusnya `"discord"` rusak menjadi `"disc Yeah.ord"` (kemungkinan akibat typo atau ketidaksengajaan saat pengeditan konfigurasi sebelumnya).
-
-#### 🔴 Akar Masalah 2: Skema Zod Men-strip Key dan Mengabaikan Webhook
-* **Lokasi Kode:** `src/util/Validator.ts` (baris 26-32)
-* **Kondisi Kode:**
-  ```typescript
-  const WebhookSchema = z.object({
-      discord: z.object({
-          enabled: z.boolean(),
-          url: z.string()
-      }).optional(),
-      ntfy: ...
-  })
-  ```
-* **Mekanisme Kegagalan:**
-  Karena properti `discord` bersifat `.optional()`, parser Zod mengabaikan dan membuang key `"disc Yeah.ord"`. Objek konfigurasi yang divalidasi menghasilkan `config.webhook.discord === undefined`.
-
-#### 🔴 Akar Masalah 3: Guard Check di Logger Mengabaikan Pemanggilan Webhook
-* **Lokasi Kode:** `src/logging/Logger.ts` (baris 138-141) & `src/index.ts` (baris 1092-1094)
-* **Kondisi Kode:**
-  ```typescript
-  // src/logging/Logger.ts:138
-  if (config.webhook.discord?.enabled && config.webhook.discord.url) {
-      if (level === 'debug') return
-      sendDiscord(config.webhook.discord.url, cleanMsg, level)
-  }
-
-  // src/index.ts:1092 (Worker IPC)
-  if (webhook.discord?.enabled && webhook.discord.url) {
-      sendDiscord(webhook.discord.url, content, level)
-  }
-  ```
-* **Mekanisme Kegagalan:**
-  Karena `config.webhook.discord` bernilai `undefined`, kondisi guard bernilai `false`. Fungsi `sendDiscord()` **TIDAK PERNAH DIPANGGIL SAMA SEKALI** (0 eksekusi) sepanjang siklus program.
-
-#### 🔴 Akar Masalah 4: Whitelist Filter Terlalu Ketat (`webhookLogFilter`)
-* **Lokasi Kode:** `config.json` (baris 119-132) & `src/logging/Logger.ts` (baris 127, 152-195)
-* **Kondisi Kode Saat Ini:**
-  ```json
-  "webhookLogFilter": {
-      "enabled": true,
-      "mode": "whitelist",
-      "levels": ["error", "warn"],
-      "keywords": ["gainedPoints", "Completed", "Summary"],
-      "regexPatterns": []
-  }
-  ```
-* **Mekanisme Kegagalan:**
-  * Di `Logger.ts`, `shouldPassFilter()` mengevaluasi pesan. Jika mode `whitelist`, log level `info` akan ditolak kecuali mengandung salah satu kata kunci.
-  * Banyak event penting seperti `[COOLDOWN-DETECTED]`, `Starting account`, `Stealth delay`, `ADB IP rotation`, `Punch card`, `Quiz`, dan `Star bonus` tidak mengandung kata kunci tersebut, sehingga langsung di-drop sebelum sampai ke Discord.
-
-#### 🔴 Akar Masalah 5: Regex Mismatch 100% pada `src/logging/Discord.ts`
-Bahkan jika webhook aktif dan filter diloloskan, parser regex di `src/logging/Discord.ts` tidak cocok dengan format log nyata di `src/index.ts`:
-
-1. **Laporan Akun Selesai (`accountEndMatch`):**
-   * *Di `Discord.ts` (baris 76):*
-     ```typescript
-     const accountEndMatch = content.match(/Completed account: (.*?) \| Total: \+(\d+) \| Old: (\d+) → New: (\d+) \| Duration: (.*)/)
-     ```
-   * *Log Nyata di `src/index.ts` (baris 1283):*
-     ```typescript
-     `[ACCOUNT-FINISH] Completed workflow for: ${redactAccountKey(accountEmail)} | Total: +${collectedPoints} | Old: ${accountInitialPoints} → New: ${accountFinalPoints} | Duration: ${durationSeconds}s`
-     ```
-   * *Akibat:* Pola `"Completed account:"` tidak pernah ditemukan karena runner mencatat `"[ACCOUNT-FINISH] Completed workflow for:"`. **Laporan akun selesai tidak pernah terkirim!**
-
-2. **Rekap Akhir Seluruh Akun (`runEndMatch`):**
-   * *Di `Discord.ts` (baris 68):*
-     ```typescript
-     const runEndMatch = content.match(/Completed all accounts \| Accounts processed: (\d+) \| Total points collected: \+(\d+) \| Old total: (\d+) → New total: (\d+) \| Total runtime: (.*)/)
-     ```
-   * *Log Nyata di `src/index.ts` (baris 1606):*
-     ```typescript
-     `Completed all accounts | Accounts: ${accountStats.length} | Points: +${totalCollected} | Bandwidth: ${totalBandwidth} MB total (avg ${avgBandwidth} MB/acc) | Old: ${totalInitial} → New: ${totalFinal} | Runtime: ${totalDuration}min`
-     ```
-   * *Akibat:* Regex mencari `"Accounts processed:"` dan `"Total points collected:"`, sementara runner mencatat `"Accounts:"` dan `"Points:"`. **Rekap grand total semalam tidak pernah terkirim!**
-
-3. **Mulai Akun Baru (`accountStartMatch`):**
-   * *Di `Discord.ts` (baris 85):* Mencari `Starting account: ... | geoLocale: ...`. Runner di `src/index.ts` tidak pernah memancarkan teks tersebut.
-
-#### 🟡 Akar Masalah 6: Silent Error Swallowing pada Axios Post Webhook
-* **Lokasi Kode:** `src/logging/Discord.ts` (baris 239-246)
-* **Kondisi Kode:**
-  ```typescript
-  await discordQueue.add(async () => {
-      try {
-          await axios(request)
-      } catch (err: any) {
-          const status = err?.response?.status
-          if (status === 429) return
-      }
-  })
-  ```
-* **Mekanisme Kegagalan:**
-  Jika terjadi HTTP 400 Bad Request (misal payload invalid), HTTP 404 (webhook dihapus), HTTP 500 (server Discord down), atau timeout jaringan pada host Lubuntu, error ditelan mentah-mentah (*swallowed*) tanpa log peringatan apapun di console. Operator tidak mengetahui alasan webhook gagal.
-
-#### 🟡 Akar Masalah 7: Ketiadaan Format Rich Embed & Kerentanan Chat Spam
-* **Lokasi Kode:** `src/logging/Discord.ts` (baris 206-212 dan 228-237)
-* **Akar Masalah:**
-  * Saat ini payload Discord dikirim dalam format plain text biasa (`{ content: finalContent }`), bukan Discord Rich Embeds.
-  * Terdapat fallback berbahaya pada baris 206-212 yang mengubah setiap pesan `[INFO]` menjadi `🔹 ${clean}`. Jika filter dinonaktifkan, Discord akan dibanjiri ratusan pesan tidak berguna per menit (seperti kueri pencarian, scroll trace, dsb.), yang memicu rate-limit Discord (HTTP 429).
-
----
-
-### 10.3 Rencana Desain Streamlining Log Embed Discord (Arsitektur Baru)
-
-Untuk mengatasi spam dan menyajikan informasi yang ringkas, profesional, dan informatif bagi operator, integrasi Discord akan dirombak menggunakan **Discord Rich Embeds (Clean & Concise)**:
-
-```mermaid
-flowchart TD
-    LogEmitter["Runner / Logger Log Event"] --> FilterHook{"Tipe Event Penting?"}
-    FilterHook -- "Bukan (Query, Scroll, Noise)" --> Drop["Abaikan (Zero Chat Spam)"]
-    FilterHook -- "Account Finished" --> Embed1["Embed Hijau: Laporan Akun Selesai"]
-    FilterHook -- "Batch Finished (Run-End)" --> Embed2["Embed Ungu: Rekap Total Peternakan"]
-    FilterHook -- "Critical Alert (Cooldown/Lock)" --> Embed3["Embed Merah: Peringatan Kritis + Ping Operator"]
-    
-    Embed1 --> DiscordQueue["P-Queue Rate-Limiter (2 req/s)"]
-    Embed2 --> DiscordQueue
-    Embed3 --> DiscordQueue
-    DiscordQueue --> DiscordAPI["Discord Webhook API (HTTP POST Embed)"]
-```
-
-#### 📋 1. Struktur Embed 1: Laporan Akun Selesai (`ACCOUNT_FINISHED`)
-* **Warna:** Hijau (`0x2ECC71`)
-* **Trigger:** Event `[ACCOUNT-FINISH]` pada `src/index.ts` (baris 1283).
-* **Payload Embed:**
-  ```json
-  {
-    "embeds": [
-      {
-        "title": "✅ Laporan Akun Selesai",
-        "color": 3066993,
-        "fields": [
-          { "name": "👤 Akun", "value": "`use***@domain.com`", "inline": true },
-          { "name": "📈 Poin Diperoleh", "value": "**+150 Poin**", "inline": true },
-          { "name": "💰 Saldo Total", "value": "12,450 → **12,600**", "inline": true },
-          { "name": "⏱️ Durasi", "value": "3.2 menit", "inline": true },
-          { "name": "📶 Bandwidth", "value": "4.12 MB", "inline": true },
-          { "name": "🌐 IP Selesai", "value": "`114.122.x.x`", "inline": true }
-        ],
-        "footer": { "text": "Microsoft Rewards Automation • v3.1.4" },
-        "timestamp": "2026-09-23T00:15:00.000Z"
-      }
-    ]
-  }
-  ```
-
-#### 📋 2. Struktur Embed 2: Rekap Akhir Seluruh Akun (`BATCH_SUMMARY`)
-* **Warna:** Ungu / Diamond (`0x9B59B6`)
-* **Trigger:** Event `RUN-END` / `Completed all accounts` pada `src/index.ts` (baris 1606).
-* **Payload Embed:**
-  ```json
-  {
-    "content": "<@877734448685260820>",
-    "embeds": [
-      {
-        "title": "🏆 REKAP AKHIR PETERNAKAN (SEMUA AKUN SELESAI)",
-        "color": 10181046,
-        "description": "Seluruh antrean akun telah berhasil diproses oleh sistem.",
-        "fields": [
-          { "name": "👥 Akun Diproses", "value": "**6 Akun**", "inline": true },
-          { "name": "🔥 Total Poin Panen", "value": "**+920 Poin**", "inline": true },
-          { "name": "💎 Grand Total Saldo", "value": "77,530 → **78,450 Poin**", "inline": true },
-          { "name": "⏱️ Total Waktu", "value": "24.5 menit", "inline": true },
-          { "name": "📊 Total Kuota Terpakai", "value": "28.4 MB (avg 4.7 MB/acc)", "inline": true }
-        ],
-        "footer": { "text": "Microsoft Rewards Farm Automation • Completed" },
-        "timestamp": "2026-09-23T00:35:00.000Z"
-      }
-    ]
-  }
-  ```
-
-#### 📋 3. Struktur Embed 3: Peringatan Kritis (`CRITICAL_ALERT`)
-* **Warna:** Merah (`0xE74C3C`) / Oranye (`0xE67E22`)
-* **Trigger:** Deteksi 15-Minute Cooldown, Account Suspended / Locked, Passkey / 2FA Verification, Kegagalan Rotasi IP ADB.
-* **Payload Embed:**
-  ```json
-  {
-    "content": "<@877734448685260820>",
-    "embeds": [
-      {
-        "title": "🚨 PERINGATAN KRITIS: Microsoft 15-Minute Search Cooldown",
-        "color": 15158332,
-        "description": "Microsoft mendeteksi pencarian terlalu cepat dan membekukan perolehan poin selama 15 menit.",
-        "fields": [
-          { "name": "👤 Akun Terdampak", "value": "`use***@domain.com`", "inline": true },
-          { "name": "🛡️ Tindakan Bot", "value": "Graceful abort dieksekusi. Sesi ditutup aman dan bot berpindah ke akun berikutnya.", "inline": false }
-        ],
-        "footer": { "text": "Anti-Abuse Protection Guard" },
-        "timestamp": "2026-09-23T00:20:00.000Z"
-      }
-    ]
-  }
-  ```
-
-#### 🗑️ 4. Eliminasi Total Log Mentah (Spam Prevention)
-* **Daftar log yang TIDAK PERNAH dikirim ke Discord:**
-  * Kueri pencarian per-kata (*"Submitted query to Bing: ..."*).
-  * Safe scroll trace, Bezier curve, Ghost-click.
-  * Cookie storage & session loading.
-  * Browser context creation / page navigation.
-  * Request interceptor trace & data saver filtering logs.
-  * Log rutin `[INFO]` umum.
-
----
-
-### 10.4 Rencana Tindakan Teknis Remediasi (Action Plan)
-
-1. **Perbaikan `config.json`:**
-   * Ubah key `"disc Yeah.ord"` menjadi `"discord"`.
-   * Sesuaikan `webhookLogFilter` agar tidak memblokir event `ACCOUNT-FINISH`, `RUN-END`, dan alert `error`/`warn`.
-2. **Refactor `src/logging/Discord.ts`:**
-   * Implementasikan fungsi builder `sendDiscordEmbed(url, embedPayload, mentionUser)`.
-   * Sinkronkan regex `accountEndMatch` agar mengenali `[ACCOUNT-FINISH] Completed workflow for: ...`.
-   * Sinkronkan regex `runEndMatch` agar mengenali `Completed all accounts | Accounts: ... | Points: ...`.
-   * Tambahkan deteksi khusus `[COOLDOWN-DETECTED]`, `ACCOUNT_LOCKED`, `PASSKEY_ERROR`.
-   * Tambahkan error logging defensif pada blok catch Axios (dengan penanganan backoff `retry-after` jika terkena HTTP 429).
-3. **Pengujian & Validasi:**
-   * Buat unit test pada `test/discordEmbed.test.ts` untuk memverifikasi formatting embed dan kecocokan regex dengan string log nyata `src/index.ts`.
-   * Lakukan validasi `npm test` dan `npm run build` (harus exit code 0).
-
----
-
-## 11. Status Persetujuan
+## Bab 13: Arsitektur Clustering, Web Dashboard (C2), Integrasi ADB IP Rotation, dan Sticky Device Fingerprint
 
 > [!IMPORTANT]
-> **ATURAN FASE 1 DIPATUHI PENUH**:
-> * Tidak ada file program (`*.ts`, `*.js`) atau konfigurasi yang disentuh pada fase audit ini.
-> * Dokumentasi diperbarui secara eksklusif pada file tunggal: `IMPLEMENTATIONPLAN.md` (Bab 10).
+> **STATUS KOMPONEN: ACTIVE / IMPLEMENTED (TERPASANG)**  
+> Fitur In-Process Dual-Worker, kontrol Web Dashboard, isolasi Sticky Device Profile 1:1, dan event hook rotasi IP telah terpasang di codebase utama.
 
-Menunggu instruksi dan persetujuan dari operator untuk mengeksekusi **FASE 2 (Perbaikan Konfigurasi & Refactor Modul Discord Embed)**.
+### 13.1 In-Process Dual-Worker Staggered Batching
+- **Masalah Multi-Proses Lama (`cluster.fork()`)**: Mode multi-proses terpisah memutus radio seluler di tengah navigasi worker lain saat salah satu worker mengeksekusi perintah ADB mode pesawat.
+- **Implementasi Terpasang (`src/index.ts`)**:
+  - **Chunking Batch Berukuran 2**: Antrean akun dieksekusi berpasangan `[[Akun 1, Akun 2], [Akun 3, Akun 4], ...]`.
+  - **Staggered Offset (Jeda Luncur Bertingkat 45s)**: Worker A dimulai pada $t = 0\text{s}$, Worker B dimulai pada $t = 45\text{s}$ untuk menghindari lonjakan beban CPU/RAM dan mencegah traffic spike yang identik di server Microsoft.
+  - **Barrier Synchronization**: Menggunakan `Promise.allSettled` dengan pengaman hard deadline, memastikan kedua akun berhenti tuntas sebelum rotasi IP dipicu.
+  - **Pemisahan Perilaku Circuit Breaker**:
+    - *Dual-Worker Mode*: Jika Worker 1 terkena cooldown 15 menit, Worker 2 ikut dibatalkan (*graceful abort*) untuk melindungi reputasi IP seluler bersama.
+    - *Sequential Mode*: Cooldown pada Akun 1 hanya membatalkan sisa pencarian Akun 1; Akun 2 tetap dieksekusi secara normal pada antrean berikutnya.
+
+### 13.2 Dashboard Web UI & C2 Control API (`src/util/DashboardServer.ts`)
+- Antarmuka web aktif pada port `4000` (`http://localhost:4000`).
+- Menyediakan selektor strategi eksekusi secara realtime:
+  - `executionMode`: `'sequential'` (1 Worker) vs `'staggered-dual'` (2 Workers).
+  - `staggerOffsetSeconds`: Konfigurasi jeda tunda antar-worker (default 45 detik).
+- Integrasi kontrol C2: Start All Accounts, Start Single Account, Stop Runner, dan tombol interaktif `[Confirm IP Rotated]`.
+
+### 13.3 Hook `onBatchComplete` & Penanganan LAN / Static IP
+Pemisahan pemicu rotasi IP dari iterasi akun individu ke event batch resmi:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant D as Task Dispatcher
+    participant W1 as Worker 1 (Akun A)
+    participant W2 as Worker 2 (Akun B)
+    participant B as Batch Barrier
+    participant OBC as Hook onBatchComplete
+    participant ADB as ADB IP Rotator
+    participant IP as IP Verifier
+
+    D->>W1: Luncurkan Akun A (t = 0s)
+    Note over D: Stagger Delay (45s)
+    D->>W2: Luncurkan Akun B (t = 45s)
+    
+    W1-->>B: Selesai & Dispose Context
+    W2-->>B: Selesai & Dispose Context
+    
+    Note over B: BARRIER ACHIEVED (Keduanya Selesai)
+    
+    B->>OBC: Trigger onBatchComplete(batchIndex)
+    
+    alt useAdbIpRotation == false ATAU Koneksi LAN/Statis
+        Note over OBC: BYPASS ONBATCHCOMPLETE (0 Delay, Tanpa Looping Cek IP)
+        OBC-->>D: Langsung Lanjut ke Batch Berikutnya
+    else Mode Manual (Hotspot Prompt)
+        OBC->>OBC: Tunggu ENTER / Klik [Confirm IP Rotated]
+        Note over OBC: Loloskan Runner TANPA Validasi IP Kembar & Lepas Stdin Listener!
+        OBC-->>D: Lanjut ke Batch Berikutnya
+    else useAdbIpRotation == true (Auto ADB)
+        OBC->>ADB: Airplane Mode ON + svc data disable (8s)
+        ADB->>ADB: Airplane Mode OFF + svc data enable (10s)
+        ADB->>ADB: Restore USB Tethering / RNDIS (5s)
+        ADB->>IP: Verifikasi IP Publik Baru
+        IP-->>D: IP Baru Terkonfirmasi Berbeda!
+    end
+    
+    D->>D: Dispatch Batch Berikutnya [Akun C, Akun D]
+```
+
+- **Klausul Bypass LAN / Static (`useAdbIpRotation === false`)**: Langsung meloloskan runner tanpa penundaan atau perulangan verifikasi IP.
+- **Klausul Manual IP Prompt**: Tombol `[Confirm IP Rotated]` di Web UI atau tombol `ENTER` di konsol langsung meloloskan eksekusi tanpa memverifikasi perubahan IP, serta melepas listener `process.stdin` untuk mencegah memory leak.
+
+### 13.4 Manajemen 1:1 Sticky Device Profile (`src/runtime/environment/StickyDeviceProfile.ts`)
+- Profil perangkat Android Edge nyata dihasilkan secara deterministik via SHA-256 hash dari `accountId`.
+- Profil tersimpan permanen di `browser/sessions/{storageKey}.deviceProfile.json`.
+- Setiap akun memiliki kombinasi viewport, device scale factor, dan model perangkat nyata yang konsisten (misal Galaxy S23 `412x915` dsf 2.625, Pixel 7 `390x844` dsf 3.0), mengeliminasi anomali profil monolitik seragam.
+
+---
+
+## Bab 14: Integrasi 6 Safety Guardrails Host Windows
+
+> [!IMPORTANT]
+> **STATUS KOMPONEN: ACTIVE / IMPLEMENTED (TERPASANG)**  
+> 6 Guardrails keselamatan anti-abuse telah aktif di runtime untuk melindungi akun dari kebocoran identitas PC Windows saat mengemulasikan browser Android.
+
+### 14.1 Guardrail 1: Injeksi CDP Client Hints via `Network.setUserAgentOverride`
+- **Ancaman**: Chromium pada Windows Host secara default membocorkan `Sec-CH-UA-Platform: "Windows"` dan `navigator.userAgentData.platform === "Windows"`, yang memicu pembekuan perolehan poin seketika karena inkonsistensi terhadap User-Agent Android.
+- **Solusi Terpasang**: Membuka sesi CDP (`newCDPSession`) pada setiap context/page dan menginjeksi metadata platform Android 14, arsitektur ARM, serta model perangkat yang selaras dengan `StickyDeviceProfile`.
+
+### 14.2 Guardrail 2: Hardware Concurrency Clamping (`navigator.hardwareConcurrency = 8`)
+- **Ancaman**: CPU host desktop dengan 12, 16, atau 24 core terdeteksi langsung oleh telemetri Microsoft sebagai mesin emulasi non-ponsel.
+- **Solusi Terpasang**: Injeksi script inisialisasi (`context.addInitScript`) yang mengunci `navigator.hardwareConcurrency` pada nilai 8 (standar chipset octa-core seluler).
+
+### 14.3 Guardrail 3: Dynamic & Hard Batch Deadline
+- **Ancaman**: Hang tak terbatas (*infinite stall*) akibat network failure atau challenge yang macet pada salah satu worker paralel.
+- **Solusi Terpasang**: `Promise.race` dengan deadline pengaman keras (10 menit pada dual-worker; 16 menit pada mode sekuensial) yang secara otomatis memicu pembersihan paksa via `AccountDisposer.dispose()` jika terlampaui.
+
+### 14.4 Guardrail 4: Default Staggered Delay 45 Detik
+- Jeda peluncuran Worker 2 diatur 45 detik untuk memastikan Worker 1 menyelesaikan inisialisasi dashboard, mengisolasi kueri pertama, serta meredam beban puncak CPU/RAM.
+
+### 14.5 Guardrail 5: Unifikasi User-Agent Dinamis pada `ReadToEarn.ts`
+- Memastikan permintaan HTTP artikel berita MSN mengambil User-Agent dinamis dari `accountScope.deviceProfile.userAgent`, menghindari ketidaksesuaian (*mismatch*) antara browser context dan request API background.
+
+### 14.6 Guardrail 6: Sanitasi Resource Cleanup & Listener Teardown
+- Pemanggilan `cdp.detach()` saat penutupan konteks.
+- Pelepasan listener keyboard `process.stdin.removeListener('data', onData)` dan `process.stdin.pause()` untuk mencegah akumulasi memory leak.
+- Trigger `scope.abortController.abort()` untuk menghentikan seluruh operasi asinkron yang sedang berjalan.
+
+---
+
+## Bab 15: Normalisasi URL & Logging Unmasking (Display Email Asli)
+
+> [!IMPORTANT]
+> **STATUS KOMPONEN: ACTIVE / IMPLEMENTED (TERPASANG)**  
+> Peningkatan kenyamanan monitoring operator dan standardisasi endpoint web rewards.
+
+### 15.1 Logging Unmasking (Display Email Asli)
+- **Tujuan**: Memberikan visibilitas instan kepada operator untuk memantau akun mana yang sedang aktif, akumulasi poin, atau peringatan error tanpa disamarkan tag `[acc***]`.
+- **Implementasi**:
+  - `src/logging/Logger.ts`: Menampilkan string email/username akun secara utuh pada konsol terminal.
+  - `src/index.ts`: Menghapus masking `redactAccountKey` pada event log utama (`[ACCOUNT-START]`, `[ACCOUNT-FINISH]`, `ACCOUNT-ERROR`).
+  - **Sanitasi Kredensial Tetap Aktif**: Password, TOTP Secret, OAuth Bearer Token, dan Raw Cookie **tetap 100% disanitasi** dan tidak pernah diekspos ke log.
+
+### 15.2 Normalisasi URL & Endpoint Rewards
+- Standardisasi penanganan navigasi URL antara `https://www.bing.com/search?q=...` dan `https://rewards.bing.com/`.
+- Sanitasi query string dan parameter canonical untuk mencegah redirect loop atau error 400 bad request pada portal rewards.
+
+---
+
+## Bab 16: Penyelarasan Lingkungan Cross-Platform (Windows Host vs Linux/WSL)
+
+> [!IMPORTANT]
+> **STATUS KOMPONEN: ACTIVE / IMPLEMENTED (TERPASANG)**  
+> Menjamin script berjalan mulus pada host Windows tanpa mengorbankan portabilitas Linux/WSL.
+
+### 16.1 Penanganan Path Separators & File Storage
+- Standardisasi manipulasi jalur direktori menggunakan `path.join()` dan `path.resolve()`.
+- Penanganan format path pada penyimpanan sesi (`browser/sessions/`), profil perangkat, dan lock file agar tidak terjadi bentrok pemisah direktori backslash (`\`) pada Windows dan forward slash (`/`) pada lingkungan Linux.
+
+### 16.2 Shell / Process Invocation (PowerShell vs Bash)
+- Eksekusi perintah ADB (`adb shell ...`) disesuaikan agar aman dari batasan escaping PowerShell pada Windows Host.
+- Proteksi concurrency lock file berbasis PID (`src/runtime/network/DeviceRecoveryLock.ts`) mencegah tabrakan eksekusi rotasi jaringan.
+
+### 16.3 Terminal TTY & Lifecycle Stdin
+- Penanganan event stream `process.stdin` diselaraskan dengan arsitektur TTY Windows console, memastikan runner dapat menerima konfirmasi ENTER tanpa meninggalkan proses Node.js yang tertahan di background saat dihentikan.
+
+---
+
+## Bab 17: Audit Forensik Latensi Eksekusi & Profiling Bottleneck Alur Akun (Speedup Plan)
+
+> [!NOTE]
+> **STATUS KOMPONEN: ACTIVE / IMPLEMENTED (TERPASANG)**  
+> Seluruh 4 pilar Speedup Optimization Plan dan Dynamic Adaptive Deadline telah diimplementasikan penuh pada codebase aktif (Windows Host).
+
+### 17.1 Latar Belakang Insiden & Kronologi Forensik Lapangan
+
+Pada pengujian eksekusi akun `baryyaja@gmail.com`, runner mengalami kegagalan karena terpotong paksa oleh batas waktu statis `[ACCOUNT-DEADLINE]` pada menit ke-16 (**07.11.24**). Akun tersebut baru sempat menyelesaikan **7 dari 18 kueri pencarian desktop (defisit 11 kueri / 33 poin)**.
+
+Rekonstruksi kronologi waktu nyata (*real-time forensic telemetry*):
+
+| Timestamp Mulai | Timestamp Selesai | Tahapan Aktivitas | Durasi Aktual | Status / Hasil |
+| :--- | :--- | :--- | :--- | :--- |
+| **06.55.40** | **06.58.40** | Session Init, Login, Token Exchange & Dashboard Load | **180 detik (3m 00s)** | Sukses (Session & DAPI Token ready) |
+| **06.58.44** | **06.59.32** | Klaim Koin Nyangkut (*Pending Points* - Pass 1) | **48 detik** | Sukses (Drawer scan & claim) |
+| **06.59.32** | **07.01.56** | Daily Set (3 Item: Trivia/Quiz/Poll/Promo) | **144 detik (2m 24s)** | Sukses (3 aktivitas selesai) |
+| **07.02.01** | **07.04.51** | Read to Earn (10 Artikel Berita MSN via DAPI) | **170 detik (2m 50s)** | Sukses (10 artikel selesai) |
+| **07.04.57** | **07.05.43** | Re-check Koin Nyangkut (*Pending Points* - Pass 2) | **46 detik** | Redundan (Tidak ada koin baru) |
+| **07.05.50** | **07.06.37** | Inisialisasi Bing Desktop Search & Query 1 | **47 detik** | Target: 18 kueri (54 poin) |
+| **07.06.37** | **07.11.24** | Bing Desktop Search Loop (Hanya sempat 6 kueri tambahan) | **287 detik (4m 47s)** | Total hanya 7 kueri selesai (~47.7s/kueri) |
+| **07.11.24** | - | **[ACCOUNT-DEADLINE] EXPIRED (16.0 Menit / 960.000 ms)** | - | **FORCE TERMINATION (11 kueri / 33 pts hilang)** |
+
+- **Pre-Search Pipeline Menelan 10 Menit 10 Detik**: Pencarian desktop baru dimulai pada menit ke-10 (`07.05.50`).
+- **Sisa Waktu Hanya 5 Menit 34 Detik (334s)**: Untuk menyelesaikan 18 kueri dengan rata-rata 47.7s/kueri, waktu yang dibutuhkan adalah 14.3 menit. Runner secara matematis terpotong paksa sebelum target tercapai.
+
+### 17.2 Analisis Mendalam Akar Masalah (Root Cause Profiling)
+
+1. **Bottleneck Koin Nyangkut (`Workers.ts` & `src/index.ts`)**:
+   - `page.locator('div, section, .card, ...').filter(...)` memindai ribuan node DOM melalui CDP Playwright, memakan **36 detik** per pass hanya untuk selektor, ditambah jeda statis 1500–2500ms.
+   - **Pass 2 Redundan**: Dipanggil pasca Read to Earn (yang berjalan via DAPI murni tanpa interaksi browser baru), membuang **46 detik** tanpa hasil.
+2. **Bottleneck Pencarian Bing SERP (`Search.ts` & `BrowserFunc.ts`)**:
+   - **Typing delay lambat**: 70–190ms per karakter ($\approx 4$ detik per kueri 30 karakter).
+   - **Double wait redundan**: `wait(2000)` pasca submit + `wait(2000)` sebelum `randomScroll` = 4 detik statis terbuang.
+   - **Jeda konfigurasi**: `searchDelay` rata-rata 18 detik (14–22s).
+   - **Cascading HTTP Fallback di `getSearchPoints()`**: URL `bing.com/search` tidak match `rewards.bing.com`, memicu fallback ke `getDashboardData()` pada **setiap kueri** (GET 404 deprecated API $\rightarrow$ download raw HTML $\rightarrow$ fallback DAPI Mobile App) yang menelan **5–8.5 detik per kueri**.
+   - **Total 1 Kueri**: Menelan **36.7 – 48.0 detik/kueri** ($18 \text{ kueri} = 12.6\text{ menit}$).
+3. **Bottleneck Daily Set (`UrlReward.ts`)**:
+   - `activity-interaction` melakukan looping 10 selector kuis secara sekuensial dengan akumulasi timeout hingga **10.000 ms** pada halaman promo/artikel biasa.
+   - `safe-scroll` 8 step (6s) + Dwell wait (3.5–5s) + Polling backoff (2.5–8s). Total 3 item = **2m 24s**.
+4. **Flaw Batas Waktu Statis 16 Menit (`src/index.ts`)**:
+   - `SEQUENTIAL_DEADLINE_MS = 16 * 60 * 1000` bersifat kaku tanpa menghitung beban sisa kueri. Dengan kebutuhan riil pre-search (10.2m) + search (12.6m) = **22.8 menit**, akun dengan $\ge 10$ sisa kueri dipastikan terpotong timeout.
+
+### 17.3 Rencana Optimasi & Akselerasi (Speedup Plan)
+
+#### Pilar 1: Formula Batas Waktu Dinamis (Dynamic Adaptive Deadline)
+Ganti batas waktu statis di `src/index.ts` dengan kalkulasi adaptif berbasis sisa poin:
+```typescript
+const missingPoints = Math.max(0, targetPoints - currentPoints);
+const estimatedQueries = Math.ceil(missingPoints / 3);
+const expectedPerQueryMs = 20 * 1000; // 20 detik per kueri pasca optimasi
+
+const basePreSearchMs = 8 * 60 * 1000;  // 8 menit untuk Login, Daily Set, Read to Earn
+const dynamicSearchMs = estimatedQueries * expectedPerQueryMs;
+const safetyBufferMs = 4 * 60 * 1000;   // 4 menit buffer toleransi lag jaringan
+
+// Batas waktu adaptif: min 14 menit, max 25 menit
+const dynamicDeadlineMs = Math.min(25 * 60 * 1000, Math.max(14 * 60 * 1000, basePreSearchMs + dynamicSearchMs + safetyBufferMs));
+```
+*Hasil Kasus baryyaja (18 kueri)*: Batas waktu adaptif menjadi **18.0 menit (1.080.000 ms)**, menjamin akun selesai tuntas.
+
+#### Pilar 2: Akselerasi Klaim Koin Nyangkut (`Workers.ts`)
+- **Direct JS Evaluation**: Ganti pemindaian Playwright locator CDP dengan satu panggilan instan `page.evaluate()` mencari selector spesifik (`[aria-label*="claim" i]`, button teks "Claim"). Waktu eksekusi turun dari **36 detik menjadi $\le 1.5$ detik**.
+- **Kondisionalisasi Pass 2**: Lewati Pass 2 otomatis jika Pass 1 tidak menemukan koin dan aktivitas sebelumnya murni via DAPI HTTP (hemat **46 detik**).
+
+#### Pilar 3: Akselerasi Pencarian Bing SERP (`Search.ts` & `BrowserFunc.ts`)
+- **Optimasi Typing Emulation**: Ubah delay ketik dari 70–190ms menjadi **25–55ms** per karakter (tetap natural dan acak, memangkas waktu ketik dari 4.2s ke 1.1s).
+- **Eliminasi Double Sleep**: Hapus `wait(2000)` redundan, satukan menjadi 1 jeda natural `800–1200ms`.
+- **Penyesuaian `searchDelay`**: Ubah ke rentang aman **min 10 detik, max 14 detik** (rata-rata 12s) — aman di atas batas Microsoft cooldown ($>6$s).
+- **Eliminasi Cascading HTTP Fallback**: Gunakan in-page selector header SERP (`#id_rc`) atau **Optimistic Counter Tracking** (+3 poin per respon 200 OK) dengan verifikasi DAPI berkala per 4 kueri. Mengeliminasi latensi 5–8.5 detik per kueri.
+- **Hasil**: Durasi 1 kueri turun menjadi **15–18 detik**. 18 kueri selesai dalam **~4.8 menit** (sebelumnya 12.6 menit).
+
+#### Pilar 4: Akselerasi Daily Set (`UrlReward.ts`)
+- **Fast Bailout non-quiz**: Batch selector check dengan timeout maksimal 1.5 detik jika bukan kuis.
+- **Pangkas Safe Scroll & Dwell**: Turunkan safe scroll ke 3 step (2s) dan dwell wait ke 2.5–3.5s.
+- **Hasil**: Durasi 3 item Daily Set turun dari 144 detik ke $\le 55$ detik.
+
+### 17.4 Tabel Komparasi Kronologi Forensik (Durasi Aktual vs Target Optimal)
+
+| Tahapan Workflow | Durasi Lapangan (Aktual) | Target Pasca-Optimasi | Penghematan Waktu | Keterangan Solusi Teknis |
+| :--- | :--- | :--- | :--- | :--- |
+| **Session & Token Ready** | 180 detik (3m 00s) | 120 detik (2m 00s) | -60 detik | Efisiensi DAPI handshake & session cache |
+| **Klaim Koin Nyangkut (Pass 1)** | 48 detik | 5 detik | -43 detik | Evaluasi instan via `page.evaluate()` direct selector |
+| **Daily Set (3 Aktivitas)** | 144 detik (2m 24s) | 55 detik | -89 detik | Fast bailout 1.5s non-quiz, safe scroll pangkas ke 3 step |
+| **Read to Earn (10 Artikel)** | 170 detik (2m 50s) | 140 detik (2m 20s) | -30 detik | Streamlined fetch artikel DAPI |
+| **Klaim Koin Nyangkut (Pass 2)** | 46 detik | **0 detik (Bypassed)** | -46 detik | Skip otomatis jika Pass 1 nihil & tidak ada browser event |
+| **Pencarian Bing (18 Kueri)** | **536 detik (8m 56s)\*** *(Timeout)* | **288 detik (4m 48s)** | **-248 detik (~4m)** | Typing 30ms, hapus double wait, delay 12s, no HTTP fallback |
+| **Total Waktu Workflow Akun** | **> 1.124 detik (18m 44s)** | **~608 detik (10m 08s)** | **-516 detik (~8.6 Menit)** | **AKUN SELESAI 100% DI MENIT KE-10 (JAUH DI BAWAH DEADLINE)** |
+
+*\* Catatan: Durasi lapangan untuk 18 kueri diproyeksikan dari kecepatan riil 47.7s/kueri (terpotong di menit ke-16 pada kueri ke-7).*
+
+---
+
+## Bab 18: Status Persetujuan & Next Steps (Speedup Optimization Plan)
+
+> [!NOTE]
+> **STATUS EKSEKUSI: SELESAI 100% & TERVERIFIKASI (BUILD & TEST PASS)**:
+> 1. `src/index.ts`: Formula Dynamic Adaptive Deadline dan Pass 2 conditional bypass telah aktif.
+> 2. `src/functions/Workers.ts`: Targeted direct JS evaluate pada `doClaimPendingPoints` telah aktif (eksekusi $\le 2$s).
+> 3. `src/functions/activities/browser/Search.ts` & `src/browser/BrowserFunc.ts`: Pengetikan 25-55ms, eliminasi double sleep, searchDelay 10-14s, dan in-page/optimistic counter tracking telah aktif.
+> 4. `src/functions/activities/api/UrlReward.ts`: Fast bailout non-quiz, safe-scroll 3 steps, dan dwell time 2.5-3.5s telah aktif.
+> 5. Verifikasi: `npm run build` berhasil (exit code 0) dan 95 unit & integration tests lulus 100%.
+
+---
+
+## Bab 19: Audit Forensik & Mitigasi Pencarian Terlewati (Search Skipped)
+
+> [!NOTE]
+> **STATUS EKSEKUSI: SELESAI 100% & TERVERIFIKASI (BUILD & TEST PASS)**  
+> 1. `src/browser/BrowserFunc.ts`: Metode publik `resetCounters()` ditambahkan dan cadangan kuota default 30 PC points aktif untuk akun Level 1/uninitialized.
+> 2. `src/index.ts`: Pembersihan `resetCounters()` dipanggil di `resetAccountState()`, di awal `Main()`, dan sebelum pemanggilan `getSearchPoints(undefined, true)` (force network sync aktif).
+> 3. `src/functions/activities/browser/Search.ts`: Isolasi circuit breaker `sharedBatchSignal` dibatasi secara ketat hanya pada mode dual-worker (`staggered-dual` / `dual`). Cooldown pada mode sekuensial tidak membatalkan akun berikutnya.
+> 4. Verifikasi: `npm run build` sukses (exit code 0) dan 95 unit test lulus 100% tanpa regresi.
+
+### 19.1 Profil Masalah Lapangan
+- **Kasus**: Akun tertentu (misal akun ke-2 dalam antrean atau worker kedua dalam batch) menyelesaikan *Session Init*, *Daily Check-In*, *Daily Set*, dan *Read to Earn* secara sukses. Namun saat masuk ke tahapan *Bing Searches*, runner langsung mencetak:
+  ```text
+  [INFO] main [SEARCH-MANAGER] All searches skipped: no mobile or desktop points left.
+  [INFO] main [SEARCH-MANAGER] Step 1: skip mobile (no-points); closing mobile session
+  [INFO] main [SEARCH-MANAGER] Step 2: skip desktop (no-points)
+  ```
+  atau pada kasus Dual-Worker:
+  ```text
+  [WARN] main [SEARCH-BING] [COOLDOWN-DETECTED] Search cooldown is active (or batch circuit breaker triggered), skipping Desktop searches.
+  ```
+- **Anomali**: Akun pada batch akhir (misal Batch 2 / Batch 3) berjalan normal dan menyelesaikan pencarian desktop maupun mobile tanpa kendala.
+
+---
+
+### 19.2 Tiga Akar Masalah Utama (The Triple Failure Sinks)
+
+#### 1. State Contamination & False Zero Points Remaining (`cachedCounters` Leakage)
+- **Lokasi Codebase**: `src/browser/BrowserFunc.ts` (L271–326) & `src/index.ts` (L286–312, L2190).
+- **Mekanisme**:
+  1. Pada mode Sequential (`runTasks`), seluruh antrean akun dieksekusi menggunakan satu instance bot utama (`this`).
+  2. Saat Akun 1 menyelesaikan seluruh pencarian, properti `this.cachedCounters` di instance `BrowserFunc` menyimpan data counter dengan nilai maksimal penuh:
+     - `pcSearch[0].pointProgress = 90`, `pointProgressMax = 90`
+     - `mobileSearch[0].pointProgress = 60`, `pointProgressMax = 60`
+  3. Ketika Akun 1 selesai, runner memanggil `this.resetAccountState()`. Namun, metode ini **hanya** me-reset data profil (`userData`), token, cookie, dan `searchCooldownActive`. Variabel `this.browser.func.cachedCounters` dan `syncCounter` **sama sekali tidak di-reset (tertinggal di memori)**.
+  4. Saat Akun 2 (`bukansoelap`) masuk ke evaluasi pencarian (`src/index.ts:2190`):
+     ```typescript
+     const searchPoints = await this.browser.func.getSearchPoints()
+     const missingSearchPoints = this.browser.func.missingSearchPoints(searchPoints)
+     ```
+     Karena dipanggil tanpa parameter (`page = undefined`, `forceNetwork = false`), fungsi `getSearchPoints` di `BrowserFunc.ts:314` mengecek:
+     ```typescript
+     this.syncCounter++
+     if (!forceNetwork && this.cachedCounters && this.syncCounter < 4) {
+         return this.cachedCounters
+     }
+     ```
+     Jika `syncCounter < 4`, fungsi langsung mengembalikan `this.cachedCounters` milik Akun 1 yang sudah 100% selesai!
+  5. Akibatnya, `missingSearchPoints` menghitung:
+     $$\text{desktopPoints} = 90 - 90 = 0$$
+     $$\text{mobilePoints} = 60 - 60 = 0$$
+  6. Di `SearchManager.ts:72-84`, kondisi `bothNoPoints` terpenuhi:
+     ```typescript
+     if (bothWorkersEnabled && bothNoPoints) {
+         this.bot.logger.info('main', 'SEARCH-MANAGER', 'All searches skipped: no mobile or desktop points left.')
+     }
+     ```
+     Runner mengira akun tidak memiliki sisa kuota pencarian (*False Zero*), menutup sesi browser, dan melewati seluruh pencarian.
+  7. **Mengapa Batch Akhir Berjalan Normal?**
+     Setiap pemanggilan `getSearchPoints` menaikkan `syncCounter++`. Begitu `syncCounter >= 4` (atau jika terjadi kegagalan jaringan yang memicu hard refresh), baris 328 mengeksekusi `await this.getDashboardData()` yang mengambil data otentik dari API Microsoft. Sisa poin yang sebenarnya akhirnya terbaca, sehingga akun di batch berikutnya/akhir berjalan normal.
+
+#### 2. Kebocoran Sinyal Circuit Breaker pada Dual-Worker (`sharedBatchSignal`)
+- **Lokasi Codebase**: `src/index.ts` (L1862, L1869) & `src/functions/activities/browser/Search.ts` (L83, L114, L193–200).
+- **Mekanisme**:
+  1. Pada mode Dual-Worker Staggered (`runStaggeredDualBatchTasks`), satu objek sinyal batch dibuat per batch:
+     ```typescript
+     const sharedBatchSignal = { isCooldownTriggered: false }
+     ```
+     Objek ini diinjeksikan secara referensi bersama ke Worker 1 dan Worker 2.
+  2. Worker 1 meluncur pada $t = 0\text{s}$, Worker 2 (`bukansoelap`) meluncur pada $t = 45\text{s}$.
+  3. Jika Worker 1 mengalami poin stagnan (3 kueri berturut-turut tanpa kenaikan saldo poin di server) di `Search.ts:186-200`, Worker 1 mengaktifkan circuit breaker:
+     ```typescript
+     this.bot.searchCooldownActive = true
+     if (this.bot.sharedBatchSignal) {
+         this.bot.sharedBatchSignal.isCooldownTriggered = true
+     }
+     ```
+  4. Worker 2 yang baru saja menyelesaikan pre-search (Daily Set & Read to Earn) kemudian masuk ke `Search.ts:83`:
+     ```typescript
+     if (this.bot.searchCooldownActive || this.bot.sharedBatchSignal?.isCooldownTriggered) {
+         this.bot.logger.warn(..., '[COOLDOWN-DETECTED] Search cooldown is active (or batch circuit breaker triggered), skipping Desktop searches.')
+         return totalGainedPoints
+     }
+     ```
+     Meskipun akun Worker 2 sehat dan tidak terkena cooldown, Worker 2 langsung membatalkan seluruh pencarian demi melindungi IP bersama!
+  5. **Mengapa Batch Akhir Berjalan Normal?**
+     Begitu Batch 1 selesai dan IP seluler dirotasi melalui hook `onBatchComplete`, runner melangkah ke Batch 2. Di awal Batch 2, baris 1862 membuat objek baru: `const sharedBatchSignal = { isCooldownTriggered: false }`. Sinyal cooldown kembali bersih `false`, sehingga Worker pada batch berikutnya berjalan normal!
+
+#### 3. False Zero Akibat Uninitialized Dashboard / Level 1 Account Fallback
+- **Lokasi Codebase**: `src/browser/BrowserFunc.ts` (L337–356, L359–374).
+- **Mekanisme**:
+  1. Jika akun berada pada Level 1 atau respons API Bing tidak menyertakan array `pcSearch`/`mobileSearch`, fallback di L337 mencoba membaca `bingSearchDailyPoints`.
+  2. Jika `bingSearchDailyPoints` bernilai 0 atau tidak terdefinisi, fallback menghasilkan objek dengan `pointProgressMax = 0` atau array kosong `mobileSearch: []`.
+  3. Akibatnya, `missingSearchPoints` mengembalikan `0` poin bukan kuota default Level 1 (misal 30/60 pts), memicu *Search Skipped*.
+
+---
+
+### 19.3 Matriks Perbandingan Skenario Kegagalan
+
+| Parameter Audit | Mode Sequential (1 Worker) | Mode Dual-Worker (2 Workers) |
+| :--- | :--- | :--- |
+| **Pemicu Utama Skip** | State contamination `cachedCounters` dari akun sebelumnya | Circuit breaker `sharedBatchSignal.isCooldownTriggered` |
+| **Status Kuota Poin** | Terbaca `0/0` atau `90/90` (*False Zero*) | Sebenarnya ada kuota, tetapi diblokir sebelum kueri dimulai |
+| **Gejala Log Terminal** | `All searches skipped: no mobile or desktop points left.` | `[COOLDOWN-DETECTED] Search cooldown is active (or batch circuit breaker triggered)` |
+| **Penyebab Batch Akhir Normal** | `syncCounter >= 4` memicu network fetch ulang otomatis | Batch baru membuat instance `sharedBatchSignal` baru (`false`) |
+| **Titik Lemah Kritis** | `resetAccountState()` lupa membersihkan `BrowserFunc.cachedCounters` | Evaluasi awal `getSearchPoints()` tidak memaksa `forceNetwork: true` |
+
+---
+
+### 19.4 Rencana Mitigasi & Eksekusi Fase 2 (Action Plan)
+
+1. **Pembersihan Mutlak State Cache di `resetAccountState()` (`src/index.ts` & `src/browser/BrowserFunc.ts`)**:
+   - Tambahkan fungsi eksplisit `resetCounters()` pada `BrowserFunc`:
+     ```typescript
+     public resetCounters(): void {
+         this.cachedCounters = null
+         this.syncCounter = 0
+     }
+     ```
+   - Panggil `this.browser?.func?.resetCounters()` di dalam `resetAccountState()` pada `src/index.ts` setiap kali akun selesai atau sebelum akun baru dimulai.
+2. **Force Network Sync pada Evaluasi Awal Akun (`src/index.ts`)**:
+   - Di `src/index.ts:2190`, ubah pemanggilan `getSearchPoints()`:
+     ```typescript
+     const searchPoints = await this.browser.func.getSearchPoints(undefined, true) // forceNetwork = true
+     ```
+     Hal ini menjamin bahwa setiap akun baru **selalu** membaca kuota pencarian langsung dari API Microsoft tanpa mengandalkan cache lokal.
+3. **Penyempurnaan Fallback Kuota Level 1 (`src/browser/BrowserFunc.ts`)**:
+   - Jika `pcSearch` kosong atau `pointProgressMax === 0`, berikan batas bawah kuota aman (misal 30 poin untuk PC dan 0 poin untuk Mobile Level 1) agar akun tidak melewati pencarian secara prematur.
+4. **Isolasi Granular `sharedBatchSignal` & Diagnostic Logging**:
+   - Tambahkan log diagnostik yang membedakan secara tegas apakah pencarian dilewati karena kuota habis (`missingPoints === 0`) atau karena sinyal abort rekan worker (`sharedBatchSignal.isCooldownTriggered === true`).
+
+---
+
+## Bab 20: Restorasi Hook ADB Batch Rotation & Anti-Bypass Manual Fallback
+
+> [!IMPORTANT]
+> **STATUS KOMPONEN: SELESAI 100% & TERVERIFIKASI (BUILD & TEST PASS)**  
+> Memulihkan pembagian batch 2 akun per rotasi IP secara presisi, menghapus silent bypass saat ADB tidak mendeteksi perangkat (`status=device-not-found`), serta mengintegrasikan prompt konfirmasi manual ganda (Terminal stdin + Dashboard Web C2) dengan notifikasi audio Windows `notify.wav` & bel terminal `\x07`.
+
+### 20.1 Akar Masalah (Root Causes)
+1. **Kegagalan Pemisahan Batch 2 Akun (`chunkArray` vs `chunkBySize`)**:
+   - `Utils.chunkArray(arr, numChunks)` membagi array ke dalam sejumlah `numChunks` (potongan). Untuk antrean $N=6$ akun dengan `chunkArray(accounts, 2)`, array dibagi menjadi 2 bagian besar (masing-masing 3 akun: `[Akun 1, 2, 3]` dan `[Akun 4, 5, 6]`).
+   - Akibatnya, antara Akun 2 dan Akun 3 tidak ada batas batch (`bIdx < batches.length - 1` bernilai `false`), sehingga hook rotasi IP `onBatchComplete` melompat dalam 0 milidetik tanpa pergantian IP.
+2. **Silent Bypass pada ADB Device Not Found**:
+   - Saat device Android belum tercolok atau USB debugging belum diotorisasi (`deviceCount=0` / exit code != 0), error sebelumnya hanya dicetak ke logger tanpa menghentikan runner atau meminta tindakan operator, sehingga bot terus memproses akun berikutnya dengan IP yang sama (resiko ban tinggi).
+3. **Pembersihan Cache State Akun**:
+   - Kurangnya reset eksplisit pada `cachedCounters` menyebabkan akun baru berpotensi membaca cache progres 60/60 atau 90/90 dari akun sebelumnya (*False Zero*).
+
+### 20.2 Solusi Arsitektur & Implementasi
+1. **Helper `Utils.chunkBySize<T>(arr: T[], size: number): T[][]` (`src/util/Utils.ts`)**:
+   - Membagi array menjadi potongan berukuran tetap `size` elemen.
+   - Untuk 6 akun dengan `chunkBySize(accounts, 2)`, dihasilkan struktur `[[Akun 1, Akun 2], [Akun 3, Akun 4], [Akun 5, Akun 6]]`.
+   - `bIdx < batches.length - 1` selalu terpenuhi tepat setelah Akun 2 dan Akun 4 selesai.
+2. **Preflight Device Check & Robust Toggle (`src/util/AirplaneMode.ts`)**:
+   - Menambahkan method `AirplaneMode.checkDevice(serial?: string)` yang mengeksekusi `adb devices` dan memvalidasi status perangkat (bukan offline / unauthorized).
+   - Menambahkan dukungan parameter `-s <serial>` untuk multi-device support.
+   - Mengembalikan nilai boolean tegas: `false` jika device tidak terdeteksi, perintah ADB error, atau `ipSebelum === ipSesudah` (IP tidak berubah).
+3. **Pencegahan Silent Bypass & Auto Manual Fallback (`src/index.ts`)**:
+   - Menambahkan method `waitForManualIpConfirmation(isAdbFailed, oldIp, batchDesc)`:
+     - Mengirimkan bel terminal `\x07`.
+     - Memutar audio notifikasi Windows `C:\Windows\Media\notify.wav`.
+     - Menampilkan banner instruksi rotasi manual dengan IP lama.
+     - Menunggu input tombol `ENTER` dari terminal atau klik tombol "Confirm IP Rotated" pada Dashboard Web (`http://localhost:4000`) via `waitForUserConfirmation()`.
+   - Refactor `onBatchComplete`:
+     - Jika `useAdbIpRotation === true`, jalankan `AirplaneMode.toggle()`. Jika gagal / device tidak ditemukan, **JANGAN** lakukan bypass, melainkan langsung alihkan ke `waitForManualIpConfirmation(true, oldIp, batchDesc)`.
+     - Jika `useAdbIpRotation === false`, langsung masuk ke rotasi manual pasif per 2 akun.
+4. **Pembersihan Cache & Force Network Sync (`src/browser/BrowserFunc.ts` & `src/index.ts`)**:
+   - Method `resetCounters()` pada `BrowserFunc` membersihkan `cachedCounters = null` dan `syncCounter = 0`.
+   - Dipanggil di pre-flight `Main()`, `resetAccountState()`, dan sebelum evaluasi pencarian (`getSearchPoints(undefined, true)`).
+   - Fallback batas bawah Level 1 (minimal 30 poin PC) disematkan untuk mencegah `missingPoints = 0`.
+
+### 20.3 Verifikasi Kualitas & Hasil Pengujian
+- **TypeScript Compilation**: `npm run build` sukses dengan **Exit Code 0** (seluruh artifact di `dist/` terkompilasi bersih).
+- **Unit & Integration Tests**: `npm test` lulus **95/95 test suite (100% PASS)** tanpa regresi pada clustering, lock, sanitizer, validator, maupun alur browser.
+
 

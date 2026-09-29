@@ -1,7 +1,13 @@
 import { exec } from 'child_process';
-import { promisify } from 'util';
 
-const execAsync = promisify(exec);
+const execAsync = (cmd: string): Promise<{ stdout: string; stderr: string }> => {
+    return new Promise((resolve, reject) => {
+        exec(cmd, { windowsHide: true }, (err, stdout, stderr) => {
+            if (err) return reject(err);
+            resolve({ stdout: String(stdout || ''), stderr: String(stderr || '') });
+        });
+    });
+};
 
 export class AirplaneMode {
 
@@ -12,18 +18,45 @@ export class AirplaneMode {
     public static async checkIP(): Promise<string> {
         try {
             const response = await fetch('https://api.ipify.org?format=json');
-            const data = await response.json();
-            return data.ip;
+            const data: any = await response.json();
+            return data?.ip || 'Gagal_Cek_IP';
         } catch (error) {
             return 'Gagal_Cek_IP';
         }
     }
 
     /**
+     * Memeriksa ketersediaan dan status device ADB
+     */
+    public static async checkDevice(serial?: string): Promise<{ ready: boolean; reason?: string; deviceCount: number }> {
+        try {
+            const adbPrefix = serial ? `adb -s ${serial}` : 'adb';
+            const { stdout } = await execAsync(`${adbPrefix} devices`);
+            const lines = stdout.trim().split(/\r?\n/).slice(1).map(l => l.trim()).filter(Boolean);
+            const devices = lines.filter(l => l.includes('\tdevice') || l.endsWith(' device'));
+            if (devices.length === 0) {
+                return { ready: false, reason: 'device-not-found', deviceCount: 0 };
+            }
+            return { ready: true, deviceCount: devices.length };
+        } catch (err: any) {
+            return { ready: false, reason: 'adb-unavailable', deviceCount: 0 };
+        }
+    }
+
+    /**
      * Eksekusi Rotasi IP via USB Tethering (Paling Stabil & Anti-Bentrok)
      */
-    public static async toggle(delayBetweenMs = 8000, postDelayMs = 15000): Promise<boolean> {
+    public static async toggle(delayBetweenMs = 8000, postDelayMs = 15000, serial?: string): Promise<boolean> {
         try {
+            const adbPrefix = serial ? `adb -s ${serial}` : 'adb';
+
+            // 0. Preflight check: Pastikan device terdeteksi
+            const devCheck = await this.checkDevice(serial);
+            if (!devCheck.ready) {
+                console.error(`🚨  [ADB-ERROR] Device ADB tidak terdeteksi (${devCheck.reason}). deviceCount=${devCheck.deviceCount}`);
+                return false;
+            }
+
             console.log('\n🔍  [ADB-NETWORK] Mengecek IP (Jalur USB Tethering)...');
             const ipSebelum = await this.checkIP();
             console.log(`🌍  [ADB-NETWORK] IP Lama kamu: [ ${ipSebelum} ]`);
@@ -33,7 +66,7 @@ export class AirplaneMode {
             // 1. Coba cmd connectivity (Android 11+ AOSP)
             let airplaneActivated = false;
             try {
-                const out: any = await execAsync('adb shell cmd connectivity airplane-mode enable');
+                const out: any = await execAsync(`${adbPrefix} shell cmd connectivity airplane-mode enable`);
                 const outStr = (typeof out?.stdout === 'string' ? out.stdout : '').toLowerCase();
                 if (!outStr.includes('unknown') &&
                     !outStr.includes('error') &&
@@ -41,7 +74,7 @@ export class AirplaneMode {
                     !outStr.includes('can\'t find service') &&
                     !outStr.includes('permission')) {
                     try {
-                        const state: any = await execAsync('adb shell settings get global airplane_mode_on');
+                        const state: any = await execAsync(`${adbPrefix} shell settings get global airplane_mode_on`);
                         if (typeof state?.stdout === 'string' && state.stdout.trim() === '1') {
                             airplaneActivated = true;
                         }
@@ -52,19 +85,19 @@ export class AirplaneMode {
             // 2. Fallback: Settings put global 1 + am broadcast (Universal Android)
             if (!airplaneActivated) {
                 try {
-                    await execAsync('adb shell settings put global airplane_mode_on 1').catch(() => {});
-                    await execAsync('adb shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state true').catch(() => {});
+                    await execAsync(`${adbPrefix} shell settings put global airplane_mode_on 1`).catch(() => {});
+                    await execAsync(`${adbPrefix} shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state true`).catch(() => {});
                 } catch {}
             }
 
             // 3. Fallback jika device memiliki akses root (su)
             try {
-                await execAsync('adb shell su -c "cmd connectivity airplane-mode enable || (settings put global airplane_mode_on 1 && am broadcast -a android.intent.action.AIRPLANE_MODE --ez state true)"').catch(() => {});
+                await execAsync(`${adbPrefix} shell su -c "cmd connectivity airplane-mode enable || (settings put global airplane_mode_on 1 && am broadcast -a android.intent.action.AIRPLANE_MODE --ez state true)"`).catch(() => {});
             } catch {}
 
             // 4. Force cut radio data (svc data disable) agar koneksi BTS seluler pasti terputus
             try {
-                await execAsync('adb shell svc data disable').catch(() => {});
+                await execAsync(`${adbPrefix} shell svc data disable`).catch(() => {});
             } catch {}
 
             console.log(`⏳  [ADB-NETWORK] Nunggu ${delayBetweenMs / 1000} detik biar IP provider keriset...`);
@@ -74,23 +107,23 @@ export class AirplaneMode {
 
             // 1. Coba cmd connectivity disable
             try {
-                await execAsync('adb shell cmd connectivity airplane-mode disable').catch(() => {});
+                await execAsync(`${adbPrefix} shell cmd connectivity airplane-mode disable`).catch(() => {});
             } catch {}
 
             // 2. Settings put global 0 + am broadcast
             try {
-                await execAsync('adb shell settings put global airplane_mode_on 0').catch(() => {});
-                await execAsync('adb shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state false').catch(() => {});
+                await execAsync(`${adbPrefix} shell settings put global airplane_mode_on 0`).catch(() => {});
+                await execAsync(`${adbPrefix} shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state false`).catch(() => {});
             } catch {}
 
             // 3. Fallback root (su) disable
             try {
-                await execAsync('adb shell su -c "cmd connectivity airplane-mode disable || (settings put global airplane_mode_on 0 && am broadcast -a android.intent.action.AIRPLANE_MODE --ez state false)"').catch(() => {});
+                await execAsync(`${adbPrefix} shell su -c "cmd connectivity airplane-mode disable || (settings put global airplane_mode_on 0 && am broadcast -a android.intent.action.AIRPLANE_MODE --ez state false)"`).catch(() => {});
             } catch {}
 
             // 4. Nyalakan kembali radio data seluler
             try {
-                await execAsync('adb shell svc data enable').catch(() => {});
+                await execAsync(`${adbPrefix} shell svc data enable`).catch(() => {});
             } catch {}
 
             console.log(`⏳  [ADB-NETWORK] Nunggu 8 detik biar sinyal radio HP stabil...`);
@@ -98,8 +131,8 @@ export class AirplaneMode {
 
             console.log('🔌  [ADB-NETWORK] Memastikan USB Tethering tetap menyala...');
             // Ada dua command sakti, kita tembak dua-duanya biar Samsung/Xiaomi/Oppo/Vivo nurut
-            await execAsync('adb shell cmd tethering tether usb').catch(() => {});
-            await execAsync('adb shell svc usb setFunctions rndis').catch(() => {});
+            await execAsync(`${adbPrefix} shell cmd tethering tether usb`).catch(() => {});
+            await execAsync(`${adbPrefix} shell svc usb setFunctions rndis`).catch(() => {});
 
             console.log(`⏳  [ADB-NETWORK] Nunggu ${postDelayMs / 1000} detik biar PC Windows ngebaca jaringan USB...`);
             await this.wait(postDelayMs);
@@ -110,13 +143,14 @@ export class AirplaneMode {
 
             if (ipSebelum !== ipSesudah && ipSesudah !== 'Gagal_Cek_IP') {
                 console.log('\n✅  [ADB-NETWORK] SUCCESS! IP berhasil rotasi via USB Kabel! Koneksi dewa!\n');
+                return true;
             } else if (ipSebelum === ipSesudah) {
                 console.log('\n⚠️  [ADB-NETWORK] WARNING: IP kamu masih sama! Provider masih menahan sesi IP.\n');
+                return false;
             } else {
                 console.log('\n❌  [ADB-NETWORK] ERROR: Gagal cek IP. Pastikan saklar USB Tethering di HP kamu nyala.\n');
+                return false;
             }
-
-            return true;
         } catch (error) {
             console.error('🚨  [ADB-ERROR] Waduh, gagal ngeksekusi command ADB:', error);
             return false;

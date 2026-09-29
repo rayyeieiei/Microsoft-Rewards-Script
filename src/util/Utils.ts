@@ -52,6 +52,15 @@ export default class Util {
         return chunks
     }
 
+    chunkBySize<T>(arr: T[], size: number): T[][] {
+        if (size <= 0) return [arr]
+        const chunks: T[][] = []
+        for (let i = 0; i < arr.length; i += size) {
+            chunks.push(arr.slice(i, i + size))
+        }
+        return chunks
+    }
+
     stringToNumber(input: string | number): number {
         if (typeof input === 'number') {
             return input
