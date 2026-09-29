@@ -7,6 +7,7 @@ import type {
     EnvironmentValidationResult,
     ScreenProfile
 } from './BrowserEnvironmentTypes'
+import type { DeviceHardwareProfile } from './StickyDeviceProfile'
 
 export class BrowserEnvironmentPolicy {
     public static readonly DEFAULT_MOBILE_SCREEN: ScreenProfile = {
@@ -30,11 +31,19 @@ export class BrowserEnvironmentPolicy {
      */
     public static resolveProfile(
         kind: BrowserContextKind,
-        config?: BrowserEnvironmentConfig
+        config?: BrowserEnvironmentConfig,
+        deviceProfile?: DeviceHardwareProfile
     ): BrowserEnvironmentProfile {
         const isMobile = kind === 'mobile'
         const baseScreen = isMobile
-            ? BrowserEnvironmentPolicy.DEFAULT_MOBILE_SCREEN
+            ? (deviceProfile
+                  ? {
+                        viewport: deviceProfile.viewport,
+                        deviceScaleFactor: deviceProfile.deviceScaleFactor,
+                        isMobile: deviceProfile.isMobile,
+                        hasTouch: deviceProfile.hasTouch
+                    }
+                  : BrowserEnvironmentPolicy.DEFAULT_MOBILE_SCREEN)
             : BrowserEnvironmentPolicy.DEFAULT_DESKTOP_SCREEN
 
         const overrideScreen = isMobile ? config?.mobile : config?.desktop
@@ -52,7 +61,9 @@ export class BrowserEnvironmentPolicy {
         const profileId = `profile_${kind}_${finalScreen.viewport.width}x${finalScreen.viewport.height}`
         const userAgent =
             config?.userAgent ??
-            (isMobile ? UserAgentManager.DEFAULT_MOBILE_UA : UserAgentManager.DEFAULT_DESKTOP_UA)
+            (isMobile
+                ? (deviceProfile?.userAgent ?? UserAgentManager.DEFAULT_MOBILE_UA)
+                : UserAgentManager.DEFAULT_DESKTOP_UA)
 
         return {
             schemaVersion: 1,

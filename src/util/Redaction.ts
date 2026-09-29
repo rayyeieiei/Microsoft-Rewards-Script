@@ -17,7 +17,7 @@ export function redactAccountKey(identifier: string): string {
     return `${user.slice(0, visibleLen)}***@${domain}`
 }
 
-export function sanitizeLogMessage(input: string): string {
+export function sanitizeLogMessage(input: string, redactEmail = true): string {
     if (!input || typeof input !== 'string') return input
 
     let sanitized = input
@@ -41,12 +41,14 @@ export function sanitizeLogMessage(input: string): string {
 
     // 4. Redact full email addresses:
     // e.g. ehsanfizibers@outlook.com -> ehs***@outlook.com
-    sanitized = sanitized.replace(/\b([A-Za-z0-9._%+-]+)@([A-Za-z0-9.-]+\.[A-Za-z]{2,})\b/g, (match, user, domain) => {
-        // If already redacted, preserve
-        if (user.endsWith('***')) return match
-        const visibleLen = Math.min(3, Math.max(1, user.length - 2))
-        return `${user.slice(0, visibleLen)}***@${domain}`
-    })
+    if (redactEmail) {
+        sanitized = sanitized.replace(/\b([A-Za-z0-9._%+-]+)@([A-Za-z0-9.-]+\.[A-Za-z]{2,})\b/g, (match, user, domain) => {
+            // If already redacted, preserve
+            if (user.endsWith('***')) return match
+            const visibleLen = Math.min(3, Math.max(1, user.length - 2))
+            return `${user.slice(0, visibleLen)}***@${domain}`
+        })
+    }
 
     return sanitized
 }

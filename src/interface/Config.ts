@@ -57,6 +57,12 @@ export interface Config {
     proxy: ConfigProxy
     consoleLogFilter: LogFilter
     webhook: ConfigWebhook
+    discord?: {
+        botToken?: string
+    }
+    discordBotToken?: string
+    executionMode?: 'sequential' | 'staggered-dual'
+    staggerOffsetSeconds?: number
     loginRateLimit?: {
         delay: NumberOrString
         maxAttempts: number
@@ -128,6 +134,7 @@ export interface LogFilter {
 export interface WebhookDiscordConfig {
     enabled: boolean
     url: string
+    botToken?: string
 }
 
 export interface WebhookNtfyConfig {

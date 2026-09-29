@@ -27,7 +27,8 @@ const WebhookSchema = z.object({
     discord: z
         .object({
             enabled: z.boolean(),
-            url: z.string()
+            url: z.string(),
+            botToken: z.string().optional()
         })
         .optional(),
     ntfy: z
@@ -174,7 +175,15 @@ export const ConfigSchema = z.object({
     debugLogs: z.boolean(),
     proxy: z.object({ queryEngine: z.boolean() }),
     consoleLogFilter: LogFilterSchema,
-    webhook: WebhookSchema
+    webhook: WebhookSchema,
+    discord: z
+        .object({
+            botToken: z.string().optional()
+        })
+        .optional(),
+    discordBotToken: z.string().optional(),
+    executionMode: z.enum(['sequential', 'staggered-dual']).optional(),
+    staggerOffsetSeconds: z.number().int().min(5).max(300).optional()
 })
 
 // Account

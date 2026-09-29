@@ -244,93 +244,112 @@ export class UrlReward extends Workers {
                 })
 
                 if (navResult.status === 'completed' && remainingMs() > 2000) {
-                    await this.bot.utils.wait(Math.min(2000, remainingMs()))
+                    await this.bot.utils.wait(Math.min(1000, remainingMs()))
 
-                    // Selesaikan kuis / poll / trivia interaktif jika ada di halaman
-                    await runGuardedOperation({
-                        stage: 'activity-interaction',
-                        timeoutMs: 10000,
-                        remainingBudgetMs: remainingMs(),
-                        page: tab,
-                        logger: this.bot.logger,
-                        isMobile: this.bot.isMobile,
-                        operation: async (signal) => {
-                            for (let q = 0; q < 8; q++) {
-                                if (signal.aborted || (typeof tab.isClosed === 'function' && tab.isClosed())) break
+                    // Fast probe: Deteksi apakah halaman memuat elemen kuis / poll / trivia (bailout < 1.5s jika non-quiz)
+                    const hasInteractiveQuiz = await tab.evaluate(() => {
+                        const quizEl = document.querySelector(
+                            '#rqStartQuiz, #rqStartQuizToken, .btOption, #btoption0, #btoption1, .rqOptions, .wk_Option, [role="radio"], button.optionBtn, .b_ans, .bt_poll, input[type="radio"], div[class*="option"], div[id*="choice"], .rqOption'
+                        )
+                        const actionEl = document.querySelector(
+                            '.punchcard-step a, [data-bi-area*="punchcard"] a, [data-bi-id*="shop"]'
+                        )
+                        return Boolean(quizEl || actionEl)
+                    }).catch(() => false)
 
-                                const startQuizBtn = tab
-                                    .locator(
-                                        '#rqStartQuiz, #rqStartQuizToken, input[type="button"][value*="Start"], button:has-text("Start"), div[role="button"]:has-text("Start")'
+                    if (hasInteractiveQuiz) {
+                        // Selesaikan kuis / poll / trivia interaktif jika ada di halaman
+                        await runGuardedOperation({
+                            stage: 'activity-interaction',
+                            timeoutMs: 8000,
+                            remainingBudgetMs: remainingMs(),
+                            page: tab,
+                            logger: this.bot.logger,
+                            isMobile: this.bot.isMobile,
+                            operation: async (signal) => {
+                                for (let q = 0; q < 8; q++) {
+                                    if (signal.aborted || (typeof tab.isClosed === 'function' && tab.isClosed())) break
+
+                                    const startQuizBtn = tab
+                                        .locator(
+                                            '#rqStartQuiz, #rqStartQuizToken, input[type="button"][value*="Start"], button:has-text("Start"), div[role="button"]:has-text("Start")'
+                                        )
+                                        .first()
+                                    if (await startQuizBtn.isVisible().catch(() => false)) {
+                                        await startQuizBtn.click({ force: true }).catch(() => {})
+                                        await this.bot.utils.wait(1000)
+                                    }
+
+                                    const quizOptions = tab.locator(
+                                        '.btOption, #btoption0, #btoption1, .rqOptions, .wk_Option, [role="radio"], button.optionBtn, .b_ans, .bt_poll, input[type="radio"], div[class*="option"], div[id*="choice"], .rqOption, .b_cards'
                                     )
-                                    .first()
-                                if (await startQuizBtn.isVisible().catch(() => false)) {
-                                    await startQuizBtn.click({ force: true }).catch(() => {})
-                                    await this.bot.utils.wait(1500)
+                                    const optCount = await quizOptions.count().catch(() => 0)
+                                    if (optCount > 0) {
+                                        const randIdx = Math.floor(Math.random() * Math.min(optCount, 4))
+                                        await quizOptions
+                                            .nth(randIdx)
+                                            .click({ force: true })
+                                            .catch(() => {})
+                                        await this.bot.utils.wait(1500)
+                                    } else {
+                                        break
+                                    }
                                 }
 
-                                const quizOptions = tab.locator(
-                                    '.btOption, #btoption0, #btoption1, .rqOptions, .wk_Option, [role="radio"], button.optionBtn, .b_ans, .bt_poll, input[type="radio"], div[class*="option"], div[id*="choice"], .rqOption, .b_cards'
-                                )
-                                const optCount = await quizOptions.count().catch(() => 0)
-                                if (optCount > 0) {
-                                    const randIdx = Math.floor(Math.random() * Math.min(optCount, 4))
-                                    await quizOptions
-                                        .nth(randIdx)
-                                        .click({ force: true })
-                                        .catch(() => {})
-                                    await this.bot.utils.wait(2000)
-                                } else {
-                                    break
+                                // Deteksi dan trigger tombol aksi sub-task Punch Card
+                                const actionButtonSelectors = [
+                                    'a:has-text("Shop the look")',
+                                    'button:has-text("Shop the look")',
+                                    'div[role="button"]:has-text("Shop the look")',
+                                    'a:has-text("Shop now")',
+                                    'button:has-text("Shop now")',
+                                    'a:has-text("Explore")',
+                                    'button:has-text("Explore")',
+                                    '.punchcard-step a',
+                                    '[data-bi-area*="punchcard"] a',
+                                    '[data-bi-id*="shop"]'
+                                ]
+
+                                for (const actionSel of actionButtonSelectors) {
+                                    if (signal.aborted || (typeof tab.isClosed === 'function' && tab.isClosed())) break
+                                    const actBtn = tab.locator(actionSel).first()
+                                    if (await actBtn.isVisible().catch(() => false)) {
+                                        this.bot.logger.debug(
+                                            this.bot.isMobile,
+                                            'URL-REWARD',
+                                            `Triggering punchcard action button: ${actionSel}`
+                                        )
+                                        await actBtn.click({ force: true }).catch(() => {})
+                                        await this.bot.utils.wait(1000)
+                                        break
+                                    }
                                 }
                             }
-
-                            // Deteksi dan trigger tombol aksi sub-task Punch Card
-                            const actionButtonSelectors = [
-                                'a:has-text("Shop the look")',
-                                'button:has-text("Shop the look")',
-                                'div[role="button"]:has-text("Shop the look")',
-                                'a:has-text("Shop now")',
-                                'button:has-text("Shop now")',
-                                'a:has-text("Explore")',
-                                'button:has-text("Explore")',
-                                '.punchcard-step a',
-                                '[data-bi-area*="punchcard"] a',
-                                '[data-bi-id*="shop"]'
-                            ]
-
-                            for (const actionSel of actionButtonSelectors) {
-                                if (signal.aborted || (typeof tab.isClosed === 'function' && tab.isClosed())) break
-                                const actBtn = tab.locator(actionSel).first()
-                                if (await actBtn.isVisible().catch(() => false)) {
-                                    this.bot.logger.debug(
-                                        this.bot.isMobile,
-                                        'URL-REWARD',
-                                        `Triggering punchcard action button: ${actionSel}`
-                                    )
-                                    await actBtn.click({ force: true }).catch(() => {})
-                                    await this.bot.utils.wait(1500)
-                                    break
-                                }
-                            }
-                        }
-                    })
+                        })
+                    } else {
+                        this.bot.logger.debug(
+                            this.bot.isMobile,
+                            'URL-REWARD',
+                            'Fast-bailout: Non-quiz/promo page detected (0 quiz elements), bypassing interaction wait.'
+                        )
+                    }
                 }
 
-                // Simulasi interaksi scroll natural & human-like movement
+                // Simulasi interaksi scroll natural & human-like movement (dipangkas ke 3 langkah cepat ~2s)
                 if (remainingMs() > 2000 && !tab.isClosed()) {
                     this.bot.logger.info(this.bot.isMobile, 'URL-REWARD', `Simulating interaction & safe scroll...`)
                     await runGuardedOperation({
                         stage: 'safe-scroll',
-                        timeoutMs: 12000,
+                        timeoutMs: 4000,
                         remainingBudgetMs: remainingMs(),
                         page: tab,
                         logger: this.bot.logger,
                         isMobile: this.bot.isMobile,
                         operation: async (signal) => {
                             await performBoundedSafeScroll(tab, {
-                                maxDurationMs: 10000,
-                                maxSteps: 8,
-                                stepDelayMs: 750,
+                                maxDurationMs: 3000,
+                                maxSteps: 3,
+                                stepDelayMs: 600,
                                 signal,
                                 logger: this.bot.logger,
                                 isMobile: this.bot.isMobile
@@ -341,9 +360,9 @@ export class UrlReward extends Workers {
 
                 // Jeda tunggu aman telemetri (/fd/ls/ & bat.bing.com)
                 const rawDwell = punchCard
-                    ? this.bot.utils.randomDelay(5000, 7000)
-                    : this.bot.utils.randomDelay(3500, 5000)
-                const dwellTime = Math.min(rawDwell, Math.max(0, remainingMs() - 2000))
+                    ? this.bot.utils.randomDelay(3000, 4500)
+                    : this.bot.utils.randomDelay(2500, 3500)
+                const dwellTime = Math.min(rawDwell, Math.max(0, remainingMs() - 1000))
                 if (dwellTime > 0) {
                     await this.bot.utils.wait(dwellTime)
                 }

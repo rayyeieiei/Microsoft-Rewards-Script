@@ -36,6 +36,8 @@ export interface DashboardState {
     useDynamicWifiProxy: boolean
     useAdbIpRotation: boolean
     useGhostCursor: boolean
+    executionMode?: 'sequential' | 'staggered-dual'
+    staggerOffsetSeconds?: number
     isRunning: boolean
     startTime: number
     loadedAccounts: string[]
@@ -49,6 +51,8 @@ export let dashboardState: DashboardState = {
     useDynamicWifiProxy: false,
     useAdbIpRotation: true,
     useGhostCursor: true,
+    executionMode: 'sequential',
+    staggerOffsetSeconds: 45,
     isRunning: false,
     startTime: 0,
     loadedAccounts: [],
@@ -622,6 +626,25 @@ const htmlPage = `<!DOCTYPE html>
                         <span class="slider"></span>
                     </label>
                 </div>
+
+                <div class="toggle-item" style="margin-top:1.25rem;">
+                    <div>
+                        <strong>Execution Architecture</strong>
+                        <div style="font-size:0.75rem; color:#94a3b8;">Sequential (1-by-1) or Dual-Worker Staggered</div>
+                    </div>
+                    <select id="select-exec-mode" class="text-input" style="width: auto; padding: 0.35rem 0.5rem; font-size: 0.85rem;" onchange="sendConfig()">
+                        <option value="sequential">Sequential (1-by-1)</option>
+                        <option value="staggered-dual">Dual-Worker Staggered</option>
+                    </select>
+                </div>
+
+                <div class="toggle-item" style="margin-top:1.25rem;">
+                    <div>
+                        <strong>Stagger Offset (Seconds)</strong>
+                        <div style="font-size:0.75rem; color:#94a3b8;">Worker 2 startup delay (default 45s)</div>
+                    </div>
+                    <input type="number" id="input-stagger-offset" class="text-input" style="width: 80px; padding: 0.35rem 0.5rem; text-align: center;" min="5" max="300" value="45" onchange="sendConfig()">
+                </div>
             </div>
         </div>
     </div>
@@ -743,14 +766,20 @@ const htmlPage = `<!DOCTYPE html>
             const wifiToggle = document.getElementById('toggle-wifi-proxy');
             const adbToggle = document.getElementById('toggle-adb');
             const ghostToggle = document.getElementById('toggle-ghost');
+            const execModeSelect = document.getElementById('select-exec-mode');
+            const staggerOffsetInput = document.getElementById('input-stagger-offset');
 
             if (wifiToggle) wifiToggle.disabled = true;
             if (adbToggle) adbToggle.disabled = true;
             if (ghostToggle) ghostToggle.disabled = true;
+            if (execModeSelect) execModeSelect.disabled = true;
+            if (staggerOffsetInput) staggerOffsetInput.disabled = true;
 
             const useDynamicWifiProxy = wifiToggle ? wifiToggle.checked : false;
             const useAdbIpRotation = adbToggle ? adbToggle.checked : false;
             const useGhostCursor = ghostToggle ? ghostToggle.checked : true;
+            const executionMode = execModeSelect ? execModeSelect.value : 'sequential';
+            const staggerOffsetSeconds = staggerOffsetInput ? (parseInt(staggerOffsetInput.value, 10) || 45) : 45;
 
             updateAdbLabel(useAdbIpRotation);
 
@@ -758,7 +787,13 @@ const htmlPage = `<!DOCTYPE html>
                 await fetch('/api/config', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ useDynamicWifiProxy, useAdbIpRotation, useGhostCursor })
+                    body: JSON.stringify({
+                        useDynamicWifiProxy,
+                        useAdbIpRotation,
+                        useGhostCursor,
+                        executionMode,
+                        staggerOffsetSeconds
+                    })
                 });
             } catch(e) {
                 console.error(e);
@@ -766,6 +801,8 @@ const htmlPage = `<!DOCTYPE html>
                 if (wifiToggle) wifiToggle.disabled = false;
                 if (adbToggle) adbToggle.disabled = false;
                 if (ghostToggle) ghostToggle.disabled = false;
+                if (execModeSelect) execModeSelect.disabled = false;
+                if (staggerOffsetInput) staggerOffsetInput.disabled = false;
                 isUpdatingConfig = false;
             }
         }
@@ -794,12 +831,20 @@ const htmlPage = `<!DOCTYPE html>
                     const wifiToggle = document.getElementById('toggle-wifi-proxy');
                     const adbToggle = document.getElementById('toggle-adb');
                     const ghostToggle = document.getElementById('toggle-ghost');
+                    const execModeSelect = document.getElementById('select-exec-mode');
+                    const staggerOffsetInput = document.getElementById('input-stagger-offset');
                     if (wifiToggle && !wifiToggle.disabled) wifiToggle.checked = !!data.useDynamicWifiProxy;
                     if (adbToggle && !adbToggle.disabled) {
                         adbToggle.checked = !!data.useAdbIpRotation;
                         updateAdbLabel(adbToggle.checked);
                     }
                     if (ghostToggle && !ghostToggle.disabled) ghostToggle.checked = data.useGhostCursor ?? true;
+                    if (execModeSelect && !execModeSelect.disabled && data.executionMode) {
+                        execModeSelect.value = data.executionMode;
+                    }
+                    if (staggerOffsetInput && !staggerOffsetInput.disabled && data.staggerOffsetSeconds !== undefined) {
+                        staggerOffsetInput.value = data.staggerOffsetSeconds;
+                    }
                 }
 
                 // Update account selector dropdown
@@ -1245,6 +1290,7 @@ export class DashboardServer {
                                 networkRecoveryResolver(body.requestId, body.status || 'resume')
                             }
                             if (body.action === 'confirm-ip') {
+                                logEmitter.emit('log', '🔔 [DASHBOARD] Tombol "Confirm IP Rotated" diklik oleh operator. Melanjutkan batch...')
                                 onIpConfirmCommand()
                             }
                         } else {
@@ -1262,7 +1308,9 @@ export class DashboardServer {
                         updateDashboardGlobal({
                             useDynamicWifiProxy: body.useDynamicWifiProxy ?? dashboardState.useDynamicWifiProxy,
                             useAdbIpRotation: body.useAdbIpRotation ?? dashboardState.useAdbIpRotation,
-                            useGhostCursor: body.useGhostCursor ?? dashboardState.useGhostCursor
+                            useGhostCursor: body.useGhostCursor ?? dashboardState.useGhostCursor,
+                            executionMode: body.executionMode ?? dashboardState.executionMode,
+                            staggerOffsetSeconds: body.staggerOffsetSeconds ?? dashboardState.staggerOffsetSeconds
                         })
 
                         res.writeHead(200, { 'Content-Type': 'application/json' })

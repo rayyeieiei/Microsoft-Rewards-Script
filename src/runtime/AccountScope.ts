@@ -10,6 +10,7 @@ import type {
 } from './environment/BrowserEnvironmentTypes'
 import { AccountDisposer } from './AccountDisposer'
 import type { MicrosoftRewardsBot } from '../index'
+import { StickyDeviceProfile, DeviceHardwareProfile } from './environment/StickyDeviceProfile'
 
 export type AccountScopeLifecycleState = 'active' | 'disposing' | 'disposed'
 
@@ -22,6 +23,7 @@ export class AccountScope {
     public readonly storagePaths: StorageStatePaths
     public readonly bot?: MicrosoftRewardsBot
     public readonly abortController: AbortController = new AbortController()
+    public deviceProfile?: DeviceHardwareProfile
 
     private _lifecycleState: AccountScopeLifecycleState = 'active'
     private _disposalPromise: Promise<void> | null = null
@@ -33,6 +35,7 @@ export class AccountScope {
     private secrets = new Map<string, ResolvedActionSecret>()
     private attemptRecords = new Map<string, PunchCardAttemptRecord>()
     private trackedPages = new Set<any>()
+    private trackedCdpSessions = new Set<any>()
     private trackedTimers = new Set<NodeJS.Timeout>()
     private cursors = new Map<any, any>()
     private routeHandlers: Array<{ context: any; url: string; handler: any }> = []
@@ -109,6 +112,7 @@ export class AccountScope {
             ownershipIdentity,
             options.bot
         )
+        scope.deviceProfile = StickyDeviceProfile.resolve(identity.accountId, sessionDir)
 
         return scope
     }
@@ -148,7 +152,7 @@ export class AccountScope {
             householdId: customOwnership?.householdId || 'test-household-id'
         }
 
-        return new AccountScope(
+        const scope = new AccountScope(
             accountKey,
             resolvedRunId,
             scopeId,
@@ -156,6 +160,9 @@ export class AccountScope {
             storagePaths,
             ownershipIdentity
         )
+        scope.deviceProfile = StickyDeviceProfile.resolve(accountId, sessionDir)
+
+        return scope
     }
 
     public get lifecycleState(): AccountScopeLifecycleState {
@@ -461,10 +468,36 @@ export class AccountScope {
         this.trackedTimers.clear()
     }
 
+    // --- CDP Sessions Management ---
+
+    public trackCdpSession(cdp: any): void {
+        if (this._lifecycleState === 'active' && cdp) {
+            this.trackedCdpSessions.add(cdp)
+        }
+    }
+
+    public untrackCdpSession(cdp: any): void {
+        if (cdp) {
+            this.trackedCdpSessions.delete(cdp)
+        }
+    }
+
+    public getCdpSessions(): any[] {
+        return Array.from(this.trackedCdpSessions)
+    }
+
+    public clearCdpSessions(): void {
+        this.trackedCdpSessions.clear()
+    }
+
     // --- Disposal ---
 
     public dispose(): Promise<void> {
         return AccountDisposer.dispose(this)
+    }
+
+    public forceKill(): Promise<void> {
+        return AccountDisposer.forceKill(this)
     }
 
     public toJSON() {

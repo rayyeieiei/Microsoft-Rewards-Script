@@ -8,8 +8,6 @@ export class DiscordCommander {
     private client: Client;
     private bot: MicrosoftRewardsBot;
 
-    // ⚠️ PASTE TOKEN BARU LU DI SINI (YANG TADI UDAH BOCOR BRE, RESET LAGI!)
-    private token = 'MTUxNDE3NDA0OTc5MjU1NzE2MQ.GBoS5y.Szwzv2AXJgJ1shLU4vZ5lmvDzyWkTxJba_eY5A'; 
 
     constructor(bot: MicrosoftRewardsBot) {
         this.bot = bot;
@@ -167,7 +165,19 @@ export class DiscordCommander {
     // ==========================================
 
     public start() {
-        this.client.login(this.token).catch(err => {
+        const config = this.bot.config;
+        const token =
+            config.discord?.botToken ||
+            config.discordBotToken ||
+            config.webhook?.discord?.botToken ||
+            process.env.DISCORD_BOT_TOKEN;
+
+        if (!token || typeof token !== 'string' || token.trim() === '') {
+            this.bot.logger.warn(false, 'DISCORD-BOT', 'Token Discord Bot tidak ditemukan di config atau env. Melewati inisialisasi Discord Commander.');
+            return;
+        }
+
+        this.client.login(token.trim()).catch(err => {
             this.bot.logger.error(false, 'DISCORD-BOT', `Gagal login Discord Bot: ${err.message}`);
         });
     }

@@ -26,6 +26,84 @@ export class AccountDisposer {
         return scope.beginDisposal(() => AccountDisposer.disposeOnce(scope))
     }
 
+    /**
+     * Force kills zombie browser pages and contexts immediately on deadline timeout.
+     * Fires abortController.abort() first to cancel in-flight search loops, then
+     * force-closes all pages (runBeforeUnload: false) and contexts, recycles the browser,
+     * and completes clean disposal without waiting for long in-flight timeouts.
+     */
+    public static async forceKill(scope: AccountScope): Promise<void> {
+        // 1. Immediately abort active search/activity loops
+        try {
+            scope.abortController.abort()
+        } catch {}
+
+        // 2. Detach tracked CDP sessions cleanly
+        const cdpSessions = scope.getCdpSessions()
+        for (const cdp of cdpSessions) {
+            try {
+                if (cdp && typeof cdp.detach === 'function') {
+                    await cdp.detach().catch(() => {})
+                }
+            } catch {}
+        }
+        scope.clearCdpSessions()
+
+        // 3. Force close all tracked pages
+        const trackedPages = scope.getTrackedPages()
+        for (const p of trackedPages) {
+            try {
+                if (p && typeof p.close === 'function') {
+                    await p.close({ runBeforeUnload: false }).catch(() => {})
+                }
+            } catch {}
+        }
+        scope.clearTrackedPages()
+
+        // 4. Force close all pages on contexts and the contexts themselves
+        const contextsToClose = [scope.getContext('mobile'), scope.getContext('desktop')].filter(Boolean)
+        for (const ctx of contextsToClose) {
+            try {
+                if (typeof ctx.pages === 'function') {
+                    for (const p of ctx.pages()) {
+                        try {
+                            await p.close({ runBeforeUnload: false }).catch(() => {})
+                        } catch {}
+                    }
+                }
+            } catch {}
+            try {
+                await ctx.close().catch(() => {})
+            } catch {}
+        }
+
+        // 5. Force close and detach any dangling references on the bot instance
+        if (scope.bot) {
+            try {
+                if (scope.bot.mainMobilePage && typeof scope.bot.mainMobilePage.close === 'function') {
+                    await scope.bot.mainMobilePage.close({ runBeforeUnload: false }).catch(() => {})
+                }
+            } catch {}
+            scope.bot.mainMobilePage = null as any
+
+            try {
+                if (scope.bot.mainDesktopPage && typeof scope.bot.mainDesktopPage.close === 'function') {
+                    await scope.bot.mainDesktopPage.close({ runBeforeUnload: false }).catch(() => {})
+                }
+            } catch {}
+            scope.bot.mainDesktopPage = null as any
+
+            if (scope.bot.browserFactory) {
+                try {
+                    await scope.bot.browserFactory.recycleBrowser().catch(() => {})
+                } catch {}
+            }
+        }
+
+        // 6. Complete normal disposal pass to wipe secrets, tokens, timers, and mark disposed
+        await AccountDisposer.dispose(scope).catch(() => {})
+    }
+
     private static async disposeOnce(scope: AccountScope): Promise<void> {
         // 1. Cooperative pause and wait for active in-flight operations
         try {
@@ -85,6 +163,17 @@ export class AccountDisposer {
             // Best-effort session persistence during teardown
         }
 
+        // 4b. Detach tracked CDP sessions cleanly
+        const cdpSessions = scope.getCdpSessions()
+        for (const cdp of cdpSessions) {
+            try {
+                if (cdp && typeof cdp.detach === 'function') {
+                    await cdp.detach().catch(() => {})
+                }
+            } catch {}
+        }
+        scope.clearCdpSessions()
+
         // 5. Close pages with bounded timeout (e.g. 1000ms per page)
         const trackedPages = scope.getTrackedPages()
         for (const p of trackedPages) {
@@ -107,6 +196,18 @@ export class AccountDisposer {
         let timeoutOccurred = false
 
         for (const ctx of contextsToClose) {
+            try {
+                if (typeof ctx.pages === 'function') {
+                    for (const p of ctx.pages()) {
+                        try {
+                            const isClosed = typeof p.isClosed === 'function' ? p.isClosed() : false
+                            if (!isClosed && typeof p.close === 'function') {
+                                await p.close({ runBeforeUnload: false }).catch(() => {})
+                            }
+                        } catch {}
+                    }
+                }
+            } catch {}
             try {
                 await Promise.race([
                     ctx.close(),
