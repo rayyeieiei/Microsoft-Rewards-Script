@@ -338,7 +338,8 @@ export default class BrowserFunc {
                 const pcMax = counters.pcSearch?.[0]?.pointProgressMax ?? 0
                 if (pcMax === 0 && (!counters.mobileSearch || counters.mobileSearch.length === 0)) {
                     // Level 1 or uninitialized counters: enforce sensible lower-bound quota of 30 PC points
-                    counters.pcSearch = [{ pointProgress: 0, pointProgressMax: 30 }] as any
+                    const prevProg = this.cachedCounters?.pcSearch?.[0]?.pointProgress ?? 0
+                    counters.pcSearch = [{ pointProgress: Math.min(30, prevProg), pointProgressMax: 30 }] as any
                 }
                 this.cachedCounters = counters
                 this.syncCounter = 0
@@ -346,16 +347,18 @@ export default class BrowserFunc {
             }
             const dailySearchPts = Number(dashboardData?.userStatus?.levelInfo?.bingSearchDailyPoints || 0)
             if (dailySearchPts > 0) {
+                const prevProg = this.cachedCounters?.pcSearch?.[0]?.pointProgress ?? 0
                 const fallbackCounters = {
-                    pcSearch: [{ pointProgress: 0, pointProgressMax: dailySearchPts }],
+                    pcSearch: [{ pointProgress: Math.min(dailySearchPts, prevProg), pointProgressMax: dailySearchPts }],
                     mobileSearch: []
                 } as unknown as Counters
                 this.cachedCounters = fallbackCounters
                 this.syncCounter = 0
                 return fallbackCounters
             }
+            const prevProg = this.cachedCounters?.pcSearch?.[0]?.pointProgress ?? 0
             const defaultLevel1Counters = {
-                pcSearch: [{ pointProgress: 0, pointProgressMax: 30 }],
+                pcSearch: [{ pointProgress: Math.min(30, prevProg), pointProgressMax: 30 }],
                 mobileSearch: []
             } as unknown as Counters
             this.cachedCounters = defaultLevel1Counters

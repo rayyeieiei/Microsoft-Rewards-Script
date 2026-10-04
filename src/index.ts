@@ -200,6 +200,7 @@ export class MicrosoftRewardsBot {
     public localProxyPort = 0
     public activeAccount: Account | null = null
     public accountScope: AccountScope | null = null
+    public abortController?: AbortController
     public runId: string = `run_${Date.now()}`
     public isRunning = false
     public stopRequested = false
@@ -286,6 +287,7 @@ export class MicrosoftRewardsBot {
 
     public resetAccountState() {
         this.searchCooldownActive = false
+        this.abortController = undefined
         this.browser?.func?.resetCounters()
         this.userData = {
             userName: '',
@@ -1215,6 +1217,7 @@ export class MicrosoftRewardsBot {
                 runId: this.runId
             })
             this.accountScope = scope
+            this.abortController = scope.abortController
             this.userData.userName = this.utils.getEmailUsername(accountEmail)
             this.activeAccount = account
 
@@ -1372,9 +1375,13 @@ export class MicrosoftRewardsBot {
                         )
                     })
                 }
+                if (this.browserFactory) {
+                    await this.browserFactory.recycleBrowser().catch(() => {})
+                }
             } finally {
                 if (this.accountScope === scope) {
                     this.accountScope = null
+                    this.abortController = undefined
                     this.resetAccountState()
                 }
                 DataSaverManager.getInstance().resetAccountQuota(accountEmail)
@@ -1665,7 +1672,11 @@ export class MicrosoftRewardsBot {
                         try {
                             if (this.mainMobilePage) await this.mainMobilePage.close({ runBeforeUnload: false }).catch(() => {})
                             if (this.mainDesktopPage) await this.mainDesktopPage.close({ runBeforeUnload: false }).catch(() => {})
-                            if (this.browserFactory) await this.browserFactory.recycleBrowser().catch(() => {})
+                        } catch {}
+                    }
+                    if (this.browserFactory) {
+                        try {
+                            await this.browserFactory.recycleBrowser().catch(() => {})
                         } catch {}
                     }
                     this.resetAccountState()
@@ -1833,7 +1844,11 @@ export class MicrosoftRewardsBot {
                         try {
                             if (wBot.mainMobilePage) await wBot.mainMobilePage.close({ runBeforeUnload: false }).catch(() => {})
                             if (wBot.mainDesktopPage) await wBot.mainDesktopPage.close({ runBeforeUnload: false }).catch(() => {})
-                            if (wBot.browserFactory) await wBot.browserFactory.recycleBrowser().catch(() => {})
+                        } catch {}
+                    }
+                    if (wBot.browserFactory) {
+                        try {
+                            await wBot.browserFactory.recycleBrowser().catch(() => {})
                         } catch {}
                     }
                     wBot.resetAccountState()
