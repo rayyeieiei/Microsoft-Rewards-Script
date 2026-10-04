@@ -29,6 +29,18 @@ export class SearchManager {
         account: Account,
         accountEmail: string
     ): Promise<SearchResults> {
+        if (
+            this.bot.abortController?.signal?.aborted ||
+            this.bot.accountScope?.abortController?.signal?.aborted
+        ) {
+            this.bot.logger.warn(
+                'main',
+                'SEARCH-MANAGER',
+                'Abort signal terdeteksi. Menghentikan seluruh proses pencarian seketika.'
+            )
+            return { mobilePoints: 0, desktopPoints: 0 }
+        }
+
         this.bot.logger.debug(
             'main',
             'SEARCH-MANAGER',
@@ -136,6 +148,14 @@ export class SearchManager {
         accountEmail: string,
         executionContext: any
     ): Promise<SearchResults> {
+        if (
+            this.bot.abortController?.signal?.aborted ||
+            this.bot.accountScope?.abortController?.signal?.aborted
+        ) {
+            this.bot.logger.warn('main', 'SEARCH-MANAGER', 'Abort signal terdeteksi. Menghentikan pencarian paralel seketika.')
+            return { mobilePoints: 0, desktopPoints: 0 }
+        }
+
         this.bot.logger.info('main', 'SEARCH-MANAGER', 'Parallel start')
         this.bot.logger.debug(
             'main',
@@ -308,6 +328,14 @@ export class SearchManager {
         accountEmail: string,
         executionContext: any
     ): Promise<SearchResults> {
+        if (
+            this.bot.abortController?.signal?.aborted ||
+            this.bot.accountScope?.abortController?.signal?.aborted
+        ) {
+            this.bot.logger.warn('main', 'SEARCH-MANAGER', 'Abort signal terdeteksi. Menghentikan pencarian sekuensial.')
+            return { mobilePoints: 0, desktopPoints: 0 }
+        }
+
         this.bot.logger.info('main', 'SEARCH-MANAGER', 'Sequential start')
         this.bot.logger.debug(
             'main',
@@ -328,6 +356,14 @@ export class SearchManager {
         let desktopPoints = 0
 
         if (shouldDoMobile) {
+            if (
+                this.bot.abortController?.signal?.aborted ||
+                this.bot.accountScope?.abortController?.signal?.aborted
+            ) {
+                this.bot.logger.warn('main', 'SEARCH-MANAGER', 'Abort signal terdeteksi sebelum Step 1 (Mobile). Menghentikan pencarian sekuensial.')
+                return { mobilePoints, desktopPoints }
+            }
+
             this.bot.logger.info('main', 'SEARCH-MANAGER', 'Step 1: mobile')
             this.bot.logger.debug(
                 'main',
@@ -364,6 +400,14 @@ export class SearchManager {
         }
 
         if (shouldDoDesktop) {
+            if (
+                this.bot.abortController?.signal?.aborted ||
+                this.bot.accountScope?.abortController?.signal?.aborted
+            ) {
+                this.bot.logger.warn('main', 'SEARCH-MANAGER', 'Abort signal terdeteksi sebelum Step 2 (Desktop). Menghentikan pencarian sekuensial.')
+                return { mobilePoints, desktopPoints }
+            }
+
             if (this.bot.searchCooldownActive) {
                 this.bot.logger.warn(
                     'main',
@@ -459,6 +503,14 @@ export class SearchManager {
 
         return await executionContext.run({ isMobile: true, accountEmail }, async () => {
             try {
+                if (
+                    this.bot.abortController?.signal?.aborted ||
+                    this.bot.accountScope?.abortController?.signal?.aborted
+                ) {
+                    this.bot.logger.warn('main', 'SEARCH-MANAGER', 'Abort signal terdeteksi. Menghentikan pencarian mobile seketika.')
+                    return 0
+                }
+
                 if (!this.bot.config.workers.doMobileSearch) {
                     this.bot.logger.info('main', 'SEARCH-MOBILE-SEARCH', 'Skip: worker disabled in config')
                     return 0
@@ -466,6 +518,11 @@ export class SearchManager {
 
                 if (missingSearchPoints.mobilePoints === 0) {
                     this.bot.logger.info('main', 'SEARCH-MOBILE-SEARCH', 'Skip: no points left')
+                    return 0
+                }
+
+                if (!this.bot.mainMobilePage || this.bot.mainMobilePage.isClosed()) {
+                    this.bot.logger.warn('main', 'SEARCH-MANAGER', 'Mobile page telah ditutup atau tidak tersedia. Menghentikan pencarian mobile.')
                     return 0
                 }
 
@@ -499,6 +556,7 @@ export class SearchManager {
                 if (error instanceof Error && error.stack) {
                     this.bot.logger.debug('main', 'SEARCH-MOBILE-SEARCH', `Stack: ${error.stack}`)
                 }
+                await this.bot.utils.wait(1000)
                 return 0
             } finally {
                 this.bot.logger.info('main', 'SEARCH-MOBILE-SEARCH', 'Closing mobile session')
@@ -539,6 +597,19 @@ export class SearchManager {
 
         return await executionContext.run({ isMobile: false, accountEmail }, async () => {
             try {
+                if (
+                    this.bot.abortController?.signal?.aborted ||
+                    this.bot.accountScope?.abortController?.signal?.aborted
+                ) {
+                    this.bot.logger.warn('main', 'SEARCH-MANAGER', 'Abort signal terdeteksi. Menghentikan pencarian desktop seketika.')
+                    return 0
+                }
+
+                if (!this.bot.mainDesktopPage || this.bot.mainDesktopPage.isClosed()) {
+                    this.bot.logger.warn('main', 'SEARCH-MANAGER', 'Desktop page telah ditutup atau tidak tersedia. Menghentikan pencarian desktop.')
+                    return 0
+                }
+
                 this.bot.logger.info(
                     'main',
                     'SEARCH-DESKTOP-PARALLEL',
@@ -567,6 +638,7 @@ export class SearchManager {
                 if (error instanceof Error && error.stack) {
                     this.bot.logger.debug('main', 'SEARCH-DESKTOP-PARALLEL', `Stack: ${error.stack}`)
                 }
+                await this.bot.utils.wait(1000)
                 return 0
             } finally {
                 this.bot.logger.info('main', 'SEARCH-DESKTOP-PARALLEL', 'Closing desktop session')
@@ -606,6 +678,14 @@ export class SearchManager {
         )
 
         return await executionContext.run({ isMobile: false, accountEmail }, async () => {
+            if (
+                this.bot.abortController?.signal?.aborted ||
+                this.bot.accountScope?.abortController?.signal?.aborted
+            ) {
+                this.bot.logger.warn('main', 'SEARCH-MANAGER', 'Abort signal terdeteksi. Menghentikan desktop search sekuensial.')
+                return 0
+            }
+
             if (!this.bot.config.workers.doDesktopSearch) {
                 this.bot.logger.info('main', 'SEARCH-DESKTOP-SEQUENTIAL', 'Skip: worker disabled in config')
                 return 0
@@ -620,6 +700,19 @@ export class SearchManager {
             try {
                 this.bot.logger.info('main', 'SEARCH-DESKTOP-SEQUENTIAL', 'Init desktop session')
                 desktopSession = await this.createDesktopSession(account, accountEmail)
+
+                if (
+                    this.bot.abortController?.signal?.aborted ||
+                    this.bot.accountScope?.abortController?.signal?.aborted
+                ) {
+                    this.bot.logger.warn('main', 'SEARCH-MANAGER', 'Abort signal terdeteksi pasca inisialisasi desktop session. Menghentikan pencarian.')
+                    return 0
+                }
+
+                if (!this.bot.mainDesktopPage || this.bot.mainDesktopPage.isClosed()) {
+                    this.bot.logger.warn('main', 'SEARCH-MANAGER', 'Desktop page telah ditutup atau tidak tersedia. Menghentikan pencarian desktop.')
+                    return 0
+                }
 
                 this.bot.logger.info(
                     'main',
@@ -650,6 +743,7 @@ export class SearchManager {
                 if (error instanceof Error && error.stack) {
                     this.bot.logger.debug('main', 'SEARCH-DESKTOP-SEQUENTIAL', `Stack: ${error.stack}`)
                 }
+                await this.bot.utils.wait(1000)
                 return 0
             } finally {
                 if (desktopSession) {

@@ -25,6 +25,18 @@ export class QueryCore {
             geoLocale = 'US'
         } = options
 
+        if (
+            this.bot.abortController?.signal?.aborted ||
+            this.bot.accountScope?.abortController?.signal?.aborted
+        ) {
+            this.bot.logger.warn(
+                this.bot.isMobile,
+                'QUERY-MANAGER',
+                'Abort signal terdeteksi di QueryEngine. Membatalkan generasi kueri.'
+            )
+            return []
+        }
+
         try {
             this.bot.logger.debug(
                 this.bot.isMobile,

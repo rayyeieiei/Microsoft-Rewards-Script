@@ -16,6 +16,27 @@ export class Search extends Workers {
     private topicalChainer: TopicalChainer = new TopicalChainer(this.bot)
 
     public async doSearch(data: DashboardData, page: Page, isMobile: boolean): Promise<number> {
+        if (!page || page.isClosed()) {
+            this.bot.logger.warn(
+                isMobile,
+                'SEARCH-BING',
+                'Target page tidak tersedia atau telah ditutup. Menghentikan proses pencarian.'
+            )
+            return 0
+        }
+
+        if (
+            this.bot.abortController?.signal?.aborted ||
+            this.bot.accountScope?.abortController?.signal?.aborted
+        ) {
+            this.bot.logger.warn(
+                isMobile,
+                'SEARCH-BING',
+                '🚨 Sinyal abort/timeout terdeteksi sebelum proses pencarian dimulai. Menghentikan eksekusi seketika.'
+            )
+            return 0
+        }
+
         const startBalance = Number(this.bot.userData.currentPoints ?? 0)
         let searchCount = 0
 
@@ -39,6 +60,27 @@ export class Search extends Workers {
                 'SEARCH-BING',
                 `Search points remaining (${isMobile ? 'Mobile' : 'Desktop'}) | Edge=${missingPoints.edgePoints} | Desktop=${missingPoints.desktopPoints} | Mobile=${missingPoints.mobilePoints}`
             )
+
+            if (missingPointsTotal <= 0) {
+                this.bot.logger.info(
+                    isMobile,
+                    'SEARCH-BING',
+                    `Tidak ada sisa kuota pencarian (${isMobile ? 'Mobile' : 'Desktop'}) yang perlu dikerjakan. Melewati pencarian.`
+                )
+                return 0
+            }
+
+            if (
+                this.bot.abortController?.signal?.aborted ||
+                this.bot.accountScope?.abortController?.signal?.aborted
+            ) {
+                this.bot.logger.warn(
+                    isMobile,
+                    'SEARCH-BING',
+                    '🚨 Sinyal abort/timeout terdeteksi saat evaluasi kuota awal. Menghentikan eksekusi.'
+                )
+                return 0
+            }
 
             const queryCore = new QueryCore(this.bot)
             const locale = (this.bot.userData.geoLocale ?? 'US').toUpperCase()
@@ -104,8 +146,14 @@ export class Search extends Workers {
             const stagnantLoopMax = 3
             let isCooldownDetected = false
 
+            const isAborted = () => Boolean(
+                this.bot.abortController?.signal?.aborted ||
+                this.bot.accountScope?.abortController?.signal?.aborted ||
+                page.isClosed()
+            )
+
             for (let i = 0; i < queries.length; i++) {
-                if (this.bot.accountScope?.abortController.signal.aborted) {
+                if (isAborted()) {
                     this.bot.logger.warn(
                         isMobile,
                         'ABORT',
@@ -137,8 +185,28 @@ export class Search extends Workers {
                 searchCount++
 
                 searchCounters = await this.bingSearch(page, query, isMobile, searchCount)
+                if (isAborted()) {
+                    this.bot.logger.warn(
+                        isMobile,
+                        'ABORT',
+                        '🚨 Pencarian dibatalkan pasca kueri oleh sinyal abort/deadline timeout.'
+                    )
+                    break
+                }
+
                 const newMissingPoints = this.bot.browser.func.missingSearchPoints(searchCounters, isMobile)
-                const newMissingPointsTotal = newMissingPoints.totalPoints
+                let newMissingPointsTotal = newMissingPoints.totalPoints
+
+                // Sanity Clamp & Eliminasi Poin Negatif:
+                // Sisa poin TIDAK BOLEH melonjak kembali ke 90 di tengah loop pencarian
+                if (newMissingPointsTotal > missingPointsTotal) {
+                    this.bot.logger.warn(
+                        isMobile,
+                        'SEARCH-BING',
+                        `[COUNTER-ANOMALY] Counter melonjak dari ${missingPointsTotal} ke ${newMissingPointsTotal}. Mengabaikan anomali counter Bing dan menggunakan baseline kueri (+3 poin).`
+                    )
+                    newMissingPointsTotal = Math.max(0, missingPointsTotal - 3)
+                }
 
                 const pcProg = searchCounters.pcSearch?.[0] ? `${searchCounters.pcSearch[0].pointProgress}/${searchCounters.pcSearch[0].pointProgressMax}` : '0/0'
                 const edgeProg = searchCounters.pcSearch?.[1] && searchCounters.pcSearch[1].pointProgressMax > 0 ? ` (+${searchCounters.pcSearch[1].pointProgress}/${searchCounters.pcSearch[1].pointProgressMax} Edge)` : ''
@@ -156,7 +224,8 @@ export class Search extends Workers {
                     status: `Searching (${isMobile ? 'Mobile' : 'Desktop'})`
                 })
 
-                const gainedPoints = missingPointsTotal - newMissingPointsTotal
+                const rawDelta = missingPointsTotal - newMissingPointsTotal
+                const gainedPoints = Math.max(0, rawDelta)
 
                 if (gainedPoints === 0) {
                     stagnantLoop++
@@ -245,7 +314,7 @@ export class Search extends Workers {
 
                 const remainingQueries = queries.length - (i + 1)
                 const minBuffer = 20
-                if (missingPointsTotal > 0 && remainingQueries < minBuffer) {
+                if (missingPointsTotal > 0 && remainingQueries < minBuffer && !isAborted()) {
                     this.bot.logger.warn(
                         isMobile,
                         'SEARCH-BING',
@@ -260,15 +329,17 @@ export class Search extends Workers {
                         sourceOrder: this.bot.config.searchSettings.queryEngines
                     })
 
-                    const merged = [...queries, ...extra].map(q => q.trim()).filter(Boolean)
-                    queries = [...new Set(merged)]
-                    queries = this.bot.utils.shuffleArray(queries)
+                    if (!isAborted()) {
+                        const merged = [...queries, ...extra].map(q => q.trim()).filter(Boolean)
+                        queries = [...new Set(merged)]
+                        queries = this.bot.utils.shuffleArray(queries)
 
-                    this.bot.logger.debug(isMobile, 'SEARCH-BING', `Query pool regenerated | count=${queries.length}`)
+                        this.bot.logger.debug(isMobile, 'SEARCH-BING', `Query pool regenerated | count=${queries.length}`)
+                    }
                 }
             }
 
-            if (missingPointsTotal > 0 && !isCooldownDetected) {
+            if (missingPointsTotal > 0 && !isCooldownDetected && !isAborted()) {
                 this.bot.logger.info(
                     isMobile,
                     'SEARCH-BING',
@@ -277,8 +348,12 @@ export class Search extends Workers {
 
                 let stagnantLoop = 0
                 const stagnantLoopMax = 3
+                let poolRefills = 0
+                const maxPoolRefill = 1
 
-                while (missingPointsTotal > 0 && !isCooldownDetected) {
+                while (missingPointsTotal > 0 && !isCooldownDetected && !isAborted() && poolRefills < maxPoolRefill) {
+                    poolRefills++
+
                     const extra = await queryCore.queryManager({
                         shuffle: true,
                         related: false,
@@ -287,6 +362,15 @@ export class Search extends Workers {
                         sourceOrder: this.bot.config.searchSettings.queryEngines
                     })
 
+                    if (isAborted()) {
+                        this.bot.logger.warn(
+                            isMobile,
+                            'ABORT',
+                            '🚨 Extra search dibatalkan oleh sinyal abort/deadline timeout saat query generation.'
+                        )
+                        break
+                    }
+
                     const merged = [...queries, ...extra].map(q => q.trim()).filter(Boolean)
                     const newPool = [...new Set(merged)]
                     queries = this.bot.utils.shuffleArray(newPool)
@@ -294,10 +378,21 @@ export class Search extends Workers {
                     this.bot.logger.info(
                         isMobile,
                         'SEARCH-BING-EXTRA',
-                        `New search query pool generated | count=${queries.length}`
+                        `New search query pool generated | count=${queries.length} | refill=${poolRefills}/${maxPoolRefill}`
                     )
 
+                    let pointsGainedThisPool = 0
+
                     for (const query of queries) {
+                        if (isAborted()) {
+                            this.bot.logger.warn(
+                                isMobile,
+                                'ABORT',
+                                '🚨 Extra search dibatalkan seketika oleh sinyal abort/deadline timeout.'
+                            )
+                            break
+                        }
+
                         const trimmedQuery = query?.trim() ?? ''
                         if (trimmedQuery.length < 5 || !trimmedQuery.includes(' ')) {
                             continue
@@ -311,10 +406,30 @@ export class Search extends Workers {
 
                         searchCount++
                         searchCounters = await this.bingSearch(page, query, isMobile, searchCount)
-                        const newMissingPoints = this.bot.browser.func.missingSearchPoints(searchCounters, isMobile)
-                        const newMissingPointsTotal = newMissingPoints.totalPoints
+                        if (isAborted()) {
+                            this.bot.logger.warn(
+                                isMobile,
+                                'ABORT',
+                                '🚨 Extra search dibatalkan pasca kueri oleh sinyal abort/deadline timeout.'
+                            )
+                            break
+                        }
 
-                        const gainedPoints = missingPointsTotal - newMissingPointsTotal
+                        const newMissingPoints = this.bot.browser.func.missingSearchPoints(searchCounters, isMobile)
+                        let newMissingPointsTotal = newMissingPoints.totalPoints
+
+                        // Sanity Clamp & Eliminasi Poin Negatif
+                        if (newMissingPointsTotal > missingPointsTotal) {
+                            this.bot.logger.warn(
+                                isMobile,
+                                'SEARCH-BING-EXTRA',
+                                `[COUNTER-ANOMALY] Counter melonjak dari ${missingPointsTotal} ke ${newMissingPointsTotal}. Mengabaikan anomali counter Bing dan menggunakan baseline kueri (+3 poin).`
+                            )
+                            newMissingPointsTotal = Math.max(0, missingPointsTotal - 3)
+                        }
+
+                        const rawDelta = missingPointsTotal - newMissingPointsTotal
+                        const gainedPoints = Math.max(0, rawDelta)
 
                         if (gainedPoints === 0) {
                             stagnantLoop++
@@ -342,6 +457,7 @@ export class Search extends Workers {
                                     this.bot.userData.currentPoints = verifyRes.newBalance
                                     this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + actualGained
                                     totalGainedPoints += actualGained
+                                    pointsGainedThisPool += actualGained
                                     stagnantLoop = 0
                                 } else {
                                     this.bot.logger.warn(
@@ -360,6 +476,7 @@ export class Search extends Workers {
                             this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
                             this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
                             totalGainedPoints += gainedPoints
+                            pointsGainedThisPool += gainedPoints
 
                             this.bot.logger.info(
                                 isMobile,
@@ -381,9 +498,28 @@ export class Search extends Workers {
                         }
                     }
 
-                    if (isCooldownDetected) {
+                    // CRITICAL: Penghentian seketika jika abort signal aktif, cooldown aktif, atau target tercapai
+                    if (isAborted() || isCooldownDetected || missingPointsTotal === 0) {
                         break
                     }
+
+                    // Circuit Breaker: Jika dalam 1 pool refill tidak ada poin yang bertambah sama sekali, jangan re-pool lagi
+                    if (pointsGainedThisPool === 0) {
+                        this.bot.logger.warn(
+                            isMobile,
+                            'SEARCH-BING-EXTRA',
+                            '[CIRCUIT-BREAKER] Pool kueri ekstra tidak menghasilkan poin baru. Menghentikan regenerasi kueri untuk mencegah loop tak terbatas.'
+                        )
+                        break
+                    }
+                }
+
+                if (missingPointsTotal > 0 && poolRefills >= maxPoolRefill) {
+                    this.bot.logger.warn(
+                        isMobile,
+                        'SEARCH-BING-EXTRA',
+                        `[CIRCUIT-BREAKER] Batas maksimal regenerasi pool kueri (${maxPoolRefill}) tercapai dengan sisa poin ${missingPointsTotal}. Menghentikan pencarian ekstra secara elegan.`
+                    )
                 }
             }
 
@@ -402,6 +538,7 @@ export class Search extends Workers {
                 'SEARCH-BING',
                 `Error in doSearch | message=${error instanceof Error ? error.message : String(error)}`
             )
+            await this.bot.utils.wait(1000)
             return totalGainedPoints
         }
     }
@@ -409,6 +546,23 @@ export class Search extends Workers {
     private async bingSearch(searchPage: Page, query: string, isMobile: boolean, currentSearchCount: number) {
         const maxAttempts = 5
         const refreshThreshold = 10 // Page gets sluggish after x searches?
+
+        const isAborted = () => {
+            return Boolean(
+                this.bot.abortController?.signal?.aborted ||
+                this.bot.accountScope?.abortController?.signal?.aborted ||
+                searchPage.isClosed()
+            )
+        }
+
+        if (isAborted()) {
+            this.bot.logger.warn(
+                isMobile,
+                'SEARCH-BING',
+                '🚨 Sesi pencarian dibatalkan seketika: sinyal abort/deadline timeout aktif atau page telah ditutup.'
+            )
+            return await this.bot.browser.func.getSearchPoints(searchPage, false, isMobile).catch(() => ({} as Counters))
+        }
 
         if (currentSearchCount % refreshThreshold === 0) {
             this.bot.logger.info(
@@ -433,6 +587,15 @@ export class Search extends Workers {
         )
 
         for (let i = 0; i < maxAttempts; i++) {
+            if (isAborted()) {
+                this.bot.logger.warn(
+                    isMobile,
+                    'SEARCH-BING',
+                    '🚨 Iterasi retry dibatalkan: sinyal abort/timeout aktif atau page telah ditutup.'
+                )
+                break
+            }
+
             try {
                 const searchBarSelector = '#sb_form_q, input[name="q"], textarea[name="q"], input.b_searchbox, input[type="search"]'
                 const searchBox = searchPage.locator(searchBarSelector).first()
@@ -505,11 +668,29 @@ export class Search extends Workers {
 
                 return counters
             } catch (error) {
-                if (i >= 5) {
+                const errMsg = error instanceof Error ? error.message : String(error)
+                const isNavOrClosedError =
+                    errMsg.includes('Target page, context or browser has been closed') ||
+                    errMsg.includes('page closed') ||
+                    errMsg.includes('context closed') ||
+                    errMsg.includes('browser has been closed') ||
+                    errMsg.includes('has been destroyed')
+
+                if (isAborted() || isNavOrClosedError) {
+                    this.bot.logger.warn(
+                        isMobile,
+                        'SEARCH-BING',
+                        `🚨 [ABORT-DETECTED] Halaman ditutup atau timeout tercapai (${errMsg}). Menghentikan retry search seketika tanpa perulangan zombie!`
+                    )
+                    await this.bot.utils.wait(1000)
+                    break
+                }
+
+                if (i >= maxAttempts - 1) {
                     this.bot.logger.error(
                         isMobile,
                         'SEARCH-BING',
-                        `Failed after 5 retries | query="${query}" | message=${error instanceof Error ? error.message : String(error)}`
+                        `Failed after ${maxAttempts} retries | query="${query}" | message=${errMsg}`
                     )
                     break
                 }
@@ -517,7 +698,7 @@ export class Search extends Workers {
                 this.bot.logger.error(
                     isMobile,
                     'SEARCH-BING',
-                    `Search attempt failed | attempt=${i + 1}/${maxAttempts} | query="${query}" | message=${error instanceof Error ? error.message : String(error)}`
+                    `Search attempt failed | attempt=${i + 1}/${maxAttempts} | query="${query}" | message=${errMsg}`
                 )
 
                 this.bot.logger.warn(
@@ -528,6 +709,10 @@ export class Search extends Workers {
 
                 await this.bot.utils.wait(1500)
             }
+        }
+
+        if (isAborted()) {
+            return await this.bot.browser.func.getSearchPoints(searchPage, false, isMobile).catch(() => ({} as Counters))
         }
 
         this.bot.logger.debug(
@@ -541,9 +726,16 @@ export class Search extends Workers {
 
     private async randomScroll(page: Page, isMobile: boolean) {
         try {
-            const viewportHeight = await page.evaluate(() => window.innerHeight)
-            const totalHeight = await page.evaluate(() => document.body.scrollHeight)
-            const randomScrollPosition = Math.floor(Math.random() * (totalHeight - viewportHeight))
+            if (page.isClosed()) return
+
+            const viewportHeight = await page.evaluate(() => window.innerHeight || 800).catch(() => 800)
+            const totalHeight = await page.evaluate(() => {
+                const totalHeight = document.scrollingElement?.scrollHeight || document.body?.scrollHeight || window.innerHeight || 1000
+                return totalHeight
+            }).catch(() => 1000)
+
+            const maxScroll = Math.max(0, totalHeight - viewportHeight)
+            const randomScrollPosition = maxScroll > 0 ? Math.floor(Math.random() * maxScroll) : 0
 
             this.bot.logger.debug(
                 isMobile,
@@ -551,9 +743,11 @@ export class Search extends Workers {
                 `Random scroll | viewportHeight=${viewportHeight} | totalHeight=${totalHeight} | scrollPos=${randomScrollPosition}`
             )
 
-            await page.evaluate((scrollPos: number) => {
-                window.scrollTo({ left: 0, top: scrollPos, behavior: 'auto' })
-            }, randomScrollPosition)
+            if (randomScrollPosition > 0) {
+                await page.evaluate((scrollPos: number) => {
+                    window.scrollTo({ left: 0, top: scrollPos, behavior: 'auto' })
+                }, randomScrollPosition).catch(() => {})
+            }
         } catch (error) {
             this.bot.logger.error(
                 isMobile,
