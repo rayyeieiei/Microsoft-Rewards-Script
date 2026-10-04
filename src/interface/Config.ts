@@ -11,11 +11,13 @@ export interface AppOnlyConfig {
     cacheTtlHours: number
 }
 
-export type PunchCardExecutionMode = 'observer' | 'manual-handoff' | 'browser-ui-experimental'
+export type PunchCardExecutionMode = 'auto' | 'observer' | 'manual-handoff' | 'browser-ui-experimental'
 
 export interface PunchCardExecutionConfig {
     mode: PunchCardExecutionMode
     maxChildrenPerRun: number
+    stepDelayMs?: number
+    autoSolveQuizzes?: boolean
 }
 
 export type NewAccountOnboardingMode = 'disabled' | 'observe-only' | 'observe-and-handoff'

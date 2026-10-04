@@ -55,11 +55,13 @@ export const AppOnlyConfigSchema = z.object({
 })
 
 // Punch Card Execution Schema
-export const PunchCardExecutionModeSchema = z.enum(['observer', 'manual-handoff', 'browser-ui-experimental'])
+export const PunchCardExecutionModeSchema = z.enum(['auto', 'observer', 'manual-handoff', 'browser-ui-experimental'])
 
 export const PunchCardExecutionConfigSchema = z.object({
-    mode: PunchCardExecutionModeSchema.default('manual-handoff'),
-    maxChildrenPerRun: z.number().int().positive().default(1)
+    mode: PunchCardExecutionModeSchema.default('auto'),
+    maxChildrenPerRun: z.number().int().positive().default(8),
+    stepDelayMs: z.number().int().nonnegative().default(2500),
+    autoSolveQuizzes: z.boolean().default(true)
 })
 
 // New Account Onboarding Schema
@@ -135,8 +137,10 @@ export const ConfigSchema = z.object({
     }),
     appOnlyRewards: AppOnlyConfigSchema.optional(),
     punchCardExecution: PunchCardExecutionConfigSchema.optional().default({
-        mode: 'manual-handoff',
-        maxChildrenPerRun: 1
+        mode: 'auto',
+        maxChildrenPerRun: 8,
+        stepDelayMs: 2500,
+        autoSolveQuizzes: true
     }),
     newAccountOnboarding: NewAccountOnboardingConfigSchema.optional().default({
         enabled: true,

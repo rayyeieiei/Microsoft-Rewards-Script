@@ -313,12 +313,12 @@ export async function runPunchCardExecutionTests() {
         })
 
         assert.ok(parsed.success, 'Minimal config must pass validation')
-        assert.strictEqual(parsed.data.punchCardExecution?.mode, 'manual-handoff')
-        assert.strictEqual(parsed.data.punchCardExecution?.maxChildrenPerRun, 1)
+        assert.strictEqual(parsed.data.punchCardExecution?.mode, 'auto')
+        assert.strictEqual(parsed.data.punchCardExecution?.maxChildrenPerRun, 8)
 
         const validated = validateConfig(parsed.data)
-        assert.strictEqual(validated.punchCardExecution?.mode, 'manual-handoff')
-        console.log('✅ Test 8 Passed: manual-handoff is default validated config')
+        assert.strictEqual(validated.punchCardExecution?.mode, 'auto')
+        console.log('✅ Test 8 Passed: auto is default validated config')
     }
 
     // Test 9: Browser experimental requires explicit opt-in
@@ -359,8 +359,8 @@ export async function runPunchCardExecutionTests() {
 
         assert.strictEqual(clickExecuted, false, 'Default config must not execute browser DOM click')
         assert.ok(
-            logged.some(l => l.includes('[PUNCHCARD-CONFIG] mode=manual-handoff source=global-default')),
-            'Must log mode=manual-handoff source=global-default'
+            logged.some(l => l.includes('[PUNCHCARD-CONFIG] mode=auto source=global-default')),
+            'Must log mode=auto source=global-default'
         )
         console.log('✅ Test 9 Passed: Browser experimental requires explicit opt-in')
     }

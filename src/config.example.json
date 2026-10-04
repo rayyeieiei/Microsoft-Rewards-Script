@@ -34,6 +34,12 @@
         "defaultPolicy": "skip",
         "cacheTtlHours": 24
     },
+    "punchCardExecution": {
+        "mode": "auto",
+        "maxChildrenPerRun": 8,
+        "stepDelayMs": 2500,
+        "autoSolveQuizzes": true
+    },
     "newAccountOnboarding": {
         "enabled": true,
         "mode": "observe-only",

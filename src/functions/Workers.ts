@@ -1071,6 +1071,31 @@ export class Workers {
             const title = card.parentPromotion?.title || card.name || 'Punch Card'
             const offerId = card.parentPromotion?.offerId || card.name || ''
 
+            // 1. Filter Eksklusif Web vs App-Only Punch Card
+            if (isAppExclusivePunchCard(offerId, title)) {
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'PUNCHCARD',
+                    `Skipping app-exclusive punch card: "${title}" (offerId=${offerId})`,
+                    'yellow'
+                )
+                continue
+            }
+
+            // Zero-Purchase Invariant (Parent Level)
+            const parentDesc =
+                (card.parentPromotion as any)?.description ||
+                (card.parentPromotion?.attributes as any)?.description ||
+                ''
+            if (isPurchaseRequirement(title) || isPurchaseRequirement(parentDesc)) {
+                this.bot.logger.warn(
+                    this.bot.isMobile,
+                    'PUNCHCARD-SAFETY',
+                    `[PUNCHCARD-SAFETY] Skipped punchcard "${title}" due to Zero-Purchase Invariant (purchase/donation required)`
+                )
+                continue
+            }
+
             const progress = this.getPunchCardProgressDetails(card)
             const beforeSnapshot = createPunchCardSnapshot(card)
 
@@ -1143,6 +1168,290 @@ export class Workers {
                         `[PUNCHCARD] Result | title="${title}" status=no-actionable-child evidence=state-unchanged`,
                         'yellow'
                     )
+                }
+                continue
+            }
+
+            const executionMode: PunchCardExecutionMode =
+                (this.bot.config?.punchCardExecution?.mode as PunchCardExecutionMode) || 'auto'
+            const maxChildrenPerRun = this.bot.config?.punchCardExecution?.maxChildrenPerRun ?? 8
+            const stepDelayMs = this.bot.config?.punchCardExecution?.stepDelayMs ?? 2500
+
+            if (executionMode === 'auto') {
+                const source = this.bot.config?.punchCardExecution?.mode ? 'config' : 'global-default'
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'PUNCHCARD-CONFIG',
+                    `[PUNCHCARD-CONFIG] mode=auto source=${source}`
+                )
+
+                let stepsProcessed = 0
+                const childAttempts = new Map<string, number>()
+                let currentSnapshot = createPunchCardSnapshot(card)
+
+                const children = card.childPromotions ?? []
+
+                if (children.length > 0) {
+                    while (stepsProcessed < maxChildrenPerRun) {
+                        if (
+                            this.bot.abortController?.signal?.aborted ||
+                            this.bot.accountScope?.abortController?.signal?.aborted
+                        ) {
+                            this.bot.logger.warn(
+                                this.bot.isMobile,
+                                'PUNCHCARD',
+                                `[PUNCHCARD] Abort signal received, terminating punchcard loop for "${title}"`
+                            )
+                            break
+                        }
+
+                        // Find active actionable child
+                        const activeChild = children.find(
+                            c =>
+                                !isChildComplete(c) &&
+                                !isChildLocked(c) &&
+                                !isChildDisabled(c) &&
+                                !isChildFutureDated(c) &&
+                                !isChildInCooldown(c)
+                        )
+
+                        if (!activeChild) {
+                            const lockedChild = children.find(
+                                c =>
+                                    !isChildComplete(c) &&
+                                    (isChildLocked(c) || isChildFutureDated(c) || isChildInCooldown(c))
+                            )
+                            if (lockedChild) {
+                                const attr = (lockedChild.attributes ?? {}) as Record<string, any>
+                                const nextEligible = attr.nextEligibleAt || attr.startDate || attr.availableAt
+                                this.bot.logger.info(
+                                    this.bot.isMobile,
+                                    'PUNCHCARD',
+                                    `[PUNCHCARD] Subsequent step "${lockedChild.title || lockedChild.offerId}" is server-locked${nextEligible ? `; eligible at ${nextEligible}` : ''}. Ending card loop.`,
+                                    'yellow'
+                                )
+                            } else {
+                                this.bot.logger.info(
+                                    this.bot.isMobile,
+                                    'PUNCHCARD',
+                                    `[PUNCHCARD] No further actionable steps available for "${title}".`,
+                                    'cyan'
+                                )
+                            }
+                            break
+                        }
+
+                        // Child Zero-Purchase Invariant check
+                        const childDesc =
+                            (activeChild as any).description ||
+                            (activeChild.attributes as any)?.description ||
+                            ''
+                        if (isPurchaseRequirement(activeChild.title) || isPurchaseRequirement(childDesc)) {
+                            this.bot.logger.warn(
+                                this.bot.isMobile,
+                                'PUNCHCARD-SAFETY',
+                                `[PUNCHCARD-SAFETY] Skipped child step "${activeChild.title}" due to Zero-Purchase Invariant (purchase/donation required)`
+                            )
+                            break
+                        }
+
+                        const targetChildOfferId = activeChild.offerId || ''
+                        const stepTitle = activeChild.title || activeChild.name || `Step ${stepsProcessed + 1}`
+                        const currentTaskCounts = this.getPunchCardTaskCounts(card)
+                        const stepNum = currentTaskCounts.completed + 1
+                        const taskTag = `(${stepNum}/${currentTaskCounts.total} Tasks)`
+
+                        this.bot.logger.info(
+                            this.bot.isMobile,
+                            'PUNCHCARD',
+                            `[PUNCHCARD] [AUTO-SOLVER] Executing step ${stepsProcessed + 1}/${maxChildrenPerRun}: "${title}" -> "${stepTitle}" ${taskTag}`,
+                            'cyan'
+                        )
+
+                        const attempts = (childAttempts.get(targetChildOfferId) ?? 0) + 1
+                        childAttempts.set(targetChildOfferId, attempts)
+
+                        const balanceBefore = Number(this.bot.userData.currentPoints ?? 0)
+
+                        // Execute Step via Native Envelope UI Interaction
+                        const envelopeResult = await this.executePunchCardStepViaEnvelope(
+                            page,
+                            offerId,
+                            activeChild,
+                            card,
+                            stepNum
+                        )
+
+                        await this.bot.utils.wait(stepDelayMs)
+
+                        let afterSnapshot = await stateReader.fetchPunchCardSnapshot(offerId, targetChildOfferId)
+
+                        let isVerified = Boolean(
+                            envelopeResult.verified ||
+                            (afterSnapshot &&
+                                (afterSnapshot.childComplete === true ||
+                                    afterSnapshot.completedChildren > currentSnapshot.completedChildren ||
+                                    afterSnapshot.parentComplete === true))
+                        )
+
+                        if (!isVerified) {
+                            await this.bot.utils.wait(2000)
+                            const retrySnapshot = await stateReader.fetchPunchCardSnapshot(offerId, targetChildOfferId)
+                            if (retrySnapshot) {
+                                afterSnapshot = retrySnapshot
+                                isVerified = Boolean(
+                                    afterSnapshot.childComplete === true ||
+                                        afterSnapshot.completedChildren > currentSnapshot.completedChildren ||
+                                        afterSnapshot.parentComplete === true
+                                )
+                            }
+                        }
+
+                        const balanceAfter = Number(this.bot.userData.currentPoints ?? 0)
+                        const observedDelta = Math.max(0, balanceAfter - balanceBefore)
+
+                        if (isVerified) {
+                            this.bot.logger.info(
+                                this.bot.isMobile,
+                                'PUNCHCARD',
+                                `[PUNCHCARD] Step "${stepTitle}" verified complete! ${taskTag} | observedDelta=+${observedDelta}`,
+                                'green'
+                            )
+
+                            if (targetChildOfferId) this.completedOffersInSession.add(targetChildOfferId)
+                            if (stepTitle) this.completedOffersInSession.add(stepTitle.toLowerCase().trim())
+                            this.bot.accountScope?.recordAttempt(offerId, targetChildOfferId, 'verified')
+
+                            activeChild.complete = true
+                            if (activeChild.pointProgressMax) {
+                                activeChild.pointProgress = activeChild.pointProgressMax
+                            }
+
+                            if (afterSnapshot) {
+                                currentSnapshot = afterSnapshot
+                            } else {
+                                currentSnapshot.completedChildren++
+                                if (currentSnapshot.completedChildren >= currentSnapshot.totalChildren) {
+                                    currentSnapshot.parentComplete = true
+                                }
+                            }
+
+                            stepsProcessed++
+                            childAttempts.delete(targetChildOfferId)
+
+                            const isAllTasksCompleted =
+                                afterSnapshot?.parentComplete === true ||
+                                currentSnapshot.parentComplete === true ||
+                                currentSnapshot.completedChildren >= currentSnapshot.totalChildren
+
+                            if (isAllTasksCompleted) {
+                                const parentPoints = card.parentPromotion?.pointProgressMax ?? 50
+                                this.bot.logger.info(
+                                    this.bot.isMobile,
+                                    'PUNCHCARD',
+                                    `🎉 Punch Card "${title}" selesai tuntas (${currentSnapshot.completedChildren}/${currentSnapshot.totalChildren} tasks)! Poin bonus +${parentPoints} berhasil diamankan.`,
+                                    'green'
+                                )
+                                this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + parentPoints
+                                void Database.getInstance().recordActivity(
+                                    this.bot.activeAccount?.email || '',
+                                    'PUNCH_CARD_COMPLETED',
+                                    parentPoints
+                                )
+                                if (offerId) this.completedOffersInSession.add(offerId)
+                                this.completedOffersInSession.add(title.toLowerCase().trim())
+                                break
+                            }
+
+                            // Unlock subsequent sequential child if needed
+                            const nextChild = children.find(c => !isChildComplete(c) && !isChildDisabled(c))
+                            if (nextChild && isChildLocked(nextChild)) {
+                                if (!afterSnapshot || afterSnapshot.actionableNow > 0) {
+                                    unlockChild(nextChild)
+                                }
+                            }
+                        } else {
+                            this.bot.logger.warn(
+                                this.bot.isMobile,
+                                'PUNCHCARD',
+                                `[PUNCHCARD] Step "${stepTitle}" processed but server verification remained unverified (attempt ${attempts}/2). ${taskTag}`,
+                                'yellow'
+                            )
+                            this.bot.accountScope?.recordAttempt(offerId, targetChildOfferId, 'processed-unverified')
+                            stepsProcessed++
+
+                            if (attempts >= 2) {
+                                this.bot.logger.warn(
+                                    this.bot.isMobile,
+                                    'PUNCHCARD',
+                                    `[PUNCHCARD] Circuit breaker triggered after ${attempts} consecutive unverified attempts on "${stepTitle}". Stopping card loop.`,
+                                    'yellow'
+                                )
+                                break
+                            }
+                        }
+                    }
+                } else if (card.parentPromotion?.destinationUrl) {
+                    const stepTitle = 'Daily Step'
+                    const taskTag = `(1/1 Tasks)`
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'PUNCHCARD',
+                        `[PUNCHCARD] [AUTO-SOLVER] Executing single-step punchcard: "${title}" -> "${stepTitle}" ${taskTag}`,
+                        'cyan'
+                    )
+
+                    const balanceBefore = Number(this.bot.userData.currentPoints ?? 0)
+                    const claimActivity = card.parentPromotion as unknown as BasePromotion
+                    try {
+                        if (this.bot.activities?.doUrlReward) {
+                            await this.bot.activities.doUrlReward(claimActivity, page, card)
+                        }
+                    } catch (err: any) {
+                        this.bot.logger.error(
+                            this.bot.isMobile,
+                            'PUNCHCARD',
+                            `[PUNCHCARD] Error executing single-step punchcard "${title}": ${err?.message || err}`
+                        )
+                    }
+
+                    await this.bot.utils.wait(stepDelayMs)
+                    let afterSnapshot = await stateReader.fetchPunchCardSnapshot(offerId)
+                    if (!afterSnapshot?.parentComplete) {
+                        await this.bot.utils.wait(2000)
+                        const retrySnapshot = await stateReader.fetchPunchCardSnapshot(offerId)
+                        if (retrySnapshot) afterSnapshot = retrySnapshot
+                    }
+
+                    const balanceAfter = Number(this.bot.userData.currentPoints ?? 0)
+                    const observedDelta = Math.max(0, balanceAfter - balanceBefore)
+
+                    if (afterSnapshot?.parentComplete || observedDelta > 0) {
+                        const parentPoints = card.parentPromotion?.pointProgressMax ?? 10
+                        this.bot.logger.info(
+                            this.bot.isMobile,
+                            'PUNCHCARD',
+                            `🎉 Punch Card "${title}" completed successfully! (+${parentPoints} Pts)`,
+                            'green'
+                        )
+                        this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + parentPoints
+                        void Database.getInstance().recordActivity(
+                            this.bot.activeAccount?.email || '',
+                            'PUNCH_CARD_COMPLETED',
+                            parentPoints
+                        )
+                        if (offerId) this.completedOffersInSession.add(offerId)
+                        this.completedOffersInSession.add(title.toLowerCase().trim())
+                        this.bot.accountScope?.recordAttempt(offerId, offerId, 'verified')
+                    } else {
+                        this.bot.logger.warn(
+                            this.bot.isMobile,
+                            'PUNCHCARD',
+                            `[PUNCHCARD] Punch Card "${title}" processed but completion remains unverified.`,
+                            'yellow'
+                        )
+                        this.bot.accountScope?.recordAttempt(offerId, offerId, 'processed-unverified')
+                    }
                 }
                 continue
             }
@@ -1849,6 +2158,224 @@ export class Workers {
             }
         }
         return false
+    }
+
+    public async executePunchCardStepViaEnvelope(
+        page: Page,
+        parentOfferId: string,
+        activeChild: BasePromotion,
+        card: PunchCard,
+        stepNum: number
+    ): Promise<{ verified: boolean; usedEnvelope: boolean }> {
+        if (!page || typeof page.goto !== 'function') {
+            if (this.bot.activities?.doUrlReward) {
+                await this.bot.activities.doUrlReward(activeChild, page, card).catch(() => {})
+            }
+            return { verified: false, usedEnvelope: false }
+        }
+
+        try {
+            // Langkah A: Navigasikan ke URL amplop kartu
+            const envelopeUrl = `https://rewards.bing.com/dashboard/envelope?id=${parentOfferId}`
+            const currentUrl = (page.url() || '').toLowerCase()
+            if (!currentUrl.includes(`envelope?id=${parentOfferId.toLowerCase()}`)) {
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'PUNCHCARD-ENVELOPE',
+                    `[ENVELOPE] Opening envelope page: ${envelopeUrl}`
+                )
+                await page.goto(envelopeUrl, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {})
+                await this.bot.utils.wait(2000)
+            }
+
+            // Langkah B: Cari tombol/link untuk step yang sedang aktif
+            const selectors = [
+                `[data-offer-id="${activeChild.offerId}"]`,
+                `a[href*="${activeChild.offerId}"]`,
+                `a:has-text("Explore"):visible`,
+                `a:has-text("Shop now"):visible`,
+                `a:has-text("Get started"):visible`,
+                `a:has-text("Check it out"):visible`,
+                `.punchcard-step a:visible`,
+                `a.c-call-to-action:visible`,
+                `button:has-text("Explore"):visible`,
+                `button:has-text("Shop now"):visible`,
+                `button:has-text("Get started"):visible`,
+                `button:has-text("Check it out"):visible`,
+                `a:has-text("Explore")`,
+                `a:has-text("Shop now")`,
+                `a:has-text("Get started")`,
+                `a:has-text("Check it out")`,
+                `.punchcard-step a`,
+                `a.c-call-to-action`
+            ]
+
+            let activeStepButton = null
+            for (const sel of selectors) {
+                try {
+                    const loc = page.locator(sel)
+                    const count = await loc.count().catch(() => 0)
+                    for (let i = 0; i < count; i++) {
+                        const el = loc.nth(i)
+                        const isVis = await el.isVisible().catch(() => false)
+                        if (isVis) {
+                            activeStepButton = el
+                            break
+                        }
+                    }
+                    if (activeStepButton) break
+                } catch {}
+            }
+
+            if (!activeStepButton) {
+                this.bot.logger.debug(
+                    this.bot.isMobile,
+                    'PUNCHCARD-ENVELOPE',
+                    `[ENVELOPE] Active step button not found via standard selectors, delegating to UrlReward...`
+                )
+                if (this.bot.activities?.doUrlReward) {
+                    await this.bot.activities.doUrlReward(activeChild, page, card).catch(() => {})
+                }
+                return { verified: false, usedEnvelope: false }
+            }
+
+            // Langkah C s.d. F: Interaksi klik & evaluasi tab
+            const clickAndHandleTab = async (btn: any): Promise<boolean> => {
+                let newTab: Page | null = null
+                try {
+                    const waitPopup =
+                        page.context && typeof page.context().waitForEvent === 'function'
+                            ? page.context().waitForEvent('page', { timeout: 15000 }).catch(() => null)
+                            : Promise.resolve(null)
+
+                    const clickAction = btn.click({ timeout: 5000 }).catch(async () => {
+                        await btn.evaluate((el: HTMLElement) => el.click()).catch(() => {})
+                    })
+
+                    const [popup] = await Promise.all([waitPopup, clickAction])
+                    newTab = popup as Page | null
+                } catch {}
+
+                // Langkah D: Safe scroll 2 detik pada tab baru, lalu close
+                if (newTab) {
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'PUNCHCARD-ENVELOPE',
+                        `[ENVELOPE] New tab opened from step action. Performing 2s safe scroll...`
+                    )
+                    this.bot.accountScope?.trackPage(newTab)
+                    try {
+                        await newTab.evaluate(() => {
+                            window.scrollBy({ top: 350, behavior: 'smooth' })
+                        }).catch(() => {})
+                        await this.bot.utils.wait(2000)
+                    } catch {}
+                    try {
+                        await newTab.close().catch(() => {})
+                    } catch {}
+                    this.bot.accountScope?.untrackPage(newTab)
+                } else if (activeChild.destinationUrl && this.bot.activities?.doUrlReward) {
+                    await this.bot.activities.doUrlReward(activeChild, page, card).catch(() => {})
+                }
+
+                // Langkah E: Jeda propagasi 3 detik, reload halaman amplop
+                await this.bot.utils.wait(3000)
+                if (typeof page.reload === 'function') {
+                    await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
+                    await this.bot.utils.wait(1500)
+                }
+
+                // Langkah F: Evaluasi DOM amplop
+                const domState = await page
+                    .evaluate((targetStep: number) => {
+                        const checkmarks = Array.from(
+                            document.querySelectorAll(
+                                '.mee-icon-CheckMark, [class*="CheckMark" i], [class*="check-mark" i], .completed, [class*="completed" i], [aria-label*="completed" i]'
+                            )
+                        )
+                        const completedCards = Array.from(
+                            document.querySelectorAll('.punchcard-step.completed, .punchcard-step [class*="CheckMark" i]')
+                        )
+                        const maxCompleted = Math.max(checkmarks.length, completedCards.length)
+                        return {
+                            hasCheckmark: maxCompleted >= targetStep,
+                            completedCount: maxCompleted
+                        }
+                    }, stepNum)
+                    .catch(() => ({ hasCheckmark: false, completedCount: 0 }))
+
+                return domState.hasCheckmark
+            }
+
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'PUNCHCARD-ENVELOPE',
+                `[ENVELOPE] Executing Native Envelope interaction for Step ${stepNum}...`
+            )
+            let isDomVerified = await clickAndHandleTab(activeStepButton)
+
+            // Jika belum centang: coba 1x re-click
+            if (!isDomVerified) {
+                this.bot.logger.warn(
+                    this.bot.isMobile,
+                    'PUNCHCARD-ENVELOPE',
+                    `[ENVELOPE] Step ${stepNum} checkmark not detected after initial click. Retrying 1x re-click...`
+                )
+                let retryButton = null
+                for (const sel of selectors) {
+                    try {
+                        const loc = page.locator(sel)
+                        const count = await loc.count().catch(() => 0)
+                        for (let i = 0; i < count; i++) {
+                            const el = loc.nth(i)
+                            if (await el.isVisible().catch(() => false)) {
+                                retryButton = el
+                                break
+                            }
+                        }
+                        if (retryButton) break
+                    } catch {}
+                }
+                if (retryButton) {
+                    isDomVerified = await clickAndHandleTab(retryButton)
+                }
+            }
+
+            return { verified: isDomVerified, usedEnvelope: true }
+        } catch (err: any) {
+            this.bot.logger.warn(
+                this.bot.isMobile,
+                'PUNCHCARD-ENVELOPE',
+                `[ENVELOPE] Native envelope interaction error: ${err?.message || err}`
+            )
+            return { verified: false, usedEnvelope: false }
+        }
+    }
+}
+
+export function isAppExclusivePunchCard(offerId?: string, title?: string): boolean {
+    const text = `${offerId ?? ''} ${title ?? ''}`.toLowerCase()
+    return (
+        text.includes('rewardsapp') ||
+        text.includes('xboxapp') ||
+        text.includes('install_rewardsapp')
+    )
+}
+
+export function isPurchaseRequirement(text?: string): boolean {
+    if (!text) return false
+    return /\b(buy|buying|purchase|purchasing|rent|renting|spend|spending|donate|donation|donating|beli|sewa|belanja|donasi)\b/i.test(
+        text
+    )
+}
+
+export function unlockChild(c: BasePromotion): void {
+    if (!c) return
+    ;(c as any).isLocked = false
+    if (c.attributes) {
+        const attr = c.attributes as Record<string, any>
+        delete attr.isLocked
+        attr.is_unlocked = 'True'
     }
 }
 
