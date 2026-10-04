@@ -13,6 +13,8 @@ import { runNetworkRecoveryTests } from './networkRecovery.test'
 import { runNetworkRecoveryDiagnosticsTests } from './networkRecoveryDiagnostics.test'
 import { runSessionPersistenceTests } from './sessionPersistence.test'
 import { runAntiAbuseRemediationTests } from './antiAbuseRemediation.test'
+import { runChapter21PunchCardAutoSolverTests } from './chapter21PunchCardAutoSolver.test'
+import { runChapter22SearchAbortLoopEliminationTests } from './chapter22SearchAbortLoopElimination.test'
 
 async function runAll() {
     console.log('🧪 Starting Full Test Suite Execution...\n')
@@ -60,6 +62,12 @@ async function runAll() {
     console.log('')
 
     await runAntiAbuseRemediationTests()
+    console.log('')
+
+    await runChapter21PunchCardAutoSolverTests()
+    console.log('')
+
+    await runChapter22SearchAbortLoopEliminationTests()
     console.log('')
 
     console.log('🎉 ALL TESTS IN SUITE PASSED SUCCESSFULLY!')

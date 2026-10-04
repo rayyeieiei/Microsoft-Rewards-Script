@@ -18,6 +18,7 @@
 7. [Bab 18: Status Persetujuan & Next Steps (Speedup Optimization Plan)](#bab-18-status-persetujuan--next-steps-speedup-optimization-plan) *(Status: Selesai 100% & Terverifikasi)*
 8. [Bab 19: Audit Forensik & Mitigasi Pencarian Terlewati (Search Skipped)](#bab-19-audit-forensik--mitigasi-pencarian-terlewati-search-skipped) *(Status: Selesai 100% & Terverifikasi)*
 9. [Bab 20: Restorasi Hook ADB Batch Rotation & Anti-Bypass Manual Fallback](#bab-20-restorasi-hook-adb-batch-rotation--anti-bypass-manual-fallback) *(Status: Selesai 100% & Terverifikasi)*
+10. [Bab 21: Audit Forensik Punch Card Engine & Blueprint Auto-Solver Oktober](#bab-21-audit-forensik-punch-card-engine--blueprint-auto-solver-oktober) *(Status: Audit Selesai & Blueprint Siap Eksekusi)*
 
 ---
 
@@ -463,5 +464,222 @@ const dynamicDeadlineMs = Math.min(25 * 60 * 1000, Math.max(14 * 60 * 1000, base
 ### 20.3 Verifikasi Kualitas & Hasil Pengujian
 - **TypeScript Compilation**: `npm run build` sukses dengan **Exit Code 0** (seluruh artifact di `dist/` terkompilasi bersih).
 - **Unit & Integration Tests**: `npm test` lulus **95/95 test suite (100% PASS)** tanpa regresi pada clustering, lock, sanitizer, validator, maupun alur browser.
+
+---
+
+## Bab 21: Punch Card Auto-Solver & Sequential Step Solving (Oktober)
+
+> [!IMPORTANT]
+> **STATUS KOMPONEN: SELESAI 100% & TERVERIFIKASI (BUILD & TEST PASS)**  
+> Sukses mengimplementasikan auto-solver berantai (*sequential step solving*) untuk menuntaskan kartu promosi bulanan Oktober (+50 Pts, 5 task berantai) dan Weekly Quest dalam 1 sesi per akun, mengeliminasi bypass manual handoff secara default, menerapkan Zero-Purchase Invariant, serta melengkapi circuit breaker anti-infinite-loop.
+
+### 21.1 Temuan Forensik Kode Program & Masalah Lapangan
+1. **Penyebab Punch Card Dilewati (Silent Bypass ke Manual Handoff)**:
+   - **Konfigurasi Default Pasif**: Pada `src/util/Validator.ts`, skema Zod `punchCardExecution` memiliki nilai default:
+     ```typescript
+     punchCardExecution: PunchCardExecutionConfigSchema.optional().default({
+         mode: 'manual-handoff',
+         maxChildrenPerRun: 1
+     })
+     ```
+   - **Ketiadaan Opsi di `config.json`**: Baik `config.json` maupun `src/config.example.json` tidak menyertakan blok konfigurasi `punchCardExecution`. Akibatnya, bot selalu jatuh ke fallback bawaan `mode = 'manual-handoff'`.
+   - **Logika Eksekusi di `src/functions/Workers.ts`**:
+     Di baris 1181–1232, saat `executionMode === 'manual-handoff'`, bot hanya mencetak log `[PUNCHCARD] Queued for manual handoff` dan memanggil `manualQuestQueue.enqueue(...)`, lalu langsung memanggil `continue`. Tidak ada aksi pembukaan URL, klik tab, maupun telemetri hadiah yang dikirim ke server Microsoft.
+   - **Keterbatasan Mode Tersedia**: Tipe `PunchCardExecutionMode` saat ini hanya dibatasi pada `'observer' | 'manual-handoff' | 'browser-ui-experimental'`. Tidak ada opsi `'auto'` atau `'solve'` yang siap pakai untuk penyelesaian otomatis kartu promosi gratis.
+
+2. **Bottleneck Pembatasan Satu Langkah per Sesi (`maxChildrenPerRun = 1`)**:
+   - Di `src/functions/Workers.ts:1152`, guardrail membatasi: `// Guardrail: Maksimal satu child per parent per run`.
+   - Punch Card Bulanan Oktober ("Five things to explore this October") memiliki 5 child task beruntun (+50 Pts).
+   - Jika dibatasi 1 child per run, akun membutuhkan 5 kali run terpisah (atau 5 hari) untuk menyelesaikan satu kartu yang sebenarnya bisa tuntas dalam 1 sesi (20–30 detik).
+
+3. **Kelemahan Mekanisme `clickExactChildFromDashboard` vs Keunggulan `UrlReward.doUrlReward`**:
+   - Mode `browser-ui-experimental` mencoba melakukan `clickExactChildFromDashboard` (mencari selector `[data-offer-id="..."]` pada halaman utama `rewards.bing.com`).
+   - Kartu bulanan Oktober dan weekly quest seringkali merender child step di sub-halaman promosi atau drawer terpisah, sehingga pencarian elemen di root dashboard sering gagal (*not visible* / *element not found*).
+   - Sebaliknya, modul `UrlReward.doUrlReward` (`src/functions/activities/api/UrlReward.ts`) telah dilengkapi fungsionalitas paripurna:
+     - Membuka `child.destinationUrl` di tab terisolasi (`createManagedPage`).
+     - Melakukan *fast-probing* elemen kuis, survey, atau tombol aksi punchcard (misal: `"Shop now"`, `"Explore"`, `.punchcard-step a`).
+     - Mensimulasikan *safe scroll* 2–3 detik dan jeda telemetri `/fd/ls/`.
+     - Menutup tab secara bersih (`tab.close`).
+     - Mengirim penguatan sekunder API (`/api/reportactivity`).
+
+---
+
+### 21.2 Analisis Target Punch Card Lapangan (Oktober 2026)
+
+| Nama Punch Card | Parent Offer ID | Total Tasks | Poin | Karakteristik Child Tasks | Status Lapangan |
+| :--- | :--- | :---: | :---: | :--- | :--- |
+| **Five things to explore this October** | `ENWW_pcparent_FY27_BingMonthlyPC_Oct_punchcard` | 5 | +50 Pts | URL Reward promosi eksplorasi (Costumes, Toys, Phones, Mega Deals, AI Devices). Step 1 aktif, Step 2–5 terkunci berantai. | 0/5 Tasks (Tergantung manual handoff) |
+| **Rewards App weekly Exclusive Quest** | `WW_pcparent_RewardsApp_weekly_Exclusive_Septw4_2026_punchcard` | 8 | +100 Pts | Kombinasi klik promosi mingguan dan misi check-in. | Step 1/8 (Perlu penyelesaian beruntun) |
+| **Explore Windows Search** | `ENWW_pcparent_ExploreWindowsSearch_punchcard` | 4 | +20 Pts | Misi edukasi fitur pencarian Windows. | 4/4 Tasks (100% Completed) |
+
+---
+
+### 21.3 Blueprint Arsitektur Auto-Solver Oktober (Sequential Step Solving)
+
+#### A. Penambahan Mode Konfigurasi `'auto'` (`src/interface/Config.ts` & `src/util/Validator.ts`)
+- Tambahkan `'auto'` pada enum:
+  ```typescript
+  export type PunchCardExecutionMode = 'auto' | 'observer' | 'manual-handoff' | 'browser-ui-experimental'
+  ```
+- Perbarui konfigurasi bawaan `config.json` dan `Validator.ts`:
+  ```json
+  "punchCardExecution": {
+      "mode": "auto",
+      "maxChildrenPerRun": 8,
+      "stepDelayMs": 2500,
+      "autoSolveQuizzes": true
+  }
+  ```
+
+#### B. Alur Eksekusi Beruntun dalam Satu Sesi (Sequential Solving Loop)
+Di `src/functions/Workers.ts`, ganti eksekusi tunggal dengan loop penyelesaian terarah per kartu:
+
+```
+[Mulai Evaluasi Punch Card]
+       │
+       ▼
+Apakah kartu sudah komplit (beforeSnapshot.parentComplete)? ──► Ya ──► [Lewati ke kartu berikutnya]
+       │ Tidak
+       ▼
+[Loop Sesi Kartu: while (actionableNow > 0 && stepsProcessed < maxChildrenPerRun)]
+       │
+       ├─► 1. Ambil activeChild yang memenuhi syarat: (!complete && !locked && !futureDated && !inCooldown)
+       │
+       ├─► 2. Periksa Keamanan (Zero-Purchase Invariant):
+       │      - Jika deskripsi mengandung kata beli/sewa/donasi ("Buy", "Rent", "Donate"), lewati.
+       │
+       ├─► 3. Eksekusi Child Step:
+       │      - Delegasikan ke this.bot.activities.doUrlReward(activeChild, page, card)
+       │      - Managed tab terbuka -> visit destinationUrl -> fast-probe quiz/action buttons -> safe scroll 2s -> close tab.
+       │      - Kirim secondary reinforcement API jika hash tersedia.
+       │
+       ├─► 4. Jeda Sinkronisasi Server:
+       │      - Beri jeda 2.5 - 3 detik agar server Microsoft memproses event telemetri.
+       │
+       ├─► 5. Verifikasi & Deteksi Unlock Step Berikutnya:
+       │      - stateReader.fetchPunchCardSnapshot(parentOfferId, activeChild.offerId)
+       │      - Cek apakah activeChild terverifikasi komplit (childComplete === true).
+       │      - Jika SUKSES:
+       │        • Catat riwayat attempt ('verified').
+       │        • Evaluasi snapshot baru: apakah Step berikutnya UNLOCK (actionableNow > 0)?
+       │        • Jika UNLOCK: lanjutkan loop iterasi berikutnya di sesi yang sama!
+       │        • Jika locked oleh waktu (futureDated / server daily lock): log informasi unlock & keluar loop secara elegan.
+       │      - Jika GAGAL (Unverified):
+       │        • Coba 1 kali re-check dengan jeda 2 detik. Jika tetap unverified, catat 'processed-unverified' dan BREAK loop (Circuit Breaker) agar tidak terjadi perulangan sia-sia.
+       │
+       ▼
+[Selesai Kartu] ──► Rekam Poin & Update Dashboard UI
+```
+
+#### C. Safety Guardrails & Circuit Breakers
+1. **Circuit Breaker Anti-Loop**: Batas maksimal 2 kali percobaan per child step. Jika status di server tidak berubah, hentikan kartu tersebut.
+2. **Timeout Budget per Kartu**: Maksimal 3 menit untuk memproses satu kartu utuh, terikat dengan `this.bot.accountScope?.abortController.signal`.
+3. **Respect Future-Dated Tasks**: Jika step 2 atau 3 memiliki atribut `startDate` di masa depan atau `inCooldown = true` (misal quest mingguan yang baru terbuka hari Senin depan), bot tidak memaksakan eksekusi dan mencatat tanggal ketersediaan berikutnya.
+4. **Preservasi Single Source of Truth**: Data perolehan dicatat ke `Database` dan ringkasan dashboard diperbarui secara realtime.
+
+---
+
+### 21.4 Eksekusi & Verifikasi Kualitas (Fase 2 Verified)
+1. **Konfigurasi & Skema Mode `'auto'` (`src/interface/Config.ts`, `src/util/Validator.ts`, `config.json`, `src/config.example.json`)**:
+   - Menambahkan `'auto'` ke `PunchCardExecutionMode`.
+   - Mengatur konfigurasi default Zod: `mode: 'auto'`, `maxChildrenPerRun: 8`, `stepDelayMs: 2500`, `autoSolveQuizzes: true`.
+   - Menulis blok konfigurasi `punchCardExecution` secara fisik ke `config.json` lokal.
+2. **Loop Auto-Solver & Zero-Purchase Invariant (`src/functions/Workers.ts`)**:
+   - Menyematkan filter `isPurchaseRequirement` di level parent dan child untuk menolak secara instan kartu berbayar (`"Buy"`, `"Rent"`, `"Spend"`, `"Donate"`).
+   - Mengimplementasikan sequential loop `while (stepsProcessed < maxChildrenPerRun)` yang mengeksekusi child aktif via `this.bot.activities.doUrlReward(activeChild, page, card)`.
+   - Menambahkan jeda propagasi 2500ms dan re-fetch snapshot server dengan `fetchPunchCardSnapshot(offerId, targetChildOfferId)`.
+   - Menambahkan fungsi `unlockChild(nextChild)` saat server snapshot mengonfirmasi child sebelumnya sukses (`childComplete === true`), memungkinkan seluruh 5 langkah kartu bulanan tuntas dalam 1 sesi.
+   - Mengintegrasikan circuit breaker berbasis `childAttempts Map` (maksimal 2 attempt per child) untuk mencegah loop tak terbatas jika server stagnan.
+   - Mengkreditkan bonus parent (+50 pts) ke `userData.gainedPoints` dan mencatat aktivitas ke `Database.getInstance().recordActivity` saat `parentComplete === true`.
+3. **Hasil Verifikasi Kompilasi & Test Suite**:
+   - `npm run build`: Exit Code 0 (seluruh file TypeScript terkompilasi bersih).
+   - `npm test`: **101/101 test suite (100% PASS)** tanpa regresi pada modul eksisting.
+   - `test/chapter21PunchCardAutoSolver.test.ts`: **8/8 test skenario lulus**:
+     - ✅ Test 1: Validasi skema & konfigurasi default `'auto'`.
+     - ✅ Test 2: Zero-Purchase Invariant menolak penawaran berbayar/donasi.
+     - ✅ Test 3: Simulasi sequential unlock menuntaskan 5 task kartu Oktober dalam 1 run (+50 pts credited).
+     - ✅ Test 4: Circuit breaker membatasi percobaan stagnan maksimal 2 attempt.
+     - ✅ Test 5: Perlindungan step terjadwal di masa depan (future-dated) dihormati tanpa hang.
+     - ✅ Test 6: AbortController memutus alur seketika saat sinyal abort aktif.
+     - ✅ Test 7: Filter App-Only Quests (`isAppExclusivePunchCard`) melewatkan misi khusus aplikasi tanpa eksekusi.
+     - ✅ Test 8: Native Envelope UI interaction berhasil membuka amplop, menangani popup tab, scroll aman, reload, & memverifikasi checkmark DOM.
+
+---
+
+### 21.5 Penyempurnaan Native Envelope UI Interaction & Filter App-Only Quests (Fase 2.1 Verified)
+1. **Filter Eksklusif Web vs App-Only Punch Card (`src/functions/Workers.ts`)**:
+   - Penambahan fungsi `isAppExclusivePunchCard(offerId, title)` untuk memfilter kartu yang memuat keyword `RewardsApp`, `XboxApp`, atau `Install_RewardsApp`.
+   - Kartu khusus aplikasi dilewati secara elegan dengan log kuning (`Skipping app-exclusive punch card: ...`) tanpa mencoba membukanya di web, sehingga tidak memicu false trips pada circuit breaker.
+2. **Native Envelope UI Interaction (`executePunchCardStepViaEnvelope`)**:
+   - Membuka container amplop resmi: `https://rewards.bing.com/dashboard/envelope?id=${parentOfferId}` untuk memenuhi telemetri resmi Microsoft.
+   - Pemindaian tombol aksi aktif menggunakan selector komprehensif (`[data-offer-id]`, `a[href*="id"]`, `a:has-text("Explore")`, `a:has-text("Shop now")`, `a:has-text("Get started")`, `a:has-text("Check it out")`, `.punchcard-step a`, `a.c-call-to-action`).
+   - Penanganan tab baru melalui `Promise.all([page.context().waitForEvent('page'), btn.click()])`.
+   - Scroll aman selama 2 detik pada tab baru untuk memicu beacon telemetri, kemudian menutup tab secara rapi (`popup.close()`).
+   - Jeda propagasi server 3 detik dilanjutkan dengan reload halaman amplop (`page.reload()`).
+   - Evaluasi DOM amplop terhadap icon centang (`.mee-icon-CheckMark`, `.completed`, dsb.) dengan fallback 1x re-click jika checkmark belum terdeteksi.
+3. **Format Log Perayaan Ketuntasan Kartu**:
+   - Log banner perayaan: `🎉 Punch Card "${title}" selesai tuntas (${completed}/${total} tasks)! Poin bonus +${parentPoints} berhasil diamankan.`
+   - Poin bonus parent otomatis dikreditkan ke `this.bot.userData.gainedPoints` dan dicatat ke `Database`.
+
+---
+
+## BAB 22: ELIMINASI TIGHT INFINITE LOOP (0MS SPIN) SEARCHMANAGER & PENGHENTIAN MUTLAK SEARCH RE-POOL SAAT ABORTED
+
+### 22.1 Konteks Lapangan & Akar Masalah (Root Cause Analysis)
+1. **0ms Tight Spin Loop**:
+   - Di detik yang sama (`[03/10/2026, 21.00.22]`), bot mengalami ribuan perulangan kueri ekstra:
+     `[SEARCH-BING-EXTRA] New search query pool generated | count=1365`
+     `[ABORT] 🚨 Extra search dibatalkan seketika oleh sinyal abort/deadline timeout.`
+   - **Akar Masalah di `Search.ts`**:
+     Di dalam loop ekstra `while (missingPointsTotal > 0 && !isCooldownDetected)`:
+     Saat `isAborted()` bernilai `true`, perintah `break` di dalam `for (const query of queries)` HANYA memutus perulangan `for` dalam!
+     Perulangan luar `while` tetap berputar karena `missingPointsTotal` masih `> 0` dan `!isCooldownDetected` masih `true`.
+     Bot seketika memanggil `queryCore.queryManager(...)` kembali, membuat ribuan kueri, dan memicu abort lagi dalam hitungan milidetik.
+2. **Ketiadaan Batas Refill Query Pool**:
+   - Tidak ada batasan `maxPoolRefill` pada query pool ekstra. Jika poin stagnan atau browser ditutup paksa, sistem terus meregenerasi query pool tak terbatas.
+3. **Ketiadaan Safety Delay pada Blok Catch / Error**:
+   - Kegagalan pencarian atau penutupan halaman Playwright melempar exception yang langsung diulang tanpa jeda asinkron, menyebabkan CPU lock 100% dan membuat Ctrl+C (SIGINT) tidak responsif.
+
+---
+
+### 22.2 Solusi Arsitektural & Perbaikan Kode
+
+1. **Penghentian Mutlak Search Loop pada Abort & Closed Page (`src/functions/SearchManager.ts`)**:
+   - Menambahkan guard abort `this.bot.abortController?.signal?.aborted || this.bot.accountScope?.abortController?.signal?.aborted` di entry point:
+     • `doSearches`
+     • `doSequentialSearches` (di awal, sebelum Step 1 Mobile, dan sebelum Step 2 Desktop)
+     • `doMobileSearch`
+     • `doDesktopSearch` (parallel)
+     • `doDesktopSearchSequential` (sebelum & sesudah inisialisasi sesi)
+   - Menambahkan validasi integritas halaman `!page || page.isClosed()` di setiap pemanggilan search. Jika halaman tertutup atau tidak tersedia, pencarian dihentikan seketika dengan return 0.
+
+2. **Batas Regenerasi Query Pool & Double-Break Guard (`src/functions/activities/browser/Search.ts`)**:
+   - **Pre-flight Check `doSearch`**: Menolak eksekusi seketika jika halaman tertutup, abort signal aktif, atau sisa kuota pencarian sudah 0 (`missingPointsTotal <= 0`).
+   - **Capping `maxPoolRefill = 1`**: Query pool ekstra dibatasi maksimal 1 kali isi ulang per sesi akun.
+   - **Double-Break Guard**: Setelah perulangan `for (const query of queries)`, periksa `if (isAborted() || isCooldownDetected || missingPointsTotal === 0) break;` untuk memutus `while` loop luar secara mutlak.
+   - **Zero-Gain Circuit Breaker**: Jika setelah 1 pool kueri dieksekusi tidak ada poin baru yang bertambah (`pointsGainedThisPool === 0`), perulangan ekstra langsung dihentikan tanpa mencoba re-pool lagi.
+
+3. **Safety Delay Guard (`await this.bot.utils.wait(1000)`)**:
+   - Disematkan pada seluruh blok `catch` di `Search.ts` (`doSearch` & `bingSearch`) serta `SearchManager.ts` (`doMobileSearch`, `doDesktopSearch`, `doDesktopSearchSequential`).
+   - Menjamin Event Loop Node.js tidak pernah berputar dalam 0 milidetik, mencegah pemakaian CPU 100%, dan menjaga terminal tetap responsif terhadap sinyal interrupt.
+
+4. **Abort Guard di QueryEngine (`src/functions/QueryEngine.ts`)**:
+   - Menambahkan pengecekan sinyal abort di awal method `queryManager`. Jika abort aktif, fungsi langsung mengembalikan array kosong `[]` tanpa melakukan pembacaan berkas lokal atau request jaringan.
+
+---
+
+### 22.3 Hasil Verifikasi & Uji Kualitas
+1. **Chapter 22 Test Suite (`test/chapter22SearchAbortLoopElimination.test.ts`)**:
+   - ✅ **Test 1**: `QueryEngine.queryManager` langsung mengembalikan `[]` saat sinyal abort aktif.
+   - ✅ **Test 2**: `Search.doSearch` menolak panggilan pada halaman tertutup atau abort signal aktif tanpa memanggil `goto`.
+   - ✅ **Test 3**: `Search.doSearch` keluar bersih (0 panggilan kueri) saat sisa kuota pencarian sudah 0.
+   - ✅ **Test 4**: Pool refill ekstra dibatasi `maxPoolRefill = 1` dan menghentikan perulangan stagnan.
+   - ✅ **Test 5**: Sinyal abort di dalam ekstra pencarian memutus `while` luar seketika tanpa re-pool.
+   - ✅ **Test 6**: `SearchManager` memverifikasi sinyal abort dan membatalkan seluruh alur pencarian seketika.
+2. **Kompilasi TypeScript (`npm run build`)**: **Exit Code 0** (seluruh berkas terkompilasi bersih ke `dist/`).
+3. **Full Test Suite (`npm test`)**: **107/107 Test Suites PASSED (100%)** tanpa regresi.
+
+
+
 
 
