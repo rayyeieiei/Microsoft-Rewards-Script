@@ -56,6 +56,39 @@ export function sanitizeDiagnosticUrl(rawUrl?: string): { origin: string; pathna
     }
 }
 
+export function isLocalAppUri(url?: string): boolean {
+    if (!url || typeof url !== 'string') return false
+    const lower = url.trim().toLowerCase()
+    return (
+        lower.startsWith('microsoft-edge:') ||
+        lower.startsWith('ms-windows-store:') ||
+        lower.startsWith('intent:') ||
+        lower.startsWith('market:')
+    )
+}
+
+export function extractHttpUrlFromAppUri(url?: string): string | null {
+    if (!url || typeof url !== 'string') return null
+    const trimmed = url.trim()
+    if (trimmed.toLowerCase().startsWith('microsoft-edge:')) {
+        const afterScheme = trimmed.replace(/^microsoft-edge:(?:\/\/)?/i, '').trim()
+        if (afterScheme.toLowerCase().startsWith('http://') || afterScheme.toLowerCase().startsWith('https://')) {
+            return afterScheme
+        }
+        const queryIdx = trimmed.indexOf('?')
+        if (queryIdx !== -1) {
+            try {
+                const searchParams = new URLSearchParams(trimmed.slice(queryIdx + 1))
+                const urlParam = searchParams.get('url')
+                if (urlParam && (urlParam.startsWith('http://') || urlParam.startsWith('https://'))) {
+                    return urlParam
+                }
+            } catch {}
+        }
+    }
+    return null
+}
+
 export async function interruptibleWait(ms: number, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) return
     return new Promise(resolve => {
@@ -195,16 +228,23 @@ export async function runGuardedOperation<T>(options: RunGuardedOperationOptions
         const isTimeout = errMessage.includes('STAGE_TIMEOUT') || signal.aborted
         const isPageClosed = (page && typeof page.isClosed === 'function' && page.isClosed()) ||
             errMessage.includes('Target page, context or browser has been closed')
-        const isNavError = Boolean(mainDocumentFailureCode) ||
+        const isAppUriError = isLocalAppUri(errMessage) ||
+            errMessage.includes('microsoft-edge:') ||
+            errMessage.includes('ms-windows-store:') ||
+            errMessage.includes('intent:') ||
+            errMessage.includes('market:')
+        const isNavError = !isAppUriError && (Boolean(mainDocumentFailureCode) ||
             errMessage.includes('net::') ||
             errMessage.includes('NS_ERROR') ||
-            errMessage.includes('Navigation failed')
+            errMessage.includes('Navigation failed'))
 
         let status: BrowserOperationStatus = 'failed'
         if (isTimeout) {
             status = 'timed-out'
         } else if (isPageClosed) {
             status = 'page-closed'
+        } else if (isAppUriError) {
+            status = 'completed'
         } else if (isNavError) {
             status = 'navigation-error'
         }

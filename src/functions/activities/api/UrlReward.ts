@@ -5,7 +5,9 @@ import { Database } from '../../../util/Database'
 import {
     createManagedPage,
     runGuardedOperation,
-    performBoundedSafeScroll
+    performBoundedSafeScroll,
+    isLocalAppUri,
+    extractHttpUrlFromAppUri
 } from '../../../runtime/BrowserOperationGuard'
 
 export class UrlReward extends Workers {
@@ -72,6 +74,7 @@ export class UrlReward extends Workers {
 
         try {
             let targetUrl = (promotion.destinationUrl || '').trim()
+            let dashboardTileClicked = false
 
             // 1. Coba cari kartu di dashboard untuk mengambil URL terlengkap & trigger event klik
             try {
@@ -193,6 +196,8 @@ export class UrlReward extends Workers {
                             })
                             .catch(() => {})
 
+                        dashboardTileClicked = true
+
                         this.bot.logger.info(
                             this.bot.isMobile,
                             'URL-REWARD',
@@ -208,6 +213,24 @@ export class UrlReward extends Workers {
             if (!targetUrl || targetUrl === '' || targetUrl.toLowerCase().endsWith('rewards.bing.com/dashboard')) {
                 targetUrl =
                     promotion.destinationUrl || `https://www.bing.com/search?q=${encodeURIComponent(promotion.title)}`
+            }
+
+            // Sanitasi skema URI lokal aplikasi (microsoft-edge://, ms-windows-store://, intent://, market://)
+            const extractedHttp = extractHttpUrlFromAppUri(targetUrl)
+            if (extractedHttp) {
+                targetUrl = extractedHttp
+            }
+
+            if (isLocalAppUri(targetUrl)) {
+                this.bot.logger.warn(
+                    this.bot.isMobile,
+                    'URL-GUARD',
+                    `⚠️ [URL-GUARD] Melewati navigasi skema URI lokal aplikasi: ${targetUrl}`
+                )
+                if (dashboardTileClicked) {
+                    await this.bot.utils.wait(2500)
+                }
+                return
             }
 
             if (remainingMs() <= 0) {
@@ -235,6 +258,7 @@ export class UrlReward extends Workers {
                     logger: this.bot.logger,
                     isMobile: this.bot.isMobile,
                     operation: async (_signal, timeout) => {
+                        if (isLocalAppUri(targetUrl)) return
                         await tab.goto(targetUrl, {
                             waitUntil: 'domcontentloaded',
                             timeout: Math.max(1000, timeout),

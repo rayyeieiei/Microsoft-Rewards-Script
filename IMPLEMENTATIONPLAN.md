@@ -731,6 +731,66 @@ Pada alur penarikan access token mobile (`GET-APP-TOKEN` via `MobileAccessLogin`
 2. **Kompilasi TypeScript (`npm run build`)**: **Exit Code 0** (seluruh berkas terkompilasi bersih).
 3. **Full Test Suite (`npm test`)**: **Semua modul pengujian PASSED (100%)**.
 
+---
+
+## Bab 24: Protokol URI Filter, Punch Card Envelope Selector & MSN Feed Resilience
+
+### 24.1 Latar Belakang & Akar Masalah Lapangan
+1. **Navigasi Skema Aplikasi Lokal (`microsoft-edge://`, `ms-windows-store://`, `intent://`, `market://`)**:
+   - Aktivitas promosi tertentu di dashboard Microsoft Rewards mengarahkan URL ke skema tautan protokol lokal aplikasi (`microsoft-edge://...`, `ms-windows-store:...`).
+   - Saat Playwright mengeksekusi `page.goto(activityUrl)`, Chromium menolak navigasi dengan error fatal `net::ERR_ABORTED`, yang memicu kegagalan status `navigation-error` dan memutus alur aktivitas.
+2. **Selector Tombol Langkah Aktif Punch Card Amplop**:
+   - Pada halaman amplop `rewards.bing.com/dashboard/envelope?id=...`, langkah aktif sering tidak terdeteksi oleh selector statis lama (`Active step button not found via standard selectors, delegating to UrlReward...`). Akibatnya verifikasi amplop di server bernilai 0 dan poin tidak bertambah.
+3. **Panggilan MSN News Feed Menghasilkan HTTP 400**:
+   - `fetchValidMsnArticles` menyusun parameter pasar sebagai `en-${market}` (misal: `en-id`), yang ditolak oleh API MSN dengan status `400 Requested market('en-id') are not supported`.
+   - Kegagalan ini memicu log error berulang dan ketergantungan pada ID acak alih-alih artikel riil.
+
+---
+
+### 24.2 Arsitektur & Spesifikasi Solusi
+
+1. **Sanitasi URL & Filter Protokol Non-HTTP (`src/runtime/BrowserOperationGuard.ts` & `src/functions/activities/api/UrlReward.ts`)**:
+   - Mengimplementasikan `isLocalAppUri(url)` dan `extractHttpUrlFromAppUri(url)` untuk mendeteksi serta mengekstrak URL http(s) murni dari skema `microsoft-edge:`.
+   - Di `UrlReward.ts`:
+     - Memastikan tile dashboard diklik secara langsung melalui DOM (`element.click()`).
+     - Jika target URL merupakan skema URI lokal aplikasi:
+       - **JANGAN** panggil `page.goto()`.
+       - Catat log peringatan resmi:
+         `⚠️ [URL-GUARD] Melewati navigasi skema URI lokal aplikasi: ${activityUrl}`
+       - Selesaikan alur aktivitas secara elegan tanpa mencatat status `navigation-error`.
+     - Di `BrowserOperationGuard.ts`: Memetakan error skema aplikasi lokal ke status `completed` agar sirkuit pemutus tidak terpicu secara salah.
+
+2. **Pembaruan Selector Amplop Punch Card Bulanan (`src/functions/Workers.ts`)**:
+   - Menambahkan selector tombol interaktif langkah aktif yang fleksibel:
+     - `a[href*="/search?"][target="_blank"]`
+     - `button[data-bi-name*="punchcard" i]`
+     - `.c-call-to-action:visible`
+     - `[class*="punchcard"] [class*="step"]:not([class*="complete"]) a`
+     - `a:has-text("Explore"), a:has-text("Start"), a:has-text("Mulai"), a:has-text("Jelajahi")`
+     - `button:has-text("Explore"), button:has-text("Start"), button:has-text("Mulai"), button:has-text("Jelajahi")`
+   - Menambahkan pre-wait `page.waitForSelector(flexibleWaitSelector, { state: 'visible', timeout: 4000 })` sebelum scanning tombol.
+   - Di `clickAndHandleTab`, mengombinasikan `page.waitForEvent('popup')`, `context.waitForEvent('page')`, dan `page.waitForNavigation()` melalui `Promise.all` dan `Promise.race` untuk menangkap telemetri klik amplop secara penuh sebelum tab ditutup.
+
+3. **Penyelarasan Parameter Endpoint MSN Feed (`src/functions/activities/app/ReadToEarn.ts`)**:
+   - Menyediakan `resolveMsnMarket(geo)` yang memetakan kode wilayah ke pasar resmi Microsoft (`id` -> `id-id`, `us` -> `en-us`, `gb` -> `en-gb`, dsb.).
+   - Menyusun query string selaras standar DAPI Android Bing App:
+     `apikey`, `market`, `locale`, `cvid`, `feedType=news`, `ocid=msedgntp`.
+   - Menangani respons 400 tanpa memicu error berulang di log (level `debug`).
+   - Menyediakan `FALLBACK_ARTICLE_POOL` berformat 8 karakter `AAxxxxxx` yang bertransisi secara instan jika jaringan MSN tidak dapat diakses.
+
+---
+
+### 24.3 Hasil Verifikasi & Uji Kualitas
+1. **Chapter 24 Test Suite (`test/chapter24ProtocolFilterAndFeedResilience.test.ts`)**:
+   - ✅ **Test 1**: Filter skema aplikasi lokal (`microsoft-edge:`, `ms-windows-store:`, `intent:`, `market:`) dan ekstraksi URL HTTP berjalan 100% akurat.
+   - ✅ **Test 2**: `runGuardedOperation` memulihkan error skema aplikasi tanpa mencatat status `navigation-error`.
+   - ✅ **Test 3**: Pemetaan pasar MSN Feed selaras di seluruh pasar utama dunia.
+   - ✅ **Test 4**: Transisi instan ke `FALLBACK_ARTICLE_POOL` saat terjadi HTTP 400.
+   - ✅ **Test 5**: Selector fleksibel amplop punch card berhasil mengenali seluruh pola DOM.
+2. **Kompilasi TypeScript (`npm run build`)**: **Exit Code 0**.
+3. **Full Test Suite (`npm test`)**: **100% Passed (Seluruh suite pengujian hijau)**.
+
+
 
 
 

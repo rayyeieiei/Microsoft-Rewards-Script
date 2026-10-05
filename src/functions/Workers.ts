@@ -2188,24 +2188,65 @@ export class Workers {
                 await this.bot.utils.wait(2000)
             }
 
-            // Langkah B: Cari tombol/link untuk step yang sedang aktif
+            // Langkah B: Tunggu kemunculan salah satu elemen interaktif (timeout 4000ms)
+            const flexibleWaitSelector = [
+                `[data-offer-id="${activeChild.offerId}"]`,
+                `a[href*="${activeChild.offerId}"]`,
+                'a[href*="/search?"][target="_blank"]',
+                'button[data-bi-name*="punchcard" i]',
+                '.c-call-to-action',
+                '[class*="punchcard"] [class*="step"]:not([class*="complete"]) a',
+                'a:has-text("Explore")',
+                'a:has-text("Start")',
+                'a:has-text("Mulai")',
+                'a:has-text("Jelajahi")',
+                'button:has-text("Explore")',
+                'button:has-text("Start")',
+                'button:has-text("Mulai")',
+                'button:has-text("Jelajahi")'
+            ].join(', ')
+
+            if (typeof page.waitForSelector === 'function') {
+                await page.waitForSelector(flexibleWaitSelector, { state: 'visible', timeout: 4000 }).catch(() => null)
+            }
+
+            // Cari tombol/link untuk step yang sedang aktif
             const selectors = [
                 `[data-offer-id="${activeChild.offerId}"]`,
                 `a[href*="${activeChild.offerId}"]`,
-                `a:has-text("Explore"):visible`,
+                'a[href*="/search?"][target="_blank"]',
+                'button[data-bi-name*="punchcard" i]',
+                '.c-call-to-action:visible',
+                '[class*="punchcard"] [class*="step"]:not([class*="complete"]) a',
+                'a:has-text("Explore"):visible',
+                'a:has-text("Start"):visible',
+                'a:has-text("Mulai"):visible',
+                'a:has-text("Jelajahi"):visible',
+                'button:has-text("Explore"):visible',
+                'button:has-text("Start"):visible',
+                'button:has-text("Mulai"):visible',
+                'button:has-text("Jelajahi"):visible',
                 `a:has-text("Shop now"):visible`,
                 `a:has-text("Get started"):visible`,
                 `a:has-text("Check it out"):visible`,
                 `.punchcard-step a:visible`,
                 `a.c-call-to-action:visible`,
-                `button:has-text("Explore"):visible`,
                 `button:has-text("Shop now"):visible`,
                 `button:has-text("Get started"):visible`,
                 `button:has-text("Check it out"):visible`,
-                `a:has-text("Explore")`,
+                'a:has-text("Explore")',
+                'a:has-text("Start")',
+                'a:has-text("Mulai")',
+                'a:has-text("Jelajahi")',
+                'button:has-text("Explore")',
+                'button:has-text("Start")',
+                'button:has-text("Mulai")',
+                'button:has-text("Jelajahi")',
                 `a:has-text("Shop now")`,
                 `a:has-text("Get started")`,
                 `a:has-text("Check it out")`,
+                'a[href*="/search?"]',
+                `[class*="punchcard"] a`,
                 `.punchcard-step a`,
                 `a.c-call-to-action`
             ]
@@ -2243,16 +2284,33 @@ export class Workers {
             const clickAndHandleTab = async (btn: any): Promise<boolean> => {
                 let newTab: Page | null = null
                 try {
-                    const waitPopup =
-                        page.context && typeof page.context().waitForEvent === 'function'
-                            ? page.context().waitForEvent('page', { timeout: 15000 }).catch(() => null)
+                    const popupPromises: Promise<any>[] = []
+                    if (page.context && typeof page.context === 'function' && typeof page.context().waitForEvent === 'function') {
+                        popupPromises.push(page.context().waitForEvent('page', { timeout: 15000 }).catch(() => null))
+                    }
+                    if (typeof page.waitForEvent === 'function') {
+                        popupPromises.push(page.waitForEvent('popup', { timeout: 15000 }).catch(() => null))
+                    }
+                    const waitPopup = popupPromises.length > 0 ? Promise.race(popupPromises) : Promise.resolve(null)
+
+                    const waitNav =
+                        typeof page.waitForNavigation === 'function'
+                            ? page.waitForNavigation({ timeout: 5000 }).catch(() => null)
                             : Promise.resolve(null)
 
-                    const clickAction = btn.click({ timeout: 5000 }).catch(async () => {
-                        await btn.evaluate((el: HTMLElement) => el.click()).catch(() => {})
-                    })
+                    const clickAction = (async () => {
+                        try {
+                            await btn.click({ timeout: 4000 })
+                        } catch {
+                            await btn.evaluate((el: HTMLElement) => el.click()).catch(() => {})
+                        }
+                    })()
 
-                    const [popup] = await Promise.all([waitPopup, clickAction])
+                    const [popup] = await Promise.all([
+                        waitPopup,
+                        waitNav,
+                        clickAction
+                    ])
                     newTab = popup as Page | null
                 } catch {}
 
