@@ -679,6 +679,59 @@ Apakah kartu sudah komplit (beforeSnapshot.parentComplete)? ──► Ya ──�
 2. **Kompilasi TypeScript (`npm run build`)**: **Exit Code 0** (seluruh berkas terkompilasi bersih ke `dist/`).
 3. **Full Test Suite (`npm test`)**: **107/107 Test Suites PASSED (100%)** tanpa regresi.
 
+---
+
+## Bab 23: Auto-Bypass Passkey/FIDO Enrollment Interrupt pada OAuth Mobile Token (Login-App)
+
+### 23.1 Latar Belakang & Akar Masalah Lapangan
+Pada alur penarikan access token mobile (`GET-APP-TOKEN` via `MobileAccessLogin`), akun dialihkan ke halaman pendaftaran Passkey/FIDO oleh Microsoft:
+- `https://login.microsoft.com/consumers/fido/create`
+- `https://account.live.com/interrupt/passkey/enroll`
+- atau URL interupsi `/interrupt/passkey` lainnya.
+
+**Dampak Lapangan:**
+1. Karena `MobileAccessLogin` sebelumnya hanya mencari selector modal in-page lama (`data-testid="registrationImg"` / `data-testid="biometricVideo"`), sistem gagal mengenali interupsi navigasi berbasis URL penuh.
+2. Bot tertahan dalam loop polling selama 181 detik (batas waktu lama `maxTimeout = 180_000ms`), membuang waktu dan akhirnya timeout.
+3. OAuth authorization code gagal ditangkap, access token DAPI tidak terbentuk, dan modul-modul mobile berbasis DAPI (`READ-TO-EARN`, `DAILY-CHECK-IN`, serta pembacaan dashboard aplikasi) dilewati (*skipped*).
+
+---
+
+### 23.2 Arsitektur & Spesifikasi Solusi
+
+1. **Deteksi & Auto-Click Halaman Interupsi Passkey/FIDO (`src/browser/auth/methods/MobileAccessLogin.ts`)**:
+   - Menambahkan method `isPasskeyInterruptUrl(urlStr: string): boolean` yang memeriksa substring:
+     - `/interrupt/passkey`
+     - `/fido/create`
+     - `/passkey/enroll`
+   - Mendefinisikan `passkeyDismissSelectors` yang mencakup seluruh variasi tombol pembatalan multibahasa:
+     - `button:has-text("Not now")`, `button:has-text("Lain kali")`, `button:has-text("Cancel")`, `button:has-text("Batal")`, `#idBtn_Back`, `a:has-text("Skip")`, `[aria-label*="cancel" i]`, `#iCancel`, `#iSkip`, `button:has-text("Skip for now")`, `button[data-testid="secondaryButton"]`.
+   - Menggunakan `waitForSelector` dengan timeout cepat 3000ms untuk menangkap tombol penolakan begitu elemen ter-render di DOM.
+   - Mengklik tombol secara instan (`await dismissBtn.click()`), menunggu pemuatan dokumen (`domcontentloaded`), dan mencatat log resmi:
+     `🛡️ [PASSKEY-BYPASS] Mendeteksi interupsi pendaftaran Passkey/FIDO. Berhasil mengeklik 'Not now'/'Cancel'.`
+   - Membiarkan alur navigasi browser melanjutkan pengalihan otomatis ke `oauth20_desktop.srf?code=...`.
+
+2. **Pemangkasan Batas Waktu OAuth Polling**:
+   - Memangkas `maxTimeout` dari 180 detik (180.000ms) menjadi **45 detik (45.000ms)**.
+   - Mencegah bot tertahan terlalu lama bila terjadi gangguan jaringan atau anomali endpoint Microsoft.
+
+3. **Sinkronisasi Mitigasi pada Alur Login Utama (`src/browser/auth/Login.ts`)**:
+   - Memperluas deteksi `PASSKEY_ERROR` pada `detectCurrentState` agar mengenali domain `login.microsoft.com` dan URL `/fido/create` serta `/passkey/enroll`.
+   - Melengkapi selector pembatalan passkey di `Login.ts` dengan tombol `Lain kali`, `Batal`, `Skip`, `#idBtn_Back`, dan `[aria-label*="cancel" i]`.
+
+---
+
+### 23.3 Hasil Verifikasi & Uji Kualitas
+1. **Chapter 23 Test Suite (`test/chapter23PasskeyBypass.test.ts`)**:
+   - ✅ **Test 1**: `maxTimeout` terverifikasi 45.000ms (45 detik).
+   - ✅ **Test 2**: Klasifikasi URL `/interrupt/passkey`, `/fido/create`, dan `/passkey/enroll` 100% akurat.
+   - ✅ **Test 3**: Seluruh selector pembatalan multibahasa terdaftar lengkap.
+   - ✅ **Test 4**: Interaksi Playwright headless live berhasil mendeteksi dan mengeklik tombol penolakan pada seluruh skenario interrupt.
+   - ✅ **Test 5**: Fallback penanganan modal passkey in-page lama tetap berfungsi normal.
+   - ✅ **Test 6**: Halaman normal diabaikan secara bersih tanpa logging palsu.
+2. **Kompilasi TypeScript (`npm run build`)**: **Exit Code 0** (seluruh berkas terkompilasi bersih).
+3. **Full Test Suite (`npm test`)**: **Semua modul pengujian PASSED (100%)**.
+
+
 
 
 

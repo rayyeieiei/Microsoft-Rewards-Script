@@ -12,7 +12,7 @@ export class MobileAccessLogin {
     private redirectUrl = 'https://login.live.com/oauth20_desktop.srf'
     private tokenUrl = 'https://login.microsoftonline.com/consumers/oauth2/v2.0/token'
     private scope = 'service::prod.rewardsplatform.microsoft.com::MBI_SSL'
-    private maxTimeout = 180_000 // 3min
+    public readonly maxTimeout = 45_000 // 45s (previously 180s)
 
     // Selectors for handling Passkey prompt during OAuth
     private readonly selectors = {
@@ -21,10 +21,35 @@ export class MobileAccessLogin {
         passKeyVideo: '[data-testid="biometricVideo"]'
     } as const
 
+    // Selectors for dismissing Passkey/FIDO enrollment interrupts
+    public readonly passkeyDismissSelectors = [
+        'button:has-text("Not now")',
+        'button:has-text("Lain kali")',
+        'button:has-text("Cancel")',
+        'button:has-text("Batal")',
+        '#idBtn_Back',
+        'a:has-text("Skip")',
+        '[aria-label*="cancel" i]',
+        '#iCancel',
+        '#iSkip',
+        'button:has-text("Skip for now")',
+        'button[data-testid="secondaryButton"]'
+    ].join(', ')
+
     constructor(
         private bot: MicrosoftRewardsBot,
         private page: Page
     ) {}
+
+    public isPasskeyInterruptUrl(urlStr: string): boolean {
+        if (!urlStr) return false
+        const lower = urlStr.toLowerCase()
+        return (
+            lower.includes('/interrupt/passkey') ||
+            lower.includes('/fido/create') ||
+            lower.includes('/passkey/enroll')
+        )
+    }
 
     private async checkSelector(targetPage: Page, selector: string): Promise<boolean> {
         return targetPage
@@ -33,9 +58,29 @@ export class MobileAccessLogin {
             .catch(() => false)
     }
 
-    private async handlePasskeyPrompt(targetPage: Page): Promise<void> {
+    public async handlePasskeyPrompt(targetPage: Page, currentUrl?: string): Promise<void> {
         try {
-            // Handle Passkey prompt - click secondary button to skip
+            const urlToCheck = currentUrl || targetPage.url() || ''
+
+            // 1. Deteksi interupsi berbasis URL (/interrupt/passkey, /fido/create, /passkey/enroll)
+            if (this.isPasskeyInterruptUrl(urlToCheck)) {
+                const dismissBtn = await targetPage
+                    .waitForSelector(this.passkeyDismissSelectors, { state: 'visible', timeout: 3000 })
+                    .catch(() => null)
+
+                if (dismissBtn) {
+                    await dismissBtn.click().catch(() => {})
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'PASSKEY-BYPASS',
+                        `🛡️ [PASSKEY-BYPASS] Mendeteksi interupsi pendaftaran Passkey/FIDO. Berhasil mengeklik 'Not now'/'Cancel'.`
+                    )
+                    await targetPage.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {})
+                    return
+                }
+            }
+
+            // 2. Fallback deteksi modal prompt passkey in-page
             const hasPasskeyError = await this.checkSelector(targetPage, this.selectors.passKeyError)
             const hasPasskeyVideo = await this.checkSelector(targetPage, this.selectors.passKeyVideo)
             if (hasPasskeyError || hasPasskeyVideo) {
@@ -129,13 +174,14 @@ export class MobileAccessLogin {
                         lastUrl = currentUrl
                     }
 
-                    // Handle Passkey prompt if it appears
-                    await this.handlePasskeyPrompt(oauthPage)
+                    // Handle Passkey prompt or interrupt if it appears
+                    await this.handlePasskeyPrompt(oauthPage, currentUrl)
                 } catch (err) {
                     if (currentUrl !== lastUrl) {
                         this.bot.logger.debug(this.bot.isMobile, 'LOGIN-APP', 'Invalid URL while polling')
                         lastUrl = currentUrl
                     }
+                    await this.handlePasskeyPrompt(oauthPage, currentUrl).catch(() => {})
                 }
 
                 await this.bot.utils.wait(1000)

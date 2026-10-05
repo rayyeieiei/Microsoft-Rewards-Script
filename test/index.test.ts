@@ -15,6 +15,7 @@ import { runSessionPersistenceTests } from './sessionPersistence.test'
 import { runAntiAbuseRemediationTests } from './antiAbuseRemediation.test'
 import { runChapter21PunchCardAutoSolverTests } from './chapter21PunchCardAutoSolver.test'
 import { runChapter22SearchAbortLoopEliminationTests } from './chapter22SearchAbortLoopElimination.test'
+import { runChapter23PasskeyBypassTests } from './chapter23PasskeyBypass.test'
 
 async function runAll() {
     console.log('🧪 Starting Full Test Suite Execution...\n')
@@ -68,6 +69,9 @@ async function runAll() {
     console.log('')
 
     await runChapter22SearchAbortLoopEliminationTests()
+    console.log('')
+
+    await runChapter23PasskeyBypassTests()
     console.log('')
 
     console.log('🎉 ALL TESTS IN SUITE PASSED SUCCESSFULLY!')

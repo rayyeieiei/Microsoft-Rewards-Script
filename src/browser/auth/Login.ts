@@ -216,7 +216,11 @@ export class Login {
 
         if (url.hostname === 'chromewebdata') return 'CHROMEWEBDATA_ERROR'
 
-        if (url.hostname === 'account.live.com' && url.pathname.includes('/interrupt/passkey')) {
+        const urlPath = url.pathname.toLowerCase()
+        if (
+            (url.hostname === 'account.live.com' || url.hostname === 'login.microsoft.com' || url.hostname === 'login.live.com') &&
+            (urlPath.includes('/interrupt/passkey') || urlPath.includes('/fido/create') || urlPath.includes('/passkey/enroll'))
+        ) {
             return 'PASSKEY_ERROR'
         }
 
@@ -298,9 +302,10 @@ export class Login {
                 this.bot.logger.warn(this.bot.isMobile, 'LOGIN-PASSKEY', 'Passkey enrollment interrupt detected! Attempting to bypass...', 'yellow')
 
                 // Cek apakah ada tombol skip/cancel/next di halaman
-                const skipBtn = page.locator("#iCancel, #iSkip, #idBtn_Back, #idSIButton9, button:has-text('Skip for now'), button:has-text('Not now'), button:has-text('Cancel'), button:has-text('Next'), a#iCancel").first()
+                const skipBtn = page.locator("#iCancel, #iSkip, #idBtn_Back, #idSIButton9, button:has-text('Skip for now'), button:has-text('Not now'), button:has-text('Lain kali'), button:has-text('Cancel'), button:has-text('Batal'), button:has-text('Next'), a#iCancel, a:has-text('Skip'), [aria-label*='cancel' i]").first()
                 if (await skipBtn.count() > 0 && await skipBtn.isVisible()) {
                     await skipBtn.click().catch(() => {})
+                    this.bot.logger.info(this.bot.isMobile, 'PASSKEY-BYPASS', `🛡️ [PASSKEY-BYPASS] Mendeteksi interupsi pendaftaran Passkey/FIDO. Berhasil mengeklik 'Not now'/'Cancel'.`)
                     await this.bot.utils.wait(2000)
                     return true
                 }
