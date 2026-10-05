@@ -2188,14 +2188,29 @@ export class Workers {
                 await this.bot.utils.wait(2000)
             }
 
-            // Langkah B: Tunggu kemunculan salah satu elemen interaktif (timeout 4000ms)
+            // Langkah B: Tunggu kemunculan salah satu elemen interaktif (timeout 7000ms)
+            const cleanTitle = (activeChild.title || '').replace(/[^\w\s]/gi, ' ').trim()
+            const titleSnippet = cleanTitle.split(/\s+/).slice(0, 4).join(' ')
+            const titleSelectors = titleSnippet.length >= 3 ? [
+                `a:has-text("${titleSnippet}")`,
+                `button:has-text("${titleSnippet}")`,
+                `div:has-text("${titleSnippet}") a`,
+                `div:has-text("${titleSnippet}") button`,
+                `[aria-label*="${titleSnippet}" i]`,
+                `[title*="${titleSnippet}" i]`
+            ] : []
+
             const flexibleWaitSelector = [
                 `[data-offer-id="${activeChild.offerId}"]`,
                 `a[href*="${activeChild.offerId}"]`,
+                ...titleSelectors,
                 'a[href*="/search?"][target="_blank"]',
                 'button[data-bi-name*="punchcard" i]',
                 '.c-call-to-action',
                 '[class*="punchcard"] [class*="step"]:not([class*="complete"]) a',
+                '[class*="step"]:not([class*="complete"]) a',
+                '[class*="step"]:not([class*="complete"]) button',
+                '[class*="card"]:not([class*="complete"]) a',
                 'a:has-text("Explore")',
                 'a:has-text("Start")',
                 'a:has-text("Mulai")',
@@ -2207,17 +2222,28 @@ export class Workers {
             ].join(', ')
 
             if (typeof page.waitForSelector === 'function') {
-                await page.waitForSelector(flexibleWaitSelector, { state: 'visible', timeout: 4000 }).catch(() => null)
+                await page.waitForSelector(flexibleWaitSelector, { state: 'visible', timeout: 7000 }).catch(() => null)
             }
 
             // Cari tombol/link untuk step yang sedang aktif
             const selectors = [
                 `[data-offer-id="${activeChild.offerId}"]`,
                 `a[href*="${activeChild.offerId}"]`,
+                ...(titleSnippet.length >= 3 ? [
+                    `a:has-text("${titleSnippet}"):visible`,
+                    `button:has-text("${titleSnippet}"):visible`,
+                    `div:has-text("${titleSnippet}") a:visible`,
+                    `div:has-text("${titleSnippet}") button:visible`,
+                    `[aria-label*="${titleSnippet}" i]:visible`,
+                    `[title*="${titleSnippet}" i]:visible`
+                ] : []),
                 'a[href*="/search?"][target="_blank"]',
                 'button[data-bi-name*="punchcard" i]',
                 '.c-call-to-action:visible',
                 '[class*="punchcard"] [class*="step"]:not([class*="complete"]) a',
+                '[class*="step"]:not([class*="complete"]) a:visible',
+                '[class*="step"]:not([class*="complete"]) button:visible',
+                '[class*="card"]:not([class*="complete"]) a:visible',
                 'a:has-text("Explore"):visible',
                 'a:has-text("Start"):visible',
                 'a:has-text("Mulai"):visible',
@@ -2234,6 +2260,7 @@ export class Workers {
                 `button:has-text("Shop now"):visible`,
                 `button:has-text("Get started"):visible`,
                 `button:has-text("Check it out"):visible`,
+                ...titleSelectors,
                 'a:has-text("Explore")',
                 'a:has-text("Start")',
                 'a:has-text("Mulai")',

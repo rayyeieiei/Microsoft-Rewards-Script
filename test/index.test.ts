@@ -17,6 +17,7 @@ import { runChapter21PunchCardAutoSolverTests } from './chapter21PunchCardAutoSo
 import { runChapter22SearchAbortLoopEliminationTests } from './chapter22SearchAbortLoopElimination.test'
 import { runChapter23PasskeyBypassTests } from './chapter23PasskeyBypass.test'
 import { runChapter24ProtocolFilterAndFeedResilienceTests } from './chapter24ProtocolFilterAndFeedResilience.test'
+import { runChapter25OAuthConsentAndBonusClaimTests } from './chapter25OAuthConsentAndBonusClaimResilience.test'
 
 async function runAll() {
     console.log('🧪 Starting Full Test Suite Execution...\n')
@@ -76,6 +77,9 @@ async function runAll() {
     console.log('')
 
     await runChapter24ProtocolFilterAndFeedResilienceTests()
+    console.log('')
+
+    await runChapter25OAuthConsentAndBonusClaimTests()
     console.log('')
 
     console.log('🎉 ALL TESTS IN SUITE PASSED SUCCESSFULLY!')

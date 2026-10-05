@@ -790,6 +790,79 @@ Pada alur penarikan access token mobile (`GET-APP-TOKEN` via `MobileAccessLogin`
 2. **Kompilasi TypeScript (`npm run build`)**: **Exit Code 0**.
 3. **Full Test Suite (`npm test`)**: **100% Passed (Seluruh suite pengujian hijau)**.
 
+---
+
+## Bab 25: OAuth Auto-Consent Bypass, ClaimBonusPoints Guard & Punch Card Step Selector Hardening
+
+### 25.1 Akar Masalah Forensik Lapangan (Nexus C2 Runtime Stream 05/10/2026)
+
+1. **OAuth Consent Stall pada `oauth20_authorize.srf` (`michaeljunioor67@outlook.com`)**:
+   - Log produksi mencatat:
+     - `[PASSKEY-BYPASS] Mendeteksi interupsi pendaftaran Passkey/FIDO. Berhasil mengeklik 'Not now'/'Cancel'.`
+     - `[LOGIN-APP] OAuth poll URL changed → https://login.live.com/oauth20_authorize.srf`
+     - `[WARN] [LOGIN-APP] Timed out waiting for OAuth code after 46s` (Final page URL: `oauth20_authorize.srf`).
+   - Setelah interupsi passkey dibatalkan, alur otentikasi kembali ke halaman otorisasi OAuth yang menampilkan dialog konfirmasi hak akses (*"Let this app access your info? / Yes / Accept / Continue"*). Karena script hanya memantau perubahan URL tanpa mengeklik tombol persetujuan, halaman tertahan hingga batas waktu timeout 45 detik.
+
+2. **HTTP 400 Bad Request pada `doClaimBonusPoints`**:
+   - Log produksi mencatat:
+     `[ERROR] MOBILE [CLAIM-BONUS-POINTS] Error in doClaimBonusPoints | message=Request failed with status code 400`
+   - Pada sesi dashboard modern (`modern-envelope`), token `requestToken` (`__RequestVerificationToken`) sering kali bernilai kosong. Script sebelumnya hanya mengecek token jika `rewardsVersion === 'legacy'`, sehingga pada sesi modern tetap mengirimkan payload dengan token kosong yang memicu penolakan HTTP 400. Selain itu, error dicatat sebagai level fatal (`error`), padahal klaim bonus ini bersifat opsional/best-effort.
+
+3. **Resilience Selector Amplop Punch Card Bulanan**:
+   - Log mencatat `[ENVELOPE] Active step button not found via standard selectors, delegating to UrlReward...`.
+   - Koneksi mobile/ADB tethering memerlukan jendela waktu hidrasi DOM yang lebih aman (7000ms), serta kemampuan pencocokan selector berbasis teks judul aktivitas (`titleSnippet`) dan kontainer kartu step yang belum selesai (`[class*="step"]:not([class*="complete"])`).
+
+---
+
+### 25.2 Arsitektur & Spesifikasi Solusi
+
+1. **Auto-Consent & Confirmation Prompt Handler (`src/browser/auth/methods/MobileAccessLogin.ts`)**:
+   - Menambahkan deteksi URL otorisasi/persetujuan melalui `isOAuthConsentUrl(url)`:
+     Mencakup `oauth20_authorize`, `ppsecure/post.srf`, `/consent`, `/kmsi`, dan `login.live.com`.
+   - Mendefinisikan `oauthConsentSelectors`:
+     `#idSIButton9`, `input[type="submit"]#idSIButton9`, `button#idSIButton9`, `input[type="submit"][value="Yes"]`, `input[type="submit"][value="Accept"]`, `input[type="submit"][value="Continue"]`, `button:has-text("Yes")`, `button:has-text("Accept")`, `button:has-text("Continue")`, `button:has-text("Allow")`, `button:has-text("Setuju")`, `button:has-text("Lanjutkan")`, `button:has-text("Ya")`.
+   - **Guard Keamanan Kredensial**:
+     Sebelum mengeklik submit, memeriksa apakah elemen input kredensial (`input[type="email"]`, `input[name="loginfmt"]`, `input[type="password"]`, `input[name="passwd"]`) sedang aktif/terlihat di DOM. Jika ada input kredensial, tombol submit **TIDAK** diklik untuk mencegah submit kredensial kosong.
+   - Mengintegrasikan pemanggilan `await this.handleOAuthConsent(oauthPage, currentUrl)` ke dalam loop polling OAuth utama.
+
+2. **Pre-flight Guard & Graceful Error Catch (`src/functions/activities/api/ClaimBonusPoints.ts`)**:
+   - Mengubah guard pre-flight token menjadi tanpa syarat:
+     ```typescript
+     if (!this.bot.requestToken) {
+         this.bot.logger.debug(
+             this.bot.isMobile,
+             'CLAIM-BONUS-POINTS',
+             'Skipping: Request token not available (__RequestVerificationToken missing)'
+         )
+         return
+     }
+     ```
+   - Mengubah penanganan error di blok `catch`:
+     Mengganti `this.bot.logger.error` menjadi `this.bot.logger.warn` (`ClaimBonusPoints endpoint unavailable or declined`) agar kegagalan klaim bonus opsional tidak memicu alarm palsu pada dashboard/Discord.
+
+3. **Penyempurnaan Selector & Timeout Amplop Punch Card (`src/functions/Workers.ts`)**:
+   - Mengekstrak potongan teks judul task aktif (`titleSnippet = cleanTitle.split(/\s+/).slice(0, 4).join(' ')`).
+   - Menambahkan selector berbasis teks judul:
+     `a:has-text("${titleSnippet}")`, `button:has-text("${titleSnippet}")`, `div:has-text("${titleSnippet}") a`, `[aria-label*="${titleSnippet}" i]`.
+   - Menambahkan fallback ke kartu yang belum selesai:
+     `[class*="step"]:not([class*="complete"]) a`, `[class*="card"]:not([class*="complete"]) a`.
+   - Meningkatkan timeout `page.waitForSelector` menjadi 7000ms untuk mengakomodasi latensi hidrasi DOM pada koneksi seluler.
+
+---
+
+### 25.3 Hasil Verifikasi & Uji Kualitas
+
+1. **Chapter 25 Test Suite (`test/chapter25OAuthConsentAndBonusClaimResilience.test.ts`)**:
+   - ✅ **Test 1**: Deteksi URL consent/authorize akurat 100% pada semua variasi endpoint.
+   - ✅ **Test 2**: Selector consent mencakup seluruh ID resmi `#idSIButton9`, input submit, dan variasi multibahasa.
+   - ✅ **Test 3**: Uji interaksi headless DOM membuktikan penekanan otomatis tombol persetujuan saat dialog muncul.
+   - ✅ **Test 4**: Safeguard kredensial terbukti mencegah klik submit saat form password/email aktif.
+   - ✅ **Test 5**: `ClaimBonusPoints` melewati proses secara bersih dengan 0 network request saat `requestToken` kosong.
+   - ✅ **Test 6**: Penolakan status HTTP 400 ditangkap secara elegan sebagai peringatan tanpa error fatal.
+   - ✅ **Test 7**: Ekstraksi snippet judul punch card menghasilkan selector teks yang valid dan terformat baik.
+2. **Kompilasi TypeScript (`npm run build`)**: **Exit Code 0 (Zero Errors / Warnings)**.
+3. **Full Test Suite (`npm test`)**: **100% Passed (Semua 25 Bab Pengujian Lolos Sempurna)**.
+
 
 
 

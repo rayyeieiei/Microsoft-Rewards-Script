@@ -36,6 +36,26 @@ export class MobileAccessLogin {
         'button[data-testid="secondaryButton"]'
     ].join(', ')
 
+    // Selectors for confirming OAuth consent, permissions, or "Stay signed in" prompts
+    public readonly oauthConsentSelectors = [
+        '#idSIButton9',
+        'input[type="submit"]#idSIButton9',
+        'button#idSIButton9',
+        'input[type="submit"][value="Yes"]',
+        'input[type="submit"][value="Accept"]',
+        'input[type="submit"][value="Continue"]',
+        'input[type="submit"][value="Ya"]',
+        'input[type="submit"][value="Setuju"]',
+        'button:has-text("Yes")',
+        'button:has-text("Accept")',
+        'button:has-text("Continue")',
+        'button:has-text("Allow")',
+        'button:has-text("Setuju")',
+        'button:has-text("Lanjutkan")',
+        'button:has-text("Ya")',
+        'button[data-report-event="Signin_Submit"]'
+    ].join(', ')
+
     constructor(
         private bot: MicrosoftRewardsBot,
         private page: Page
@@ -48,6 +68,18 @@ export class MobileAccessLogin {
             lower.includes('/interrupt/passkey') ||
             lower.includes('/fido/create') ||
             lower.includes('/passkey/enroll')
+        )
+    }
+
+    public isOAuthConsentUrl(urlStr: string): boolean {
+        if (!urlStr) return false
+        const lower = urlStr.toLowerCase()
+        return (
+            lower.includes('oauth20_authorize') ||
+            lower.includes('ppsecure/post.srf') ||
+            lower.includes('/consent') ||
+            lower.includes('/kmsi') ||
+            lower.includes('login.live.com')
         )
     }
 
@@ -91,6 +123,46 @@ export class MobileAccessLogin {
         } catch {
             // Ignore errors in prompt handling
         }
+    }
+
+    public async handleOAuthConsent(targetPage: Page, currentUrl?: string): Promise<boolean> {
+        try {
+            const urlToCheck = currentUrl || targetPage.url() || ''
+            if (!this.isOAuthConsentUrl(urlToCheck)) {
+                return false
+            }
+
+            // Guard: Do not auto-submit if credentials input fields are active/visible
+            const hasCredentialInputs = await targetPage.evaluate(() => {
+                const emailInput = document.querySelector('input[type="email"], input[name="loginfmt"]') as HTMLElement | null
+                const passInput = document.querySelector('input[type="password"], input[name="passwd"]') as HTMLElement | null
+                const isEmailVis = emailInput && (emailInput.offsetWidth > 0 || emailInput.offsetHeight > 0)
+                const isPassVis = passInput && (passInput.offsetWidth > 0 || passInput.offsetHeight > 0)
+                return Boolean(isEmailVis || isPassVis)
+            }).catch(() => false)
+
+            if (hasCredentialInputs) {
+                return false
+            }
+
+            const consentBtn = await targetPage
+                .waitForSelector(this.oauthConsentSelectors, { state: 'visible', timeout: 1500 })
+                .catch(() => null)
+
+            if (consentBtn) {
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'LOGIN-APP',
+                    `🛡️ [OAUTH-CONSENT] Auto-confirming OAuth consent/continue prompt on ${urlToCheck}`
+                )
+                await consentBtn.click().catch(() => {})
+                await targetPage.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {})
+                return true
+            }
+        } catch {
+            // Ignore errors in consent handling
+        }
+        return false
     }
 
     async get(email: string): Promise<string> {
@@ -176,12 +248,16 @@ export class MobileAccessLogin {
 
                     // Handle Passkey prompt or interrupt if it appears
                     await this.handlePasskeyPrompt(oauthPage, currentUrl)
+
+                    // Handle OAuth consent prompt if page is waiting on authorize/consent
+                    await this.handleOAuthConsent(oauthPage, currentUrl)
                 } catch (err) {
                     if (currentUrl !== lastUrl) {
                         this.bot.logger.debug(this.bot.isMobile, 'LOGIN-APP', 'Invalid URL while polling')
                         lastUrl = currentUrl
                     }
                     await this.handlePasskeyPrompt(oauthPage, currentUrl).catch(() => {})
+                    await this.handleOAuthConsent(oauthPage, currentUrl).catch(() => {})
                 }
 
                 await this.bot.utils.wait(1000)

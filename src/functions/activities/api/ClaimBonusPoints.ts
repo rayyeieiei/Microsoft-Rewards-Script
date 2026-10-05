@@ -11,11 +11,11 @@ export class ClaimBonusPoints extends Workers {
     private oldBalance: number = this.bot.userData.currentPoints
 
     public async claimBonusPoints() {
-        if (!this.bot.requestToken && this.bot.rewardsVersion === 'legacy') {
-            this.bot.logger.warn(
+        if (!this.bot.requestToken) {
+            this.bot.logger.debug(
                 this.bot.isMobile,
                 'CLAIM-BONUS-POINTS',
-                'Skipping: Request token not available, this activity requires it!'
+                'Skipping: Request token not available (__RequestVerificationToken missing)'
             )
             return
         }
@@ -111,10 +111,11 @@ export class ClaimBonusPoints extends Workers {
 
             await this.bot.utils.wait(this.bot.utils.randomDelay(5000, 10000))
         } catch (error) {
-            this.bot.logger.error(
+            const msg = error instanceof Error ? error.message : String(error)
+            this.bot.logger.warn(
                 this.bot.isMobile,
                 'CLAIM-BONUS-POINTS',
-                `Error in doClaimBonusPoints | message=${error instanceof Error ? error.message : String(error)}`
+                `ClaimBonusPoints endpoint unavailable or declined: ${msg}`
             )
         }
     }
