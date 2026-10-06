@@ -206,6 +206,8 @@ export class ReadToEarn extends Workers {
             const validArticleIds = await this.fetchValidMsnArticles(articleCount)
             let totalGained = 0
             let articlesRead = 0
+            let refreshAttempts = 0
+            const maxRefreshAttempts = 2
 
             for (let i = 0; i < articleCount; ++i) {
                 const articleId = validArticleIds[i] || randomBytes(16).toString('hex')
@@ -229,10 +231,29 @@ export class ReadToEarn extends Workers {
                         'X-Rewards-Language': 'en',
                         'X-Rewards-ismobile': 'true'
                     },
-                    data: JSON.stringify(jsonData)
+                    data: JSON.stringify(jsonData),
+                    validateStatus: () => true
                 }
 
-                const response = await this.bot.axios.request(request)
+                let response = await this.bot.axios.request(request).catch(err => err?.response || null)
+
+                // HTTP 401 Interceptor: Auto-Refresh Token Guard
+                if (response?.status === 401 && refreshAttempts < maxRefreshAttempts) {
+                    refreshAttempts++
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'DAPI-AUTH',
+                        `⚠️ [DAPI-AUTH] Token kedaluwarsa (401). Meminta refresh token seluler baru... (attempt ${refreshAttempts}/${maxRefreshAttempts})`
+                    )
+                    const newToken = await this.bot.refreshMobileAccessToken()
+                    if (newToken) {
+                        request.headers = {
+                            ...request.headers,
+                            Authorization: `Bearer ${newToken}`
+                        }
+                        response = await this.bot.axios.request(request).catch(err => err?.response || null)
+                    }
+                }
 
                 this.bot.logger.debug(
                     this.bot.isMobile,

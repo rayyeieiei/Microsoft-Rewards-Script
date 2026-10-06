@@ -227,7 +227,7 @@ export class MicrosoftRewardsBot {
     private activeWorkers: number
     private exitedWorkers: number[]
     public browserFactory: Browser = new Browser(this)
-    private login = new Login(this)
+    public login = new Login(this)
     private searchManager: SearchManager
     public searchCooldownActive = false
     public sharedBatchSignal?: { isCooldownTriggered: boolean }
@@ -250,6 +250,72 @@ export class MicrosoftRewardsBot {
     public trackBlockedRequest() {
         this.bandwidthTracker.blockedRequests += 1
         DataSaverManager.getInstance().recordBlockedRequest()
+    }
+
+    public get loginApp() {
+        return {
+            getAppToken: async (_page?: Page, _account?: any) => await this.refreshMobileAccessToken()
+        }
+    }
+
+    public async refreshMobileAccessToken(): Promise<string> {
+        const accountEmail = this.activeAccount?.email
+        if (!accountEmail) {
+            this.logger.warn(
+                this.isMobile,
+                'DAPI-AUTH',
+                'Cannot refresh mobile access token: activeAccount is unavailable'
+            )
+            return ''
+        }
+
+        if (!this.mainMobilePage || this.mainMobilePage.isClosed()) {
+            const mobileCtx = this.accountScope?.getContext('mobile')
+            if (mobileCtx) {
+                this.mainMobilePage = await createManagedPage({
+                    context: mobileCtx,
+                    accountScope: accountEmail,
+                    purpose: 'main-mobile-owner',
+                    isMobile: true
+                })
+                this.accountScope?.trackPage(this.mainMobilePage)
+            }
+        }
+
+        if (!this.mainMobilePage || this.mainMobilePage.isClosed()) {
+            this.logger.warn(
+                this.isMobile,
+                'DAPI-AUTH',
+                'Cannot refresh mobile access token: mainMobilePage is unavailable'
+            )
+            return ''
+        }
+
+        try {
+            this.logger.warn(
+                this.isMobile,
+                'DAPI-AUTH',
+                `⚠️ [DAPI-AUTH] Token kedaluwarsa (401). Meminta refresh token seluler baru...`
+            )
+            const newToken = await this.login.getAppAccessToken(this.mainMobilePage, accountEmail)
+            if (newToken) {
+                this.accessToken = newToken
+                this.logger.info(
+                    this.isMobile,
+                    'DAPI-AUTH',
+                    `✅ [DAPI-AUTH] Refresh token seluler baru berhasil didapatkan!`,
+                    'green'
+                )
+                return newToken
+            }
+        } catch (error) {
+            this.logger.warn(
+                this.isMobile,
+                'DAPI-AUTH',
+                `Gagal meminta refresh token seluler: ${error instanceof Error ? error.message : String(error)}`
+            )
+        }
+        return ''
     }
 
     constructor() {
@@ -1981,6 +2047,20 @@ export class MicrosoftRewardsBot {
                 this.userData.currentPoints = data.userStatus.availablePoints
                 const initialPoints = this.userData.initialPoints ?? 0
 
+                // =========================================================================
+                // IMMEDIATE DAPI EXECUTION PIPELINE
+                // Prioritize DAPI activities immediately while bearer token is fresh (< 60s)
+                // =========================================================================
+                if (this.config.workers.doDailyCheckIn) {
+                    this.updateDashboardAccount(accountEmail, { status: 'Daily Check-in' })
+                    await this.activities.doDailyCheckIn()
+                }
+
+                if (this.config.workers.doReadToEarn) {
+                    this.updateDashboardAccount(accountEmail, { status: 'Read to Earn' })
+                    await this.activities.doReadToEarn()
+                }
+
                 const pcProg = data.userStatus.counters.pcSearch?.[0]
                     ? `${data.userStatus.counters.pcSearch[0].pointProgress}/${data.userStatus.counters.pcSearch[0].pointProgressMax}`
                     : '0/0'
@@ -2065,15 +2145,8 @@ export class MicrosoftRewardsBot {
                     await this.workers.doClaimBonusPoints(data)
                 }
 
-                if (this.config.workers.doDailyCheckIn) {
-                    this.updateDashboardAccount(accountEmail, { status: 'Daily Check-in' })
-                    await this.activities.doDailyCheckIn()
-                }
-
-                if (this.config.workers.doReadToEarn) {
-                    this.updateDashboardAccount(accountEmail, { status: 'Read to Earn' })
-                    await this.activities.doReadToEarn()
-                }
+                // Note: DAPI activities (Daily Check-In & Read to Earn) have already completed
+                // in the Immediate DAPI Execution Pipeline above while the bearer token was fresh (< 60s).
 
                 // Conditional refresh for Onboarding Verification:
                 // Only refresh if onboarding is enabled, campaign was detected/active, and there are incomplete tasks to verify!

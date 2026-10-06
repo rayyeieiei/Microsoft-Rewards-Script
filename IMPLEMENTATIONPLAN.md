@@ -863,6 +863,68 @@ Pada alur penarikan access token mobile (`GET-APP-TOKEN` via `MobileAccessLogin`
 2. **Kompilasi TypeScript (`npm run build`)**: **Exit Code 0 (Zero Errors / Warnings)**.
 3. **Full Test Suite (`npm test`)**: **100% Passed (Semua 25 Bab Pengujian Lolos Sempurna)**.
 
+---
+
+## Bab 26: Immediate Execution Read-to-Earn & Auto-Refresh Token pada HTTP 401
+
+### 26.1 Akar Masalah Forensik Lapangan (Akun `liverative` & `bukansoelap03`)
+
+1. **Stagnasi Token Seluler Akibat Penundaan Eksekusi DAPI**:
+   - Pada akun `liverative` dan `bukansoelap03`, token seluler diperoleh di awal sesi (18.04 & 18.15), namun `READ-TO-EARN` baru dijalankan 5-7 menit kemudian setelah puluhan tile promo (Daily Set, Special Promotions, More Promotions, Claim Bonus Points) selesai.
+   - Akibatnya Bearer Token DAPI sudah stale/expired, memicu status code `401 Unauthorized` (hanya 1 artikel terbaca lalu crash, atau gagal total di artikel 1).
+   - Aktivitas Daily Check-in membuktikan token valid jika dieksekusi secara cepat, namun langsung mati sesudahnya karena masa berlaku token OAuth mobile yang singkat.
+
+2. **Ketiadaan Interceptor Auto-Refresh Token pada Endpoint `/dapi/me/activities`**:
+   - Ketika Axios menerima status 401 Unauthorized pada pemanggilan aktivitas Read-to-Earn, exception langsung dilempar dan loop pembacaan dihentikan secara prematur tanpa upaya refresh token.
+
+3. **Error Handling Fatal pada `getAppDashboardData`**:
+   - Pemanggilan `getAppDashboardData` di awal sesi mencatat error fatal saat status 401 terjadi, tanpa melakukan percobaan 1x refresh token.
+
+---
+
+### 26.2 Arsitektur & Spesifikasi Solusi
+
+1. **Immediate Execution Pipeline (`src/index.ts`)**:
+   - Mengubah urutan eksekusi alur Mobile:
+     - **SEGERA** setelah inisialisasi data dashboard dan poin awal (`userData.currentPoints`):
+       1. Jalankan `doDailyCheckIn()` seketika.
+       2. Jalankan `doReadToEarn()` seketika (selesaikan seluruh 10 artikel selagi token dalam kondisi fresh < 60 detik).
+     - **SETELAH** aktivitas berbasis token DAPI selesai 100%:
+       Baru lanjutkan ke pemindaian DOM dashboard tile yang memakan waktu lama (Daily Set, Special Activity, Keep Earning, Punchcard).
+   - Menghapus pemanggilan duplikat/tertunda Read to Earn di bagian akhir alur mobile.
+
+2. **Mekanisme Auto-Refresh Token saat Terjadi HTTP 401 (`src/index.ts`, `src/functions/activities/app/ReadToEarn.ts`, `src/functions/activities/app/DailyCheckIn.ts`)**:
+   - Menyediakan method terpusat `refreshMobileAccessToken()` dan adapter `loginApp.getAppToken()` pada `MicrosoftRewardsBot`:
+     - Memeriksa ketersediaan `activeAccount` dan memulihkan `mainMobilePage` jika tertutup.
+     - Mencetak log resmi: `⚠️ [DAPI-AUTH] Token kedaluwarsa (401). Meminta refresh token seluler baru...`
+     - Meminta token akses seluler baru via `login.getAppAccessToken()` dan memperbarui `accessToken` serta scope DAPI.
+   - Di `ReadToEarn.ts`:
+     - Memasang konfigurasi `validateStatus: () => true` pada Axios request.
+     - Memasang retry guard berbatas maksimal 2 kali per sesi:
+       Jika respons 401 diterima, panggil `refreshMobileAccessToken()`, perbarui header `Authorization: Bearer <newToken>`, dan ulangi pengiriman artikel yang gagal.
+   - Di `DailyCheckIn.ts`:
+     - Memasang retry guard serupa di `submitDaily(type)` jika server merespons 401.
+
+3. **Sanitasi Error Dashboard Data (`src/browser/BrowserFunc.ts`)**:
+   - Pada `getAppDashboardData`:
+     - Menggunakan `validateStatus: (status) => status < 500`.
+     - Jika DAPI merespons 401 di awal sesi, lakukan 1x token refresh otomatis sebelum melempar error.
+     - Tangani error secara non-fatal (`warn`) agar alur bot tetap dapat melanjutkan tugas lainnya.
+
+---
+
+### 26.3 Hasil Verifikasi & Uji Kualitas
+
+1. **Chapter 26 Test Suite (`test/chapter26ImmediateDapiExecutionAndTokenRefresh.test.ts`)**:
+   - ✅ **Test 1**: `refreshMobileAccessToken` memperbarui token pada bot dan `AccountScope` secara bersih.
+   - ✅ **Test 2**: Adapter `loginApp.getAppToken` mendelegasikan pemanggilan token secara transparan.
+   - ✅ **Test 3**: `ReadToEarn` menangkap respons 401, merefresh token bearer, dan berhasil pada percobaan ulang (retry).
+   - ✅ **Test 4**: `ReadToEarn` membatasi refresh maksimal 2 kali per sesi untuk mencegah loop tak terbatas.
+   - ✅ **Test 5**: `DailyCheckIn` menangani 401 dengan refresh token otomatis dan menyelesaikan klaim.
+   - ✅ **Test 6**: `getAppDashboardData` menangani 401 via 1x refresh dan pemulihan non-fatal.
+2. **Kompilasi TypeScript (`npm run build`)**: **Exit Code 0 (Zero Errors / Warnings)**.
+3. **Full Test Suite (`npm test`)**: **100% Passed (Seluruh 26 Bab Pengujian Lolos Sempurna)**.
+
 
 
 

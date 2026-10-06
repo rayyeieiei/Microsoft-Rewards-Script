@@ -161,7 +161,23 @@ export class DailyCheckIn extends Workers {
                 `Sending Daily Check-In request | type=${type} | url=${request.url}`
             )
 
-            return this.bot.axios.request(request)
+            let response = await this.bot.axios.request(request).catch(err => err?.response || null)
+            if (response?.status === 401) {
+                this.bot.logger.warn(
+                    this.bot.isMobile,
+                    'DAPI-AUTH',
+                    `⚠️ [DAPI-AUTH] Token kedaluwarsa (401) pada Daily Check-In. Meminta refresh token seluler baru...`
+                )
+                const newToken = await this.bot.refreshMobileAccessToken()
+                if (newToken) {
+                    request.headers = {
+                        ...request.headers,
+                        Authorization: `Bearer ${newToken}`
+                    }
+                    response = await this.bot.axios.request(request).catch(err => err?.response || null)
+                }
+            }
+            return response
         } catch (error) {
             this.bot.logger.error(
                 this.bot.isMobile,

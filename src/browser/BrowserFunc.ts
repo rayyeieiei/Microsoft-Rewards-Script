@@ -225,16 +225,37 @@ export default class BrowserFunc {
                     Authorization: `Bearer ${this.bot.accessToken}`,
                     'User-Agent':
                         'Bing/32.5.431027001 (com.microsoft.bing; build:431027001; iOS 17.6.1) Alamofire/5.10.2'
+                },
+                validateStatus: (status) => status < 500
+            }
+
+            let response = await this.bot.axios.request(request)
+            if (response.status === 401) {
+                this.bot.logger.warn(
+                    this.bot.isMobile,
+                    'DAPI-AUTH',
+                    '⚠️ [DAPI-AUTH] Token kedaluwarsa (401) saat getAppDashboardData. Mencoba refresh token seluler 1x...'
+                )
+                const refreshed = await this.bot.refreshMobileAccessToken()
+                if (refreshed) {
+                    request.headers = {
+                        ...request.headers,
+                        Authorization: `Bearer ${refreshed}`
+                    }
+                    response = await this.bot.axios.request(request)
                 }
             }
 
-            const response = await this.bot.axios.request(request)
+            if (response.status !== 200) {
+                throw new Error(`DAPI dashboard returned status ${response.status}`)
+            }
+
             return response.data as AppDashboardData
         } catch (error) {
-            this.bot.logger.error(
+            this.bot.logger.warn(
                 this.bot.isMobile,
                 'GET-APP-DASHBOARD-DATA',
-                `Error fetching dashboard data: ${error instanceof Error ? error.message : String(error)}`
+                `Non-fatal error fetching dashboard data: ${error instanceof Error ? error.message : String(error)}`
             )
             throw error
         }
