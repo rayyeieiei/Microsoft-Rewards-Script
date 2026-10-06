@@ -1,6 +1,7 @@
 import type { Page } from 'patchright'
 import { randomBytes } from 'crypto'
 import { URLSearchParams } from 'url'
+import axios from 'axios'
 
 import type { MicrosoftRewardsBot } from '../../../index'
 import { createManagedPage, sanitizeDiagnosticUrl } from '../../../runtime/BrowserOperationGuard'
@@ -292,17 +293,39 @@ export class MobileAccessLogin {
 
             this.bot.logger.debug(this.bot.isMobile, 'LOGIN-APP', 'Exchanging OAuth code for access token')
 
-            const response = await this.bot.axios.request({
-                url: this.tokenUrl,
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'User-Agent': UserAgentManager.DEFAULT_MOBILE_UA,
-                    'Origin': 'https://login.live.com',
-                    'Referer': 'https://login.live.com/'
-                },
-                data: data.toString()
-            })
+            let response
+            try {
+                response = await this.bot.axios.request({
+                    url: this.tokenUrl,
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                        'User-Agent': UserAgentManager.DEFAULT_MOBILE_UA,
+                        'Origin': 'https://login.live.com',
+                        'Referer': 'https://login.live.com/',
+                        'Authorization': undefined
+                    },
+                    data: data.toString(),
+                    // @ts-ignore
+                    'axios-retry': { retries: 0 }
+                })
+            } catch (tokenExchangeError) {
+                if (axios.isAxiosError(tokenExchangeError) && tokenExchangeError.response) {
+                    const status = tokenExchangeError.response.status
+                    if (status === 400 || status === 401) {
+                        const errorDetails =
+                            typeof tokenExchangeError.response.data === 'object'
+                                ? JSON.stringify(tokenExchangeError.response.data)
+                                : String(tokenExchangeError.response.data)
+                        this.bot.logger.error(
+                            this.bot.isMobile,
+                            'LOGIN-APP',
+                            `[OAUTH-BURNED-CODE] Token endpoint rejected authorization code with HTTP ${status}: ${errorDetails}. Kode otorisasi bersifat single-use dan telah hangus; menghentikan proses tanpa retry.`
+                        )
+                    }
+                }
+                throw tokenExchangeError
+            }
 
             const token = (response?.data?.access_token as string) ?? ''
 

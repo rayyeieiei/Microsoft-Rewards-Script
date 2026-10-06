@@ -18,7 +18,14 @@
 7. [Bab 18: Status Persetujuan & Next Steps (Speedup Optimization Plan)](#bab-18-status-persetujuan--next-steps-speedup-optimization-plan) *(Status: Selesai 100% & Terverifikasi)*
 8. [Bab 19: Audit Forensik & Mitigasi Pencarian Terlewati (Search Skipped)](#bab-19-audit-forensik--mitigasi-pencarian-terlewati-search-skipped) *(Status: Selesai 100% & Terverifikasi)*
 9. [Bab 20: Restorasi Hook ADB Batch Rotation & Anti-Bypass Manual Fallback](#bab-20-restorasi-hook-adb-batch-rotation--anti-bypass-manual-fallback) *(Status: Selesai 100% & Terverifikasi)*
-10. [Bab 21: Audit Forensik Punch Card Engine & Blueprint Auto-Solver Oktober](#bab-21-audit-forensik-punch-card-engine--blueprint-auto-solver-oktober) *(Status: Audit Selesai & Blueprint Siap Eksekusi)*
+10. [Bab 21: Audit Forensik Punch Card Engine & Blueprint Auto-Solver Oktober](#bab-21-audit-forensik-punch-card-engine--blueprint-auto-solver-oktober) *(Status: Selesai 100% & Terverifikasi)*
+11. [Bab 22: Eliminasi Search Abort & Infinite Loop](#bab-22-eliminasi-search-abort--infinite-loop) *(Status: Selesai 100% & Terverifikasi)*
+12. [Bab 23: Auto-Bypass Passkey/FIDO Enrollment Interrupt](#bab-23-auto-bypass-passkeyfido-enrollment-interrupt-pada-oauth-mobile-token-login-app) *(Status: Selesai 100% & Terverifikasi)*
+13. [Bab 24: Protokol URI Filter, Punch Card Envelope Selector & MSN Feed Resilience](#bab-24-protokol-uri-filter-punch-card-envelope-selector--msn-feed-resilience) *(Status: Selesai 100% & Terverifikasi)*
+14. [Bab 25: OAuth Auto-Consent Bypass, ClaimBonusPoints Guard & Punch Card Step Selector Hardening](#bab-25-oauth-auto-consent-bypass-claimbonuspoints-guard--punch-card-step-selector-hardening) *(Status: Selesai 100% & Terverifikasi)*
+15. [Bab 26: Immediate Execution Read-to-Earn & Auto-Refresh Token pada HTTP 401](#bab-26-immediate-execution-read-to-earn--auto-refresh-token-pada-http-401) *(Status: Selesai 100% & Terverifikasi)*
+16. [Bab 27: Eliminasi Loop-Abort Read to Earn, Skip Artikel Ineligibel & Sinkronisasi Global Token Header](#bab-27-eliminasi-loop-abort-read-to-earn-skip-artikel-ineligibel--sinkronisasi-global-token-header) *(Status: Selesai 100% & Terverifikasi)*
+17. [Bab 28: Isolasi Header Token Exchange, Single-Use Code Guard, Token Refresh Mutex, & Concurrency Protection](#bab-28-isolasi-header-token-exchange-single-use-code-guard-token-refresh-mutex--concurrency-protection) *(Status: Selesai 100% & Terverifikasi)*
 
 ---
 
@@ -956,6 +963,47 @@ Pada akun produksi (`canttakeaway36`, `liverative`, `bukansoelap03`):
    - ✅ **Test 4**: Respons 401 berhasil memicu auto-refresh token, memperbarui header, dan melakukan retry sukses.
 2. **Kompilasi TypeScript (`npm run build`)**: **Exit Code 0 (Zero Errors / Warnings)**.
 3. **Full Test Suite (`npm test`)**: **100% Passed (Seluruh 27 Bab Pengujian Lolos Sempurna)**.
+
+---
+
+## Bab 28: Isolasi Header Token Exchange, Single-Use Code Guard, Token Refresh Mutex, & Concurrency Protection
+
+### 28.1 Latar Belakang & Akar Masalah
+1. **HTTP 400 Bad Request pada Token Exchange (`MobileAccessLogin.ts`)**:
+   - Setelah Chapter 27 menyinkronkan token secara global pada `AxiosClient.defaults.headers.common['Authorization']`, pemanggilan POST ke endpoint token Microsoft OAuth (`oauth20_token.srf` / `login.microsoftonline.com`) secara tidak sengaja mewarisi header `Authorization: Bearer <expired_token>`.
+   - Endpoint otorisasi Microsoft menolak pertukaran `grant_type=authorization_code` jika disertai Bearer token kadaluwarsa, mengembalikan HTTP 400 Bad Request (`invalid_request` / `invalid_grant`).
+2. **Code Burning & Redundant Retries**:
+   - Kode otorisasi OAuth bersifat single-use (sekali pakai). Ketika server menolak kode, pengulangan pengiriman kode yang sama akan membakar kode dan menyebabkan kegagalan berulang.
+3. **Race Condition & Duplikasi Token Refresh Paralel**:
+   - Ketika beberapa aktivitas seluler (misal ReadToEarn dan DailyCheckIn) mendeteksi 401 secara bersamaan, pemanggilan paralel ke `refreshMobileAccessToken()` memicu beberapa flow browser OAuth sekaligus, membuka halaman dan popup duplikat serta membebani CPU.
+4. **C2 Start Redundancy & Post-Search Re-run Inefficiencies**:
+   - Web UI Dashboard C2 tidak mendebounce trigger start yang dikirim secara cepat/dobel saat bot sedang aktif atau dalam proses startup.
+   - Blok re-evaluasi post-search di `src/index.ts` mengeksekusi ulang seluruh aktivitas tanpa memeriksa apakah aktivitas tersebut sudah 100% selesai.
+
+### 28.2 Arsitektur & Spesifikasi Solusi
+1. **Isolasi Header & Penolakan Retry Kode Hangus (`src/browser/auth/methods/MobileAccessLogin.ts`)**:
+   - Menetapkan `'Authorization': undefined` secara eksplisit pada konfigurasi header POST ke `this.tokenUrl`. Pada layer Axios, nilai `undefined` menjamin penghapusan header `Authorization` dari request wire yang dikirim ke Microsoft.
+   - Memasang `'axios-retry': { retries: 0 }` khusus pada request token exchange.
+   - Menangkap error HTTP 400 dan 401, mencetak log diagnostik `[OAUTH-BURNED-CODE]`, dan membatalkan retry dengan kode yang sama karena kode otorisasi sudah hangus.
+2. **In-Flight Promise Mutex (`src/index.ts`)**:
+   - Memasang properti `private activeTokenRefreshPromise: Promise<string> | null = null`.
+   - Pada `refreshMobileAccessToken()`, jika sudah ada promise refresh yang sedang berjalan (`this.activeTokenRefreshPromise`), jangan buka halaman OAuth baru; kembalikan dan tunggu promise yang sama (`in-flight deduplication`).
+   - Membersihkan promise mutex pada blok `finally` (`this.activeTokenRefreshPromise = null`).
+3. **Proteksi C2 Start Transition & State Guard (`src/util/DashboardServer.ts`)**:
+   - Memasang state `isStartTransitionInProgress` dan helper `isStartInProgress()` / `setStartInProgress()`.
+   - Pada endpoint `/api/control`, jika menerima perintah `start` atau `start-single` saat `dashboardState.isRunning` bernilai `true` atau transisi startup sedang aktif, abaikan perintah dan cetak log peringatan C2.
+4. **Post-Search Activity Status Guard (`src/index.ts`)**:
+   - Sebelum menjalankan `doDailySet`, `doSpecialPromotions`, `doMorePromotions`, atau `doPunchCards` di blok post-search, periksa apakah data dashboard pasca-search mencatat item yang belum selesai (`incomplete`). Jika seluruh item sudah selesai, lewati eksekusi worker untuk menghemat navigasi DOM dan latensi.
+
+### 28.3 Hasil Verifikasi & Uji Kualitas
+1. **Chapter 28 Test Suite (`test/chapter28TokenExchangeAndConcurrencyMutex.test.ts`)**:
+   - ✅ **Test 1**: Header `Authorization` kadaluwarsa terbukti 100% terhapus (stripped) pada request wire token exchange.
+   - ✅ **Test 2**: Kode otorisasi single-use yang hangus tidak di-retry saat menerima HTTP 400.
+   - ✅ **Test 3**: In-flight token refresh mutex mendeduplikasi 4 panggilan konkuren menjadi tepat 1 flow OAuth.
+   - ✅ **Test 4**: C2 start guard menolak panggilan start duplikat saat bot sedang running atau dalam masa transisi startup.
+   - ✅ **Test 5**: Guard pasca-search mendeteksi secara akurat aktivitas yang sudah selesai vs aktivitas yang masih belum lengkap.
+2. **Kompilasi TypeScript (`npm run build`)**: **Exit Code 0 (Zero Errors / Warnings)**.
+3. **Full Test Suite (`npm test`)**: **100% Passed (Seluruh 28 Bab Pengujian Lolos Sempurna)**.
 
 
 

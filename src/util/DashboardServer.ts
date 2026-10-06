@@ -108,6 +108,16 @@ export function updateDashboardGlobal(update: Partial<Omit<DashboardState, 'acco
 
 export let onControlCommand: (cmd: { action: string; email?: string }) => Promise<void> = async () => {}
 
+export let isStartTransitionInProgress = false
+
+export function isStartInProgress(): boolean {
+    return isStartTransitionInProgress
+}
+
+export function setStartInProgress(inProgress: boolean): void {
+    isStartTransitionInProgress = inProgress
+}
+
 export function registerControlCallback(callback: (cmd: { action: string; email?: string }) => Promise<void>) {
     onControlCommand = callback
 }
@@ -1294,8 +1304,22 @@ export class DashboardServer {
                                 onIpConfirmCommand()
                             }
                         } else {
+                            if (body && (body.action === 'start' || body.action === 'start-single')) {
+                                if (dashboardState.isRunning || isStartTransitionInProgress) {
+                                    logEmitter.emit(
+                                        'log',
+                                        `⚠️ [C2-CONTROL] Permintaan '${body.action}' diabaikan: runner sedang aktif atau dalam proses transisi startup.`
+                                    )
+                                    return
+                                }
+                                isStartTransitionInProgress = true
+                            }
                             // Async run execution callbacks
-                            void onControlCommand(body)
+                            void onControlCommand(body).finally(() => {
+                                if (body && (body.action === 'start' || body.action === 'start-single')) {
+                                    isStartTransitionInProgress = false
+                                }
+                            })
                         }
                         return
                     }

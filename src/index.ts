@@ -241,6 +241,7 @@ export class MicrosoftRewardsBot {
     public sharedBatchSignal?: { isCooldownTriggered: boolean }
     public activeDeadlineAdjuster: ((missingPoints: number) => void) | null = null
     public axios!: AxiosClient
+    private activeTokenRefreshPromise: Promise<string> | null = null
 
     public bandwidthTracker = {
         totalBytes: 0,
@@ -267,63 +268,79 @@ export class MicrosoftRewardsBot {
     }
 
     public async refreshMobileAccessToken(): Promise<string> {
-        const accountEmail = this.activeAccount?.email
-        if (!accountEmail) {
-            this.logger.warn(
+        if (this.activeTokenRefreshPromise) {
+            this.logger.info(
                 this.isMobile,
                 'DAPI-AUTH',
-                'Cannot refresh mobile access token: activeAccount is unavailable'
+                '⏳ [DAPI-AUTH] Refresh token seluler sedang berjalan di latar belakang. Menggunakan promise yang sama (in-flight deduplication)...',
+                'yellow'
             )
-            return ''
+            return await this.activeTokenRefreshPromise
         }
 
-        if (!this.mainMobilePage || this.mainMobilePage.isClosed()) {
-            const mobileCtx = this.accountScope?.getContext('mobile')
-            if (mobileCtx) {
-                this.mainMobilePage = await createManagedPage({
-                    context: mobileCtx,
-                    accountScope: accountEmail,
-                    purpose: 'main-mobile-owner',
-                    isMobile: true
-                })
-                this.accountScope?.trackPage(this.mainMobilePage)
-            }
-        }
-
-        if (!this.mainMobilePage || this.mainMobilePage.isClosed()) {
-            this.logger.warn(
-                this.isMobile,
-                'DAPI-AUTH',
-                'Cannot refresh mobile access token: mainMobilePage is unavailable'
-            )
-            return ''
-        }
-
-        try {
-            this.logger.warn(
-                this.isMobile,
-                'DAPI-AUTH',
-                `⚠️ [DAPI-AUTH] Token kedaluwarsa (401). Meminta refresh token seluler baru...`
-            )
-            const newToken = await this.login.getAppAccessToken(this.mainMobilePage, accountEmail)
-            if (newToken) {
-                this.accessToken = newToken
-                this.logger.info(
+        this.activeTokenRefreshPromise = (async () => {
+            const accountEmail = this.activeAccount?.email
+            if (!accountEmail) {
+                this.logger.warn(
                     this.isMobile,
                     'DAPI-AUTH',
-                    `✅ [DAPI-AUTH] Refresh token seluler baru berhasil didapatkan!`,
-                    'green'
+                    'Cannot refresh mobile access token: activeAccount is unavailable'
                 )
-                return newToken
+                return ''
             }
-        } catch (error) {
-            this.logger.warn(
-                this.isMobile,
-                'DAPI-AUTH',
-                `Gagal meminta refresh token seluler: ${error instanceof Error ? error.message : String(error)}`
-            )
-        }
-        return ''
+
+            if (!this.mainMobilePage || this.mainMobilePage.isClosed()) {
+                const mobileCtx = this.accountScope?.getContext('mobile')
+                if (mobileCtx) {
+                    this.mainMobilePage = await createManagedPage({
+                        context: mobileCtx,
+                        accountScope: accountEmail,
+                        purpose: 'main-mobile-owner',
+                        isMobile: true
+                    })
+                    this.accountScope?.trackPage(this.mainMobilePage)
+                }
+            }
+
+            if (!this.mainMobilePage || this.mainMobilePage.isClosed()) {
+                this.logger.warn(
+                    this.isMobile,
+                    'DAPI-AUTH',
+                    'Cannot refresh mobile access token: mainMobilePage is unavailable'
+                )
+                return ''
+            }
+
+            try {
+                this.logger.warn(
+                    this.isMobile,
+                    'DAPI-AUTH',
+                    `⚠️ [DAPI-AUTH] Token kedaluwarsa (401). Meminta refresh token seluler baru...`
+                )
+                const newToken = await this.login.getAppAccessToken(this.mainMobilePage, accountEmail)
+                if (newToken) {
+                    this.accessToken = newToken
+                    this.logger.info(
+                        this.isMobile,
+                        'DAPI-AUTH',
+                        `✅ [DAPI-AUTH] Refresh token seluler baru berhasil didapatkan!`,
+                        'green'
+                    )
+                    return newToken
+                }
+            } catch (error) {
+                this.logger.warn(
+                    this.isMobile,
+                    'DAPI-AUTH',
+                    `Gagal meminta refresh token seluler: ${error instanceof Error ? error.message : String(error)}`
+                )
+            }
+            return ''
+        })().finally(() => {
+            this.activeTokenRefreshPromise = null
+        })
+
+        return await this.activeTokenRefreshPromise
     }
 
     constructor() {
@@ -2245,16 +2262,80 @@ export class MicrosoftRewardsBot {
 
                         if (activePage) {
                             if (this.config.workers.doDailySet) {
-                                await this.workers.doDailySet(postSearchData, activePage)
+                                const dailySetItems = Object.values(postSearchData.dailySetPromotions ?? {}).flat()
+                                const hasIncompleteDailySet = dailySetItems.some(
+                                    x => x && !x.complete && (x.pointProgressMax ?? 0) > (x.pointProgress ?? 0)
+                                )
+                                if (hasIncompleteDailySet) {
+                                    await this.workers.doDailySet(postSearchData, activePage)
+                                } else {
+                                    this.logger.debug(
+                                        'main',
+                                        'POST-SEARCH',
+                                        'Daily Set already complete, skipping post-search re-evaluation.'
+                                    )
+                                }
                             }
                             if (this.config.workers.doSpecialPromotions) {
-                                await this.workers.doSpecialPromotions(postSearchData, activePage)
+                                const specials = [
+                                    ...(postSearchData.promotionalItems ?? []),
+                                    ...(postSearchData.promotionalItem ? [postSearchData.promotionalItem] : [])
+                                ]
+                                const hasIncompleteSpecials = specials.some(
+                                    x =>
+                                        x &&
+                                        !x.complete &&
+                                        (x.pointProgressMax ?? 0) > 0 &&
+                                        !(x.offerId ?? '').toLowerCase().includes('impression') &&
+                                        !(x.offerId ?? '').toLowerCase().includes('locked')
+                                )
+                                if (hasIncompleteSpecials) {
+                                    await this.workers.doSpecialPromotions(postSearchData, activePage)
+                                } else {
+                                    this.logger.debug(
+                                        'main',
+                                        'POST-SEARCH',
+                                        'Special promotions already complete, skipping post-search re-evaluation.'
+                                    )
+                                }
                             }
                             if (this.config.workers.doMorePromotions) {
-                                await this.workers.doMorePromotions(postSearchData, activePage)
+                                const uncompletedMore = this.workers.extractAllPromotions(postSearchData)
+                                if (uncompletedMore.length > 0) {
+                                    await this.workers.doMorePromotions(postSearchData, activePage)
+                                } else {
+                                    this.logger.debug(
+                                        'main',
+                                        'POST-SEARCH',
+                                        'More promotions already complete, skipping post-search re-evaluation.'
+                                    )
+                                }
                             }
                             if (this.config.workers.doPunchCards) {
-                                await this.workers.doPunchCards(postSearchData, activePage)
+                                const punchCards = postSearchData.punchCards ?? []
+                                const hasIncompletePunchCards = punchCards.some(pc => {
+                                    const parent = pc.parentPromotion
+                                    if (
+                                        parent &&
+                                        !parent.complete &&
+                                        (parent.pointProgressMax ?? 0) > (parent.pointProgress ?? 0)
+                                    ) {
+                                        return true
+                                    }
+                                    const children = pc.childPromotions ?? []
+                                    return children.some(
+                                        c => c && !c.complete && (c.pointProgressMax ?? 0) > (c.pointProgress ?? 0)
+                                    )
+                                })
+                                if (hasIncompletePunchCards) {
+                                    await this.workers.doPunchCards(postSearchData, activePage)
+                                } else {
+                                    this.logger.debug(
+                                        'main',
+                                        'POST-SEARCH',
+                                        'Punch cards already complete, skipping post-search re-evaluation.'
+                                    )
+                                }
                             }
                             await this.workers.doClaimPendingPoints(activePage)
                         }
