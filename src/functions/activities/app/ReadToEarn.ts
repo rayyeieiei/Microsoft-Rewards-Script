@@ -5,12 +5,53 @@ import { Database } from '../../../util/Database'
 import { UserAgentManager } from '../../../browser/UserAgent'
 
 export class ReadToEarn extends Workers {
+    public get client() {
+        return this.bot.axios
+    }
+
     public readonly FALLBACK_ARTICLE_POOL: string[] = [
-        'AA2dvY9N', 'AA2dw2uA', 'AA2cEE3R', 'AA2dw8BI', 'AA2aHXIO',
-        'AA2dzo1D', 'AA2dyPGa', 'AA2dym6n', 'AA2dzhfb', 'AA2draRk',
-        'AA2dwg2P', 'AA2duFji', 'AA2cgYSG', 'AA2dyK0k', 'AA2dxi9K',
-        'AA1xK3rZ', 'AA1yM4pQ', 'AA1zN5oR', 'BB1aB2cD', 'BB2bC3dE'
+        'AA2dEf0r', 'AA1U7twx', 'AA2dFbdU', 'AA2dAusx', 'AA2dy6FB',
+        'AA2dzP7w', 'AA2dxyZ1', 'AA2dxQv4', 'AA2dvY9N', 'AA2dw2uA',
+        'AA2cEE3R', 'AA2dw8BI', 'AA2aHXIO', 'AA2dzo1D', 'AA2dyPGa',
+        'AA2dym6n', 'AA2dzhfb', 'AA2draRk', 'AA2dwg2P', 'AA2duFji',
+        'AA2cgYSG', 'AA2dyK0k', 'AA2dxi9K', 'AA1uQd6k', 'AA1v48eQ',
+        'AA1wF8xN', 'AA1sQ5zL', 'AA1tM2kY', 'AA1pZ9wQ', 'AA1xK3rZ',
+        'AA1yM4pQ', 'AA1zN5oR'
     ]
+
+    public isValidArticleCard(card: any): boolean {
+        if (!card || typeof card !== 'object') return false
+        const id = card.id
+        if (!id || typeof id !== 'string' || id.startsWith('CanonicalName-')) return false
+
+        // Filter out ads & sponsored cards
+        if (card.isSponsored || card.adId || card.isAd) return false
+
+        const type = String(card.type || '').toLowerCase()
+        const format = String(card.format || '').toLowerCase()
+        const contentType = String(card.contentType || '').toLowerCase()
+        const subType = String(card.subType || '').toLowerCase()
+
+        if (['ad', 'nativead', 'sponsored', 'promoted'].includes(type)) return false
+
+        // Filter out non-text/ineligible formats: video, slideshow, gallery, photo
+        const ineligibleTypes = ['video', 'slideshow', 'gallery', 'photo', 'photos', 'livestream']
+        if (
+            ineligibleTypes.includes(type) ||
+            ineligibleTypes.includes(format) ||
+            ineligibleTypes.includes(contentType) ||
+            ineligibleTypes.includes(subType)
+        ) {
+            return false
+        }
+
+        const url = String(card.url || card.destinationUrl || '').toLowerCase()
+        if (url.includes('/video/') || url.includes('/slideshow/') || url.includes('/vi-') || url.includes('/ss-')) {
+            return false
+        }
+
+        return true
+    }
 
     public resolveMsnMarket(geo: string): { market: string; locale: string } {
         const g = (geo || 'us').toLowerCase().trim()
@@ -101,11 +142,11 @@ export class ReadToEarn extends Workers {
 
                         for (const section of data.sections || []) {
                             for (const card of section.cards || []) {
-                                if (card.id && typeof card.id === 'string' && !card.id.startsWith('CanonicalName-')) {
+                                if (this.isValidArticleCard(card)) {
                                     articleIds.push(card.id)
                                 }
                                 for (const subCard of card.subCards || []) {
-                                    if (subCard.id && typeof subCard.id === 'string' && !subCard.id.startsWith('CanonicalName-')) {
+                                    if (this.isValidArticleCard(subCard)) {
                                         articleIds.push(subCard.id)
                                     }
                                 }
@@ -203,20 +244,36 @@ export class ReadToEarn extends Workers {
             }
 
             const articleCount = Math.min(10, Math.ceil(remainingQuota / 3))
-            const validArticleIds = await this.fetchValidMsnArticles(articleCount)
+            const targetArticles = articleCount
+            const fetchedArticleIds = await this.fetchValidMsnArticles(Math.max(30, targetArticles * 3))
+
+            // Candidate queue initialized with fetched articles followed by fallback pool, deduplicated
+            const candidateQueue: string[] = []
+            const seenCandidateIds = new Set<string>()
+
+            for (const id of [...fetchedArticleIds, ...this.FALLBACK_ARTICLE_POOL]) {
+                if (id && !seenCandidateIds.has(id)) {
+                    seenCandidateIds.add(id)
+                    candidateQueue.push(id)
+                }
+            }
+
+            const ineligibleArticleIds = new Set<string>()
             let totalGained = 0
             let articlesRead = 0
             let refreshAttempts = 0
             const maxRefreshAttempts = 2
+            let syntheticAttempts = 0
+            const maxSyntheticAttempts = 5
 
-            for (let i = 0; i < articleCount; ++i) {
-                const articleId = validArticleIds[i] || randomBytes(16).toString('hex')
+            while (articlesRead < targetArticles && candidateQueue.length > 0) {
+                const articleId = candidateQueue.shift()!
                 jsonData.id = articleId
 
                 this.bot.logger.debug(
                     this.bot.isMobile,
                     'READ-TO-EARN',
-                    `Submitting Read to Earn activity | article=${i + 1}/${articleCount} | id=${jsonData.id} | country=${jsonData.country}`
+                    `Submitting Read to Earn activity | article=${articlesRead + 1}/${targetArticles} | id=${jsonData.id} | country=${jsonData.country}`
                 )
 
                 const request: AxiosRequestConfig = {
@@ -237,7 +294,7 @@ export class ReadToEarn extends Workers {
 
                 let response = await this.bot.axios.request(request).catch(err => err?.response || null)
 
-                // HTTP 401 Interceptor: Auto-Refresh Token Guard
+                // HTTP 401 Interceptor: Auto-Refresh Token Guard & Retry
                 if (response?.status === 401 && refreshAttempts < maxRefreshAttempts) {
                     refreshAttempts++
                     this.bot.logger.warn(
@@ -245,38 +302,69 @@ export class ReadToEarn extends Workers {
                         'DAPI-AUTH',
                         `⚠️ [DAPI-AUTH] Token kedaluwarsa (401). Meminta refresh token seluler baru... (attempt ${refreshAttempts}/${maxRefreshAttempts})`
                     )
-                    const newToken = await this.bot.refreshMobileAccessToken()
+                    const newToken = await this.bot.loginApp.getAppToken()
                     if (newToken) {
+                        if (this.client?.defaults?.headers?.common) {
+                            this.client.defaults.headers.common['Authorization'] = `Bearer ${newToken}`
+                        }
                         request.headers = {
                             ...request.headers,
                             Authorization: `Bearer ${newToken}`
                         }
+                        // Ulangi (retry) artikel tersebut 1 kali dengan token baru
                         response = await this.bot.axios.request(request).catch(err => err?.response || null)
                     }
+                }
+
+                // Perpetual 401 circuit-breaker when max refresh attempts are exhausted
+                if (response?.status === 401 && refreshAttempts >= maxRefreshAttempts) {
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'READ-TO-EARN',
+                        `API returned non-200 status, stopping Read to Earn | article=${articlesRead + 1}/${targetArticles} | status=${response?.status}`
+                    )
+                    break
                 }
 
                 this.bot.logger.debug(
                     this.bot.isMobile,
                     'READ-TO-EARN',
-                    `Received Read to Earn response | article=${i + 1}/${articleCount} | status=${response?.status ?? 'unknown'}`
+                    `Received Read to Earn response | article=${articlesRead + 1}/${targetArticles} | status=${response?.status ?? 'unknown'}`
                 )
 
                 const isSuccess = response?.status === 200
 
+                // Jika artikel tersebut TETAP gagal (401/400/non-200):
                 if (!isSuccess) {
-                    this.bot.logger.info(
+                    const status = response?.status ?? 'unknown'
+                    ineligibleArticleIds.add(articleId)
+                    this.bot.logger.warn(
                         this.bot.isMobile,
                         'READ-TO-EARN',
-                        `API returned non-200 status, stopping Read to Earn | article=${i + 1}/${articleCount} | status=${response?.status}`
+                        `⚠️ [READ-TO-EARN] Artikel ${articleId} tidak memenuhi syarat poin (status ${status}). Melewati ke artikel berikutnya...`
                     )
-                    break
+
+                    // Jika antrean menipis sebelum target tercapai, tambahkan synthetic ID cadangan
+                    if (candidateQueue.length === 0 && articlesRead < targetArticles && syntheticAttempts < maxSyntheticAttempts) {
+                        const syntheticId = `AA${randomBytes(3).toString('hex').toUpperCase()}`
+                        if (!ineligibleArticleIds.has(syntheticId)) {
+                            syntheticAttempts++
+                            candidateQueue.push(syntheticId)
+                        }
+                    }
+
+                    // JANGAN PERNAH menghentikan loop utama (break / return)!
+                    // Ambil artikel berikutnya dari candidateQueue dan lanjutkan loop
+                    continue
                 }
 
+                // Sukses
+                refreshAttempts = 0
                 const gainedPoints = 3
                 this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
                 this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
                 totalGained += gainedPoints
-                articlesRead = i + 1
+                articlesRead++
 
                 void Database.getInstance().recordActivity(
                     this.bot.activeAccount?.email || '',
@@ -287,16 +375,16 @@ export class ReadToEarn extends Workers {
                 this.bot.logger.info(
                     this.bot.isMobile,
                     'READ-TO-EARN',
-                    `Read article ${i + 1}/${articleCount} | status=${response.status} | gainedPoints=+${gainedPoints} | newBalance=${this.bot.userData.currentPoints}`,
+                    `Read article ${articlesRead}/${targetArticles} | status=${response.status} | gainedPoints=+${gainedPoints} | newBalance=${this.bot.userData.currentPoints}`,
                     'green'
                 )
 
                 // Wait random delay between articles
-                if (i + 1 < articleCount) {
+                if (articlesRead < targetArticles) {
                     this.bot.logger.debug(
                         this.bot.isMobile,
                         'READ-TO-EARN',
-                        `Waiting between articles | article=${i + 1}/${articleCount} | delayRange=${delayMin}-${delayMax}`
+                        `Waiting between articles | article=${articlesRead}/${targetArticles} | delayRange=${delayMin}-${delayMax}`
                     )
                     await this.bot.utils.wait(this.bot.utils.randomDelay(delayMin, delayMax))
                 }
@@ -307,7 +395,7 @@ export class ReadToEarn extends Workers {
             this.bot.logger.info(
                 this.bot.isMobile,
                 'READ-TO-EARN',
-                `Completed Read to Earn | articlesRead=${articlesRead} | totalGained=${totalGained} | startBalance=${startBalance} | finalBalance=${finalBalance}`
+                `Completed Read to Earn | articlesRead=${articlesRead}/${targetArticles} | totalGained=${totalGained} | startBalance=${startBalance} | finalBalance=${finalBalance}`
             )
         } catch (error) {
             this.bot.logger.error(

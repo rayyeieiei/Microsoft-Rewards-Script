@@ -190,6 +190,14 @@ export class MicrosoftRewardsBot {
             throw new Error('[FATAL-SCOPE] Cannot set DAPI access token: no active AccountScope')
         }
         this.accountScope.setDapiToken(token)
+        if (this.axios) {
+            this.axios.setAuthorizationToken(token)
+        }
+        if (token) {
+            axios.defaults.headers.common['Authorization'] = `Bearer ${token}`
+        } else {
+            delete axios.defaults.headers.common['Authorization']
+        }
     }
     public requestToken = ''
     public cookies: { mobile: Cookie[]; desktop: Cookie[] }
@@ -1324,6 +1332,9 @@ export class MicrosoftRewardsBot {
                 bytes => this.trackBandwidth(bytes),
                 err => { void this.notifySuspectedConnectivityFailure('axios', err) }
             )
+            if (this.accessToken) {
+                this.axios.setAuthorizationToken(this.accessToken)
+            }
 
             const result = await this.Main(account, scope).catch(error => {
                 const errMsg = error instanceof Error ? error.message : String(error)

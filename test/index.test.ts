@@ -19,6 +19,7 @@ import { runChapter23PasskeyBypassTests } from './chapter23PasskeyBypass.test'
 import { runChapter24ProtocolFilterAndFeedResilienceTests } from './chapter24ProtocolFilterAndFeedResilience.test'
 import { runChapter25OAuthConsentAndBonusClaimTests } from './chapter25OAuthConsentAndBonusClaimResilience.test'
 import { runChapter26ImmediateDapiExecutionAndTokenRefreshTests } from './chapter26ImmediateDapiExecutionAndTokenRefresh.test'
+import { runChapter27ReadToEarnResilienceAndTokenSyncTests } from './chapter27ReadToEarnResilienceAndTokenSync.test'
 
 async function runAll() {
     console.log('🧪 Starting Full Test Suite Execution...\n')
@@ -84,6 +85,9 @@ async function runAll() {
     console.log('')
 
     await runChapter26ImmediateDapiExecutionAndTokenRefreshTests()
+    console.log('')
+
+    await runChapter27ReadToEarnResilienceAndTokenSyncTests()
     console.log('')
 
     console.log('🎉 ALL TESTS IN SUITE PASSED SUCCESSFULLY!')

@@ -156,6 +156,18 @@ class AxiosClient {
 
         return this.instance.request(config)
     }
+
+    public setAuthorizationToken(token: string): void {
+        if (token) {
+            this.instance.defaults.headers.common['Authorization'] = `Bearer ${token}`
+        } else {
+            delete this.instance.defaults.headers.common['Authorization']
+        }
+    }
+
+    public get defaults() {
+        return this.instance.defaults
+    }
 }
 
 export default AxiosClient

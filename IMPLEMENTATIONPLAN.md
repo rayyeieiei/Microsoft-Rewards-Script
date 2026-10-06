@@ -925,6 +925,39 @@ Pada alur penarikan access token mobile (`GET-APP-TOKEN` via `MobileAccessLogin`
 2. **Kompilasi TypeScript (`npm run build`)**: **Exit Code 0 (Zero Errors / Warnings)**.
 3. **Full Test Suite (`npm test`)**: **100% Passed (Seluruh 26 Bab Pengujian Lolos Sempurna)**.
 
+---
+
+## Bab 27: Eliminasi Loop-Abort Read to Earn, Skip Artikel Ineligibel & Sinkronisasi Global Token Header
+
+### 27.1 Latar Belakang & Akar Masalah
+Pada akun produksi (`canttakeaway36`, `liverative`, `bukansoelap03`):
+1. **Hard-Abort Loop**: Saat membaca artikel ke-2 atau ke-4, `ReadToEarn.ts` langsung memutus (`break`) seluruh perulangan ketika menerima status respons 401 atau non-200. Hal ini menyebabkan proses terhenti prematur padahal masih ada sisa kuota poin harian yang belum tercapai.
+2. **Format Ineligibel di MSN Feed**: Server DAPI Microsoft menolak artikel yang berformat video, slideshow, gallery, atau artikel sponsor/kadaluwarsa dengan HTTP 401/400.
+3. **Desinkronisasi Header Token**: Instance HTTP client Axios belum secara otomatis menyinkronkan header default `Authorization` ketika token disegarkan melalui `loginApp.getAppToken()`.
+
+### 27.2 Solusi & Arsitektur Implementasi
+1. **Eliminasi Loop Breaker & Queue-based Consumer (`ReadToEarn.ts`)**:
+   - Menggantikan perulangan `for` kaku dengan antrean kandidat dinamis `candidateQueue` (`while (articlesRead < targetArticles && candidateQueue.length > 0)`).
+   - Menghapus pemutusan paksa (`break`/`return`) saat 1 artikel gagal.
+   - Jika menerima status 401, lakukan 1x refresh token seluler melalui `this.bot.loginApp.getAppToken()`, perbarui header `Authorization` pada instance klien, dan lakukan percobaan ulang (retry) 1 kali.
+   - Jika artikel tetap gagal (status 401/400/non-200), tandai artikel sebagai ineligibel, cetak log peringatan: `⚠️ [READ-TO-EARN] Artikel ${articleId} tidak memenuhi syarat poin (status ${status}). Melewati ke artikel berikutnya...`, dan lanjutkan antrean ke artikel berikutnya hingga target kuota 10 artikel (+30 poin) terpenuhi.
+2. **Pembersihan MSN Feed & Penambahan Fallback Pool**:
+   - Menambahkan filter `isValidArticleCard` pada `fetchValidMsnArticles` untuk menyaring tipe non-teks (`video`, `slideshow`, `gallery`, `ad`, `sponsored`).
+   - Memperluas `FALLBACK_ARTICLE_POOL` menjadi 32 ID artikel aktif yang terverifikasi di server produksi.
+3. **Sinkronisasi Header Global Token (`AxiosClient` & `MicrosoftRewardsBot`)**:
+   - Menambahkan method `setAuthorizationToken(token)` dan getter `defaults` pada `AxiosClient` (`src/util/Axios.ts`).
+   - Menyinkronkan setter `accessToken` di `src/index.ts` agar memperbarui `this.axios.setAuthorizationToken(token)` dan default header global `axios.defaults.headers.common['Authorization']` secara otomatis seketika.
+
+### 27.3 Hasil Verifikasi & Uji Kualitas
+1. **Chapter 27 Test Suite (`test/chapter27ReadToEarnResilienceAndTokenSync.test.ts`)**:
+   - ✅ **Test 1**: `AxiosClient` menyinkronkan header `Authorization` pada defaults secara akurat.
+   - ✅ **Test 2**: `isValidArticleCard` menolak format video/slideshow/ad dan pool fallback memiliki >= 25 ID artikel.
+   - ✅ **Test 3**: `ReadToEarn` melewati artikel ineligibel tanpa memutus loop hingga target tercapai.
+   - ✅ **Test 4**: Respons 401 berhasil memicu auto-refresh token, memperbarui header, dan melakukan retry sukses.
+2. **Kompilasi TypeScript (`npm run build`)**: **Exit Code 0 (Zero Errors / Warnings)**.
+3. **Full Test Suite (`npm test`)**: **100% Passed (Seluruh 27 Bab Pengujian Lolos Sempurna)**.
+
+
 
 
 
