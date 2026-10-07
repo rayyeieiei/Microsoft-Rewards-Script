@@ -60,6 +60,7 @@ export function isLocalAppUri(url?: string): boolean {
     if (!url || typeof url !== 'string') return false
     const lower = url.trim().toLowerCase()
     return (
+        lower.startsWith('ms-search:') ||
         lower.startsWith('microsoft-edge:') ||
         lower.startsWith('ms-windows-store:') ||
         lower.startsWith('intent:') ||
@@ -229,6 +230,7 @@ export async function runGuardedOperation<T>(options: RunGuardedOperationOptions
         const isPageClosed = (page && typeof page.isClosed === 'function' && page.isClosed()) ||
             errMessage.includes('Target page, context or browser has been closed')
         const isAppUriError = isLocalAppUri(errMessage) ||
+            errMessage.includes('ms-search:') ||
             errMessage.includes('microsoft-edge:') ||
             errMessage.includes('ms-windows-store:') ||
             errMessage.includes('intent:') ||

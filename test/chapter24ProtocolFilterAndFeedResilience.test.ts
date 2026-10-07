@@ -10,6 +10,8 @@ export async function runChapter24ProtocolFilterAndFeedResilienceTests() {
     // Test 1: URI filter and app protocol detection
     {
         const positiveUris = [
+            'ms-search://search/?q=Your%20words%20become%20art',
+            'ms-search:query=windows%20search',
             'microsoft-edge://https://rewards.bing.com',
             'microsoft-edge:https://www.bing.com/search?q=test',
             'ms-windows-store://pdp/?productid=9WZDNCRFHVJL',
@@ -160,5 +162,65 @@ export async function runChapter24ProtocolFilterAndFeedResilienceTests() {
         }
     }
 
+    // Test 6: ms-search:// protocol guard on punch card delegation
+    {
+        const mockLogs: string[] = []
+        let gotoCalled = false
+
+        const mockPage: any = {
+            url: () => 'https://rewards.bing.com/dashboard/envelope?id=test_card',
+            goto: async () => {
+                gotoCalled = true
+            },
+            isClosed: () => false,
+            context: () => ({})
+        }
+
+        const mockBot: any = {
+            isMobile: false,
+            userData: { currentPoints: 100 },
+            logger: {
+                warn: (_isMobile: any, tag: string, msg: string) => mockLogs.push(`[WARN][${tag}] ${msg}`),
+                info: (_isMobile: any, tag: string, msg: string) => mockLogs.push(`[INFO][${tag}] ${msg}`),
+                debug: (_isMobile: any, tag: string, msg: string) => mockLogs.push(`[DEBUG][${tag}] ${msg}`),
+                error: (_isMobile: any, tag: string, msg: string) => mockLogs.push(`[ERROR][${tag}] ${msg}`)
+            },
+            utils: {
+                wait: async (ms: number) => {
+                    mockLogs.push(`[WAIT] ${ms}ms`)
+                }
+            }
+        }
+
+        const promotion: any = {
+            title: 'Your words become art in seconds',
+            destinationUrl: 'ms-search://search/?q=Your%20words%20become%20art',
+            pointProgressMax: 10
+        }
+
+        const punchCard: any = {
+            parentPromotion: { offerId: 'windows_search_parent' }
+        }
+
+        const { UrlReward } = await import('../src/functions/activities/api/UrlReward')
+        const urlReward = new UrlReward(mockBot)
+        await urlReward.doUrlReward(promotion, mockPage, punchCard)
+
+        assert.strictEqual(gotoCalled, false, 'page.goto must never be called for ms-search:// protocol!')
+        const guardLog = mockLogs.find(l => l.includes('[WARN][PUNCHCARD-GUARD]') && l.includes('ms-search:'))
+        assert.ok(guardLog, `Expected PUNCHCARD-GUARD log for ms-search, got: ${mockLogs.join('\n')}`)
+        const waitLog = mockLogs.find(l => l.includes('[WAIT] 1800ms'))
+        assert.ok(waitLog, 'Expected simulated dwell delay around 1800ms')
+
+        console.log('✅ Test 6 Passed: ms-search:// protocol correctly intercepted by PUNCHCARD-GUARD without page.goto')
+    }
+
     console.log('🎉 ALL CHAPTER 24 TESTS PASSED!')
+}
+
+if (require.main === module) {
+    runChapter24ProtocolFilterAndFeedResilienceTests().catch(err => {
+        console.error('❌ Test failed:', err)
+        process.exit(1)
+    })
 }

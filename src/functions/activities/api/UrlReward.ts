@@ -76,6 +76,22 @@ export class UrlReward extends Workers {
             let targetUrl = (promotion.destinationUrl || '').trim()
             let dashboardTileClicked = false
 
+            // Pre-flight sanitasi skema URI lokal aplikasi (ms-search:, microsoft-edge:, ms-windows-store:, intent:, market:)
+            const extractedEarly = extractHttpUrlFromAppUri(targetUrl)
+            if (extractedEarly) {
+                targetUrl = extractedEarly
+            } else if (isLocalAppUri(targetUrl)) {
+                this.bot.logger.warn(
+                    this.bot.isMobile,
+                    punchCard ? 'PUNCHCARD-GUARD' : 'URL-GUARD',
+                    punchCard
+                        ? `⚠️ [PUNCHCARD-GUARD] Melewati navigasi protokol sistem lokal: ${targetUrl}`
+                        : `⚠️ [URL-GUARD] Melewati navigasi skema URI lokal aplikasi: ${targetUrl}`
+                )
+                await this.bot.utils.wait(1800)
+                return
+            }
+
             // 1. Coba cari kartu di dashboard untuk mengambil URL terlengkap & trigger event klik
             try {
                 const currentUrl = page.url().toLowerCase()
@@ -224,11 +240,15 @@ export class UrlReward extends Workers {
             if (isLocalAppUri(targetUrl)) {
                 this.bot.logger.warn(
                     this.bot.isMobile,
-                    'URL-GUARD',
-                    `⚠️ [URL-GUARD] Melewati navigasi skema URI lokal aplikasi: ${targetUrl}`
+                    punchCard ? 'PUNCHCARD-GUARD' : 'URL-GUARD',
+                    punchCard
+                        ? `⚠️ [PUNCHCARD-GUARD] Melewati navigasi protokol sistem lokal: ${targetUrl}`
+                        : `⚠️ [URL-GUARD] Melewati navigasi skema URI lokal aplikasi: ${targetUrl}`
                 )
                 if (dashboardTileClicked) {
                     await this.bot.utils.wait(2500)
+                } else {
+                    await this.bot.utils.wait(1800)
                 }
                 return
             }

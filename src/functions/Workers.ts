@@ -5,6 +5,7 @@ import type { AppDashboardData } from '../interface/AppDashBoardData'
 import type { PunchCardExecutionMode } from '../interface/Config'
 import { Database } from '../util/Database'
 import { resolveUrlRewardAction } from './UrlRewardActionResolver'
+import { isLocalAppUri } from '../runtime/BrowserOperationGuard'
 import { ManualQuestQueue } from '../runtime/manual/ManualQuestQueue'
 import { resolveAccountIdentity } from '../runtime/identity/AccountIdentity'
 import {
@@ -1403,16 +1404,26 @@ export class Workers {
 
                     const balanceBefore = Number(this.bot.userData.currentPoints ?? 0)
                     const claimActivity = card.parentPromotion as unknown as BasePromotion
-                    try {
-                        if (this.bot.activities?.doUrlReward) {
-                            await this.bot.activities.doUrlReward(claimActivity, page, card)
-                        }
-                    } catch (err: any) {
-                        this.bot.logger.error(
+                    const activityUrl = (claimActivity?.destinationUrl || '').trim()
+                    if (isLocalAppUri(activityUrl)) {
+                        this.bot.logger.warn(
                             this.bot.isMobile,
-                            'PUNCHCARD',
-                            `[PUNCHCARD] Error executing single-step punchcard "${title}": ${err?.message || err}`
+                            'PUNCHCARD-GUARD',
+                            `⚠️ [PUNCHCARD-GUARD] Melewati navigasi protokol sistem lokal: ${activityUrl}`
                         )
+                        await this.bot.utils.wait(1800)
+                    } else {
+                        try {
+                            if (this.bot.activities?.doUrlReward) {
+                                await this.bot.activities.doUrlReward(claimActivity, page, card)
+                            }
+                        } catch (err: any) {
+                            this.bot.logger.error(
+                                this.bot.isMobile,
+                                'PUNCHCARD',
+                                `[PUNCHCARD] Error executing single-step punchcard "${title}": ${err?.message || err}`
+                            )
+                        }
                     }
 
                     await this.bot.utils.wait(stepDelayMs)
@@ -1801,7 +1812,17 @@ export class Workers {
                 const currentScope = this.bot.accountScope
                 const balanceBefore = Number(this.bot.userData.currentPoints ?? 0)
                 const claimActivity = card.parentPromotion as unknown as BasePromotion
-                await this.bot.activities.doUrlReward(claimActivity, page, card)
+                const activityUrl = (claimActivity?.destinationUrl || '').trim()
+                if (isLocalAppUri(activityUrl)) {
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'PUNCHCARD-GUARD',
+                        `⚠️ [PUNCHCARD-GUARD] Melewati navigasi protokol sistem lokal: ${activityUrl}`
+                    )
+                    await this.bot.utils.wait(1800)
+                } else {
+                    await this.bot.activities.doUrlReward(claimActivity, page, card)
+                }
 
                 await this.bot.utils.wait(2000)
                 let afterSnapshot = await stateReader.fetchPunchCardSnapshot(offerId)
@@ -2168,6 +2189,16 @@ export class Workers {
         stepNum: number
     ): Promise<{ verified: boolean; usedEnvelope: boolean }> {
         if (!page || typeof page.goto !== 'function') {
+            const activityUrl = (activeChild.destinationUrl || '').trim()
+            if (isLocalAppUri(activityUrl)) {
+                this.bot.logger.warn(
+                    this.bot.isMobile,
+                    'PUNCHCARD-GUARD',
+                    `⚠️ [PUNCHCARD-GUARD] Melewati navigasi protokol sistem lokal: ${activityUrl}`
+                )
+                await this.bot.utils.wait(1800)
+                return { verified: false, usedEnvelope: false }
+            }
             if (this.bot.activities?.doUrlReward) {
                 await this.bot.activities.doUrlReward(activeChild, page, card).catch(() => {})
             }
@@ -2301,6 +2332,16 @@ export class Workers {
                     'PUNCHCARD-ENVELOPE',
                     `[ENVELOPE] Active step button not found via standard selectors, delegating to UrlReward...`
                 )
+                const activityUrl = (activeChild.destinationUrl || '').trim()
+                if (isLocalAppUri(activityUrl)) {
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'PUNCHCARD-GUARD',
+                        `⚠️ [PUNCHCARD-GUARD] Melewati navigasi protokol sistem lokal: ${activityUrl}`
+                    )
+                    await this.bot.utils.wait(1800)
+                    return { verified: false, usedEnvelope: false }
+                }
                 if (this.bot.activities?.doUrlReward) {
                     await this.bot.activities.doUrlReward(activeChild, page, card).catch(() => {})
                 }
@@ -2360,7 +2401,17 @@ export class Workers {
                     } catch {}
                     this.bot.accountScope?.untrackPage(newTab)
                 } else if (activeChild.destinationUrl && this.bot.activities?.doUrlReward) {
-                    await this.bot.activities.doUrlReward(activeChild, page, card).catch(() => {})
+                    const activityUrl = (activeChild.destinationUrl || '').trim()
+                    if (isLocalAppUri(activityUrl)) {
+                        this.bot.logger.warn(
+                            this.bot.isMobile,
+                            'PUNCHCARD-GUARD',
+                            `⚠️ [PUNCHCARD-GUARD] Melewati navigasi protokol sistem lokal: ${activityUrl}`
+                        )
+                        await this.bot.utils.wait(1800)
+                    } else {
+                        await this.bot.activities.doUrlReward(activeChild, page, card).catch(() => {})
+                    }
                 }
 
                 // Langkah E: Jeda propagasi 3 detik, reload halaman amplop
