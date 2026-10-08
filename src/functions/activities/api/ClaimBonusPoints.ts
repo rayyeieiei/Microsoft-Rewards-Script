@@ -12,6 +12,16 @@ export class ClaimBonusPoints extends Workers {
 
     public async claimBonusPoints() {
         if (!this.bot.requestToken) {
+            const cookies = this.bot.isMobile ? this.bot.cookies.mobile : this.bot.cookies.desktop
+            const tokenCookie = (cookies ?? []).find(
+                c => c.name === '__RequestVerificationToken' || c.name.startsWith('__RequestVerificationToken')
+            )
+            if (tokenCookie?.value) {
+                this.bot.requestToken = tokenCookie.value
+            }
+        }
+
+        if (!this.bot.requestToken) {
             this.bot.logger.debug(
                 this.bot.isMobile,
                 'CLAIM-BONUS-POINTS',

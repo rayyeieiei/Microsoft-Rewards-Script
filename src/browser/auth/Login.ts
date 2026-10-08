@@ -473,8 +473,52 @@ export class Login {
             this.bot.rewardsVersion = 'modern'
             this.bot.logger.warn(this.bot.isMobile, 'GET-REWARD-SESSION', 'Modern Rewards dashboard detected.')
         }
-        const token = $(this.selectors.requestToken).attr('value') ?? $(this.selectors.requestTokenMeta).attr('content')
-        if (token) this.bot.requestToken = token
+        // Multi-Tier Anti-CSRF Token Extraction
+        let token = $(this.selectors.requestToken).attr('value') ?? $(this.selectors.requestTokenMeta).attr('content')
+
+        // Tingkat 2: Cek cookie sesi peramban (__RequestVerificationToken)
+        if (!token && page.context && typeof page.context().cookies === 'function') {
+            try {
+                const cookies = await page.context().cookies()
+                const csrfCookie = cookies.find(
+                    c => c.name === '__RequestVerificationToken' || c.name.startsWith('__RequestVerificationToken')
+                )
+                if (csrfCookie?.value) {
+                    token = csrfCookie.value
+                }
+            } catch {}
+        }
+
+        // Tingkat 3: Evaluasi runtime di halaman dashboard
+        if (!token && typeof page.evaluate === 'function') {
+            try {
+                token = await page.evaluate(() => {
+                    const input = document.querySelector('input[name="__RequestVerificationToken"]') as HTMLInputElement
+                    if (input?.value) return input.value
+                    const meta = document.querySelector('meta[name="__RequestVerificationToken"]') as HTMLMetaElement
+                    if (meta?.content) return meta.content
+                    if ((window as any).__RequestVerificationToken) return (window as any).__RequestVerificationToken
+                    if ((window as any).dashboard?.requestVerificationToken) return (window as any).dashboard.requestVerificationToken
+                    if ((window as any).rewardsAppConfig?.__RequestVerificationToken) return (window as any).rewardsAppConfig.__RequestVerificationToken
+                    const cookieMatch = document.cookie.match(/__RequestVerificationToken=([^;]+)/)
+                    if (cookieMatch && cookieMatch[1]) return decodeURIComponent(cookieMatch[1])
+                    for (const s of Array.from(document.scripts)) {
+                        const m = (s.textContent || '').match(/__RequestVerificationToken["']?\s*[:=]\s*["']([^"']+)["']/)
+                        if (m && m[1]) return m[1]
+                    }
+                    return null
+                }).catch(() => null)
+            } catch {}
+        }
+
+        if (token) {
+            this.bot.requestToken = token
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'GET-REWARD-SESSION',
+                `Anti-CSRF verification token captured successfully (${token.substring(0, 10)}...)`
+            )
+        }
     }
 
     private async checkSelector(page: Page, selector: string): Promise<boolean> {
