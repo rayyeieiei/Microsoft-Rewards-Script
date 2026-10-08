@@ -247,15 +247,15 @@ class Browser {
                 const type = req.resourceType()
                 const url = req.url().toLowerCase()
 
-                // Whitelist telemetri penting & verifikasi poin: JANGAN PERNAH dibatalkan
+                // Whitelist telemetri penting & verifikasi poin (tracking pixel 1x1 & telemetry beacons): JANGAN PERNAH dibatalkan
                 const isRewardsTelemetry =
+                    url.includes('/fd/ls/lsp.aspx') ||
                     url.includes('/fd/ls/') ||
-                    url.includes('/rewards/api/') ||
+                    url.includes('c.bing.com/c.gif') ||
                     url.includes('c.bing.com') ||
-                    url.includes('rewards.bing.com') ||
-                    url.includes('activityid=') ||
+                    url.includes('/rewards/api/') ||
                     url.includes('/rewards/log') ||
-                    url.includes('/fd/ls/lsp.aspx')
+                    url.includes('activityid=')
 
                 if (isRewardsTelemetry) {
                     return route.continue().catch(() => {})
@@ -267,29 +267,20 @@ class Browser {
                     return route.abort().catch(() => {})
                 }
 
-                // 2. Blokir gambar umum/berat (format file banner/konten visual besar), tapi izinkan tracking pixel 1x1
+                // 2. Blokir ketat seluruh gambar di semua domain (termasuk rewards.bing.com), kecuali tracking pixel 1x1
                 if (type === 'image') {
-                    const isHeavyImage =
-                        url.endsWith('.png') ||
-                        url.endsWith('.jpg') ||
-                        url.endsWith('.jpeg') ||
-                        url.endsWith('.webp') ||
-                        url.endsWith('.svg') ||
-                        url.includes('.png?') ||
-                        url.includes('.jpg?') ||
-                        url.includes('.jpeg?') ||
-                        url.includes('.webp?') ||
-                        url.includes('bing.com/th?id=') ||
-                        url.includes('static-news.msn.com')
-
-                    if (isHeavyImage) {
+                    const isTrackingPixel = url.includes('lsp.aspx') || url.includes('c.gif')
+                    if (!isTrackingPixel) {
                         this.bot.trackBlockedRequest()
                         return route.abort().catch(() => {})
                     }
                 }
 
-                // 3. Blokir domain iklan dan tracker pihak ketiga eksternal
+                // 3. Blokir domain iklan, pelacak berat Microsoft/Bing/MSN, dan tracker pihak ketiga
                 if (
+                    url.includes('vortex.data.microsoft.com') ||
+                    url.includes('browser.pipe.aria.microsoft.com') ||
+                    url.includes('assets.msn.com') ||
                     url.includes('clarity.ms') ||
                     url.includes('adnxs.com') ||
                     url.includes('doubleclick.net') ||
@@ -314,6 +305,16 @@ class Browser {
                 ) {
                     this.bot.trackBlockedRequest()
                     return route.abort().catch(() => {})
+                }
+
+                // 4. Whitelist endpoint API Rewards penting & dokumen navigasi (bukan aset global)
+                const isRewardsEndpoint =
+                    url.includes('/api/getuserinfo') ||
+                    url.includes('/rewards/api/') ||
+                    (url.includes('rewards.bing.com') && (url.includes('/api/') || type === 'document' || type === 'script' || type === 'stylesheet'))
+
+                if (isRewardsEndpoint) {
+                    return route.continue().catch(() => {})
                 }
 
                 // Izinkan document HTML, scripts penting Rewards, telemetri event Microsoft, XHR/Fetch API, dan CSS
