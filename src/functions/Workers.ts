@@ -217,57 +217,77 @@ export class Workers {
     }
 
     public async doDailySet(data: DashboardData, page: Page) {
-        // 1. Ambil dari seluruh tanggal di dailySetPromotions (API)
-        const dailySetMapItems: BasePromotion[] = Object.values(data.dailySetPromotions ?? {}).flat() as BasePromotion[]
-
-        const fallbackPromos = [
-            ...(data.promotionalItems ?? []),
-            ...(data.morePromotions ?? []),
-            ...(data.morePromotionsWithoutPromotionalItems ?? [])
-        ].filter(x => (x?.offerId ?? '').toLowerCase().includes('dailyset')) as BasePromotion[]
-
-        const combined = [...dailySetMapItems, ...fallbackPromos].filter(Boolean)
-        let uniqueDailySet = [...new Map(combined.map(p => [p.offerId, p])).values()]
-
-        // Filter tanggal hari ini (Lokal & UTC) & abaikan preview misi hari esok serta misi kadaluarsa kemarin
+        // 1. Ambil item Daily Set secara presisi dari tanggal hari ini (API)
         const now = new Date()
-        const todayLocal = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`
-        const todayUtc = `${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, '0')}${String(now.getUTCDate()).padStart(2, '0')}`
-        const validDates = new Set([todayLocal, todayUtc])
+        const todayFormatted = this.bot.utils.getFormattedDate() // "MM/DD/YYYY"
+        const monthUtc = String(now.getUTCMonth() + 1).padStart(2, '0')
+        const dayUtc = String(now.getUTCDate()).padStart(2, '0')
+        const yearUtc = now.getUTCFullYear()
+        const todayUtcFormatted = `${monthUtc}/${dayUtc}/${yearUtc}`
+        const todayIso = (now.toISOString().split('T')[0] ?? '') as string
+        const todayCompact = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`
+        const todayUtcCompact = `${yearUtc}${monthUtc}${dayUtc}`
 
-        // Filter item Daily Set khusus untuk hari ini dari API
-        const todayDailySetItems = uniqueDailySet.filter(x => {
-            if (!x) return false
-            const offerIdLower = (x.offerId ?? '').toLowerCase()
-            if (offerIdLower.includes('locked')) return false
+        const candidateKeys: string[] = [todayFormatted, todayUtcFormatted, todayIso, todayCompact, todayUtcCompact]
+        const promoMap: Record<string, BasePromotion[]> = (data.dailySetPromotions ?? {}) as Record<string, BasePromotion[]>
+        const availableKeys = Object.keys(promoMap)
 
-            // Lewati jika tanggal DailySet bukan hari ini (kemarin kadaluarsa, besok terkunci)
-            const dateMatch = (x.offerId ?? '').match(/DailySet_(\d{8})/i)
-            if (dateMatch && dateMatch[1] && !validDates.has(dateMatch[1])) {
-                return false
-            }
-            return true
-        })
+        let targetKey: string | undefined = candidateKeys.find(k => Boolean(k && Array.isArray(promoMap[k]) && promoMap[k]!.length > 0))
+        if (!targetKey && availableKeys.length > 0) {
+            targetKey = availableKeys.find(k => {
+                const digits = k.replace(/[^\d]/g, '')
+                return digits.includes(todayCompact) || digits.includes(todayUtcCompact)
+            })
+        }
 
-        let activitiesUncompleted = todayDailySetItems.filter(x => {
+        let todayItems: BasePromotion[] = []
+        if (targetKey && Array.isArray(promoMap[targetKey])) {
+            todayItems = promoMap[targetKey]!
+        } else if (availableKeys.length === 1 && availableKeys[0] && Array.isArray(promoMap[availableKeys[0]])) {
+            todayItems = promoMap[availableKeys[0]]!
+        } else {
+            // Fallback: jika key tanggal tidak cocok persis, ambil flat list dan filter ketat
+            const allFlat = Object.values(promoMap).flat()
+            const validDates = new Set([todayCompact, todayUtcCompact])
+            todayItems = allFlat.filter(x => {
+                if (!x) return false
+                const dateMatch = (x.offerId ?? '').match(/DailySet_(\d{8})/i)
+                return !dateMatch || !dateMatch[1] || validDates.has(dateMatch[1])
+            })
+        }
+
+        // Jika API tidak memiliki item, gunakan fallback dari promotionalItems / morePromotions yang ber-tag dailyset
+        if (todayItems.length === 0) {
+            const fallbackPromos = [
+                ...(data.promotionalItems ?? []),
+                ...(data.morePromotions ?? []),
+                ...(data.morePromotionsWithoutPromotionalItems ?? [])
+            ].filter(x => (x?.offerId ?? '').toLowerCase().includes('dailyset')) as BasePromotion[]
+            todayItems = fallbackPromos
+        }
+
+        let uniqueDailySet = [...new Map(todayItems.map(p => [p.offerId || p.title, p])).values()]
+            .filter(x => x && !(x.offerId ?? '').toLowerCase().includes('locked'))
+
+        let activitiesUncompleted = uniqueDailySet.filter(x => {
             if (!x || x.complete || (x.pointProgressMax > 0 && (x.pointProgress ?? 0) >= x.pointProgressMax))
                 return false
             return true
         })
 
         // 1. Jika API menemukan item Daily Set untuk hari ini dan semuanya sudah berstatus complete, Daily Set tuntas!
-        if (todayDailySetItems.length > 0 && activitiesUncompleted.length === 0) {
+        if (uniqueDailySet.length > 0 && activitiesUncompleted.length === 0) {
             this.bot.logger.info(
                 this.bot.isMobile,
                 'DAILY-SET',
-                `Daily Set already completed for today! (${todayDailySetItems.length}/${todayDailySetItems.length} verified on server)`,
+                `Daily Set already completed for today! (${uniqueDailySet.length}/${uniqueDailySet.length} verified on server)`,
                 'green'
             )
             return
         }
 
         // 2. Fallback: HANYA jika dari API sama sekali tidak ditemukan item Daily Set hari ini, periksa Live DOM Dashboard
-        if (todayDailySetItems.length === 0 && activitiesUncompleted.length === 0) {
+        if (uniqueDailySet.length === 0 && activitiesUncompleted.length === 0) {
             try {
                 const currentUrl = page.url().toLowerCase()
                 if (!currentUrl.includes('rewards.bing.com')) {
@@ -2062,8 +2082,11 @@ export class Workers {
                 )
 
                 if (
-                    (type === 'quiz' || type.includes('trivia') || type.includes('poll') || type.includes('survey')) &&
-                    !offerId.includes('dailyset')
+                    type === 'quiz' ||
+                    type.includes('trivia') ||
+                    type.includes('poll') ||
+                    type.includes('survey') ||
+                    offerId.includes('quiz')
                 ) {
                     await this.bot.activities.doQuiz(activity)
                 } else if (type === 'findclippy') {
@@ -2219,6 +2242,11 @@ export class Workers {
                 await this.bot.utils.wait(2000)
             }
 
+            // Tunggu hidrasi asinkron halaman amplop SPA dengan batas aman
+            if (typeof page.waitForLoadState === 'function') {
+                await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {})
+            }
+
             // Langkah B: Tunggu kemunculan salah satu elemen interaktif (timeout 7000ms)
             const cleanTitle = (activeChild.title || '').replace(/[^\w\s]/gi, ' ').trim()
             const titleSnippet = cleanTitle.split(/\s+/).slice(0, 4).join(' ')
@@ -2309,22 +2337,92 @@ export class Workers {
                 `a.c-call-to-action`
             ]
 
-            let activeStepButton = null
-            for (const sel of selectors) {
-                try {
-                    const loc = page.locator(sel)
-                    const count = await loc.count().catch(() => 0)
-                    for (let i = 0; i < count; i++) {
-                        const el = loc.nth(i)
-                        const isVis = await el.isVisible().catch(() => false)
-                        if (isVis) {
-                            activeStepButton = el
-                            break
-                        }
+            const findActiveStepButton = async (): Promise<any> => {
+                const searchContexts: any[] = [page, ...(typeof page.frames === 'function' ? page.frames() : [])]
+
+                const containerSelectors = [
+                    `.punchcard-step:not(.completed)`,
+                    `[class*="punchcard-step"]:not([class*="completed"])`,
+                    `[class*="step-card"]:not([class*="completed"])`,
+                    `[class*="step"]:not([class*="completed"])`,
+                    `[class*="card"]:not([class*="completed"])`,
+                    `section:not([class*="completed"])`,
+                    `div[data-bi-area*="punchcard" i]`
+                ]
+
+                const actionButtonSelectors = [
+                    'a.c-call-to-action',
+                    '.c-call-to-action',
+                    'a[href*="/search?"]',
+                    'button[data-bi-name*="punchcard" i]',
+                    'button:has-text("Explore")',
+                    'button:has-text("Start")',
+                    'button:has-text("Mulai")',
+                    'button:has-text("Jelajahi")',
+                    'button:has-text("Shop now")',
+                    'button:has-text("Get started")',
+                    'a:has-text("Explore")',
+                    'a:has-text("Start")',
+                    'a:has-text("Mulai")',
+                    'a:has-text("Jelajahi")',
+                    'a:has-text("Shop now")',
+                    'a:has-text("Get started")',
+                    'a',
+                    'button',
+                    '[role="button"]'
+                ]
+
+                // Strategi 1: Scoped Container Matching
+                for (const context of searchContexts) {
+                    for (const contSel of containerSelectors) {
+                        try {
+                            const containers = context.locator(contSel)
+                            const contCount = await containers.count().catch(() => 0)
+                            for (let c = 0; c < contCount; c++) {
+                                const cont = containers.nth(c)
+                                const isContVis = await cont.isVisible().catch(() => false)
+                                if (!isContVis) continue
+
+                                const contText = (await cont.innerText().catch(() => '')) || ''
+                                const matchesSnippet =
+                                    titleSnippet.length >= 3 &&
+                                    contText.toLowerCase().includes(titleSnippet.toLowerCase())
+                                const matchesOffer =
+                                    Boolean(activeChild.offerId) && contText.includes(activeChild.offerId)
+
+                                if (matchesSnippet || matchesOffer || contCount === 1) {
+                                    for (const btnSel of actionButtonSelectors) {
+                                        const btn = cont.locator(btnSel).first()
+                                        if (await btn.isVisible().catch(() => false)) {
+                                            return btn
+                                        }
+                                    }
+                                }
+                            }
+                        } catch {}
                     }
-                    if (activeStepButton) break
-                } catch {}
+                }
+
+                // Strategi 2: Fallback ke standard selectors jika Scoped Container belum menemukan tombol
+                for (const context of searchContexts) {
+                    for (const sel of selectors) {
+                        try {
+                            const loc = context.locator(sel)
+                            const count = await loc.count().catch(() => 0)
+                            for (let i = 0; i < count; i++) {
+                                const el = loc.nth(i)
+                                if (await el.isVisible().catch(() => false)) {
+                                    return el
+                                }
+                            }
+                        } catch {}
+                    }
+                }
+
+                return null
             }
+
+            let activeStepButton = await findActiveStepButton()
 
             if (!activeStepButton) {
                 this.bot.logger.debug(
@@ -2457,21 +2555,7 @@ export class Workers {
                     'PUNCHCARD-ENVELOPE',
                     `[ENVELOPE] Step ${stepNum} checkmark not detected after initial click. Retrying 1x re-click...`
                 )
-                let retryButton = null
-                for (const sel of selectors) {
-                    try {
-                        const loc = page.locator(sel)
-                        const count = await loc.count().catch(() => 0)
-                        for (let i = 0; i < count; i++) {
-                            const el = loc.nth(i)
-                            if (await el.isVisible().catch(() => false)) {
-                                retryButton = el
-                                break
-                            }
-                        }
-                        if (retryButton) break
-                    } catch {}
-                }
+                const retryButton = await findActiveStepButton()
                 if (retryButton) {
                     isDomVerified = await clickAndHandleTab(retryButton)
                 }
