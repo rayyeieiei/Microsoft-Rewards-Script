@@ -15,6 +15,17 @@ export interface AccountQuotaReport {
     blockedRequests: number
 }
 
+export interface SessionBandwidthReport {
+    totalBytes: number
+    totalMb: number
+    budgetBytes: number
+    budgetMb: number
+    budgetResult: DataSaverBudgetResult
+    blockedRequests: number
+    breakdown: Record<DataSaverCategory, CategoryStats>
+    breakdownMb: Record<DataSaverCategory, number>
+}
+
 function createEmptyBreakdown(): Record<DataSaverCategory, CategoryStats> {
     return {
         document: { bytes: 0, requests: 0 },
@@ -41,6 +52,11 @@ export function mapResourceTypeToCategory(resourceType: string): DataSaverCatego
 export class DataSaverManager {
     private static instance: DataSaverManager
     private currentAccountKey: string | null = null
+    private sessionStats = {
+        totalBytes: 0,
+        blockedRequests: 0,
+        breakdown: createEmptyBreakdown()
+    }
     private accounts = new Map<
         string,
         {
@@ -73,6 +89,12 @@ export class DataSaverManager {
         bytes: number,
         accountKey?: string
     ): void {
+        if (bytes > 0) {
+            this.sessionStats.totalBytes += bytes
+            this.sessionStats.breakdown[category].bytes += bytes
+        }
+        this.sessionStats.breakdown[category].requests += 1
+
         const targetAccount = accountKey || this.currentAccountKey
         if (!targetAccount) return
 
@@ -94,6 +116,8 @@ export class DataSaverManager {
     }
 
     public recordBlockedRequest(accountKey?: string): void {
+        this.sessionStats.blockedRequests += 1
+
         const targetAccount = accountKey || this.currentAccountKey
         if (!targetAccount) return
 
@@ -135,9 +159,52 @@ export class DataSaverManager {
         }
     }
 
+    public resetSessionStats(): void {
+        this.sessionStats = {
+            totalBytes: 0,
+            blockedRequests: 0,
+            breakdown: createEmptyBreakdown()
+        }
+    }
+
     public resetAll(): void {
         this.accounts.clear()
         this.currentAccountKey = null
+        this.resetSessionStats()
+    }
+
+    public getSessionReport(
+        budgetBytesPerAccount: number = 20 * 1024 * 1024,
+        accountsCount: number = 1
+    ): SessionBandwidthReport {
+        const totalBudget = budgetBytesPerAccount * Math.max(1, accountsCount)
+        const budgetResult = evaluateDataSaverBudget(this.sessionStats.totalBytes, totalBudget)
+
+        const categories: DataSaverCategory[] = [
+            'document',
+            'script',
+            'xhr/fetch',
+            'image',
+            'media',
+            'font',
+            'other'
+        ]
+
+        const breakdownMb = categories.reduce((acc, cat) => {
+            acc[cat] = Number((this.sessionStats.breakdown[cat].bytes / (1024 * 1024)).toFixed(2))
+            return acc
+        }, {} as Record<DataSaverCategory, number>)
+
+        return {
+            totalBytes: this.sessionStats.totalBytes,
+            totalMb: Number((this.sessionStats.totalBytes / (1024 * 1024)).toFixed(2)),
+            budgetBytes: totalBudget,
+            budgetMb: Number((totalBudget / (1024 * 1024)).toFixed(2)),
+            budgetResult,
+            blockedRequests: this.sessionStats.blockedRequests,
+            breakdown: JSON.parse(JSON.stringify(this.sessionStats.breakdown)),
+            breakdownMb
+        }
     }
 
     public getAccountStats(accountKey: string) {

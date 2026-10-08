@@ -248,6 +248,35 @@ export class MicrosoftRewardsBot {
         blockedRequests: 0
     }
 
+    public sessionStartTime: number = Date.now()
+    public sessionTotalAccounts: number = 0
+    public sessionCompletedAccounts: number = 0
+    public sessionActiveAccountEmail: string = ''
+    private hasLoggedShutdownSummary = false
+
+    public logSessionBandwidthSummary(signal: string = 'SIGINT'): void {
+        if (this.hasLoggedShutdownSummary) {
+            return
+        }
+        this.hasLoggedShutdownSummary = true
+
+        const report = DataSaverManager.getInstance().getSessionReport(
+            20 * 1024 * 1024,
+            Math.max(1, this.sessionTotalAccounts || 1)
+        )
+        const durationMin = ((Date.now() - this.sessionStartTime) / 1000 / 60).toFixed(1)
+        const b = report.breakdownMb
+        const activeTag = this.sessionActiveAccountEmail ? ` (Aktif: ${this.sessionActiveAccountEmail})` : ''
+
+        this.logger.info('main', 'SHUTDOWN', '================================================================================', 'yellow')
+        this.logger.info('main', 'SHUTDOWN', `🛑 INTERUPSI TERDETEKSI (${signal} / Operator Stop)`, 'yellow')
+        this.logger.info('main', 'SHUTDOWN', `📊 Total Bandwidth Terpakai : ${report.totalMb} MB / Budget ${report.budgetMb} MB [Status: ${report.budgetResult.status}]`, 'yellow')
+        this.logger.info('main', 'SHUTDOWN', `📁 Rincian Data: doc=${b.document}MB | js=${b.script}MB | xhr=${b['xhr/fetch']}MB | img=${b.image}MB | other=${b.other}MB`, 'yellow')
+        this.logger.info('main', 'SHUTDOWN', `⏱️ Durasi Berjalan         : ${durationMin} menit | Akun Diproses: ${this.sessionCompletedAccounts}/${this.sessionTotalAccounts}${activeTag}`, 'yellow')
+        this.logger.info('main', 'SHUTDOWN', `🛡️ Request Diblokir        : ${report.blockedRequests} request hemat kuota`, 'yellow')
+        this.logger.info('main', 'SHUTDOWN', '================================================================================', 'yellow')
+    }
+
     public trackBandwidth(bytes: number, resourceType?: string) {
         if (typeof bytes === 'number' && bytes > 0) {
             this.bandwidthTracker.totalBytes += bytes
@@ -644,6 +673,11 @@ export class MicrosoftRewardsBot {
     public async requestShutdown(reason: string = 'manual', budgetMs: number = 10000): Promise<ShutdownResult> {
         if (this.shutdownPromise) {
             return this.shutdownPromise
+        }
+
+        const shutdownSignal = reason === 'manual' ? 'C2-STOP' : reason
+        if (typeof this.logSessionBandwidthSummary === 'function') {
+            this.logSessionBandwidthSummary(shutdownSignal)
         }
 
         this.stopRequested = true
@@ -1128,6 +1162,13 @@ export class MicrosoftRewardsBot {
             `Starting Microsoft Rewards Script | v${pkg.version} | Accounts: ${totalAccounts} | Clusters: ${this.config.clusters}`
         )
 
+        this.sessionStartTime = runStartTime
+        this.sessionTotalAccounts = totalAccounts
+        this.sessionCompletedAccounts = 0
+        this.sessionActiveAccountEmail = ''
+        this.hasLoggedShutdownSummary = false
+        DataSaverManager.getInstance().resetSessionStats()
+
         if (this.config.clusters > 1) {
             if (cluster.isPrimary) {
                 await this.runMaster(runStartTime)
@@ -1300,6 +1341,10 @@ export class MicrosoftRewardsBot {
         let scope: AccountScope | null = null
         const accountStartTime = Date.now()
         const accountEmail = account.email
+        this.sessionActiveAccountEmail = accountEmail
+        if (!this.sessionTotalAccounts) {
+            this.sessionTotalAccounts = 1
+        }
         try {
             this.resetAccountState()
             scope = await AccountScope.create({
@@ -1473,6 +1518,9 @@ export class MicrosoftRewardsBot {
                     await this.browserFactory.recycleBrowser().catch(() => {})
                 }
             } finally {
+                if (this.sessionActiveAccountEmail === accountEmail) {
+                    this.sessionActiveAccountEmail = ''
+                }
                 if (this.accountScope === scope) {
                     this.accountScope = null
                     this.abortController = undefined
@@ -1668,6 +1716,12 @@ export class MicrosoftRewardsBot {
     private async runTasks(accounts: Account[], runStartTime: number): Promise<AccountStats[]> {
         this.runId = `run_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`
         const accountStats: AccountStats[] = []
+        this.sessionStartTime = runStartTime
+        this.sessionTotalAccounts = accounts.length
+        this.sessionCompletedAccounts = 0
+        this.sessionActiveAccountEmail = ''
+        this.hasLoggedShutdownSummary = false
+        DataSaverManager.getInstance().resetSessionStats()
 
         // Start dynamic outbound local proxy if enabled
         if (this.config.useDynamicWifiProxy) {
@@ -1706,6 +1760,7 @@ export class MicrosoftRewardsBot {
                     break
                 }
 
+                this.sessionActiveAccountEmail = account.email
                 const accountStartTime = Date.now()
                 // Dynamic Adaptive Account Deadline (default estimasi 90 missing pts = 18m, clamped 14m - 25m)
                 let accountDeadlineMs = this.calculateDynamicAccountDeadline(90)
@@ -1783,6 +1838,11 @@ export class MicrosoftRewardsBot {
                         success: false,
                         error: 'SEQUENTIAL_DEADLINE_TIMEOUT_EXCEEDED'
                     })
+                } finally {
+                    this.sessionCompletedAccounts++
+                    if (this.sessionActiveAccountEmail === account.email) {
+                        this.sessionActiveAccountEmail = ''
+                    }
                 }
             }
 
@@ -1831,6 +1891,12 @@ export class MicrosoftRewardsBot {
     ): Promise<AccountStats[]> {
         this.runId = `run_dual_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`
         const accountStats: AccountStats[] = []
+        this.sessionStartTime = runStartTime
+        this.sessionTotalAccounts = accounts.length
+        this.sessionCompletedAccounts = 0
+        this.sessionActiveAccountEmail = ''
+        this.hasLoggedShutdownSummary = false
+        DataSaverManager.getInstance().resetSessionStats()
 
         // Start dynamic outbound local proxy if enabled
         if (this.config.useDynamicWifiProxy) {
@@ -1864,6 +1930,7 @@ export class MicrosoftRewardsBot {
 
             const batch = batches[bIdx]!
             const batchNum = bIdx + 1
+            this.sessionActiveAccountEmail = batch.map(a => a.email).join(', ')
             this.logger.info(
                 'main',
                 'BATCH-DISPATCHER',
@@ -1958,6 +2025,9 @@ export class MicrosoftRewardsBot {
                         error: 'BATCH_DEADLINE_TIMEOUT_EXCEEDED'
                     })
                 }
+            } finally {
+                this.sessionCompletedAccounts += batch.length
+                this.sessionActiveAccountEmail = ''
             }
 
             // Batch complete IP rotation hook
@@ -2385,11 +2455,13 @@ async function main(): Promise<void> {
         void flushAllWebhooks()
     })
     process.on('SIGINT', async () => {
+        rewardsBot.logSessionBandwidthSummary('SIGINT')
         rewardsBot.logger.warn('main', 'PROCESS', 'SIGINT received, executing graceful shutdown...')
         await rewardsBot.requestShutdown('SIGINT', 10000).catch(() => {})
         process.exit(130)
     })
     process.on('SIGTERM', async () => {
+        rewardsBot.logSessionBandwidthSummary('SIGTERM')
         rewardsBot.logger.warn('main', 'PROCESS', 'SIGTERM received, executing graceful shutdown...')
         await rewardsBot.requestShutdown('SIGTERM', 10000).catch(() => {})
         process.exit(143)

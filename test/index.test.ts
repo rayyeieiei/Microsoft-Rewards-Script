@@ -21,6 +21,7 @@ import { runChapter25OAuthConsentAndBonusClaimTests } from './chapter25OAuthCons
 import { runChapter26ImmediateDapiExecutionAndTokenRefreshTests } from './chapter26ImmediateDapiExecutionAndTokenRefresh.test'
 import { runChapter27ReadToEarnResilienceAndTokenSyncTests } from './chapter27ReadToEarnResilienceAndTokenSync.test'
 import { runChapter28TokenExchangeAndConcurrencyMutexTests } from './chapter28TokenExchangeAndConcurrencyMutex.test'
+import { runChapter29SigintBandwidthTelemetryTests } from './chapter29SigintBandwidthTelemetry.test'
 
 async function runAll() {
     console.log('🧪 Starting Full Test Suite Execution...\n')
@@ -92,6 +93,9 @@ async function runAll() {
     console.log('')
 
     await runChapter28TokenExchangeAndConcurrencyMutexTests()
+    console.log('')
+
+    await runChapter29SigintBandwidthTelemetryTests()
     console.log('')
 
     console.log('🎉 ALL TESTS IN SUITE PASSED SUCCESSFULLY!')
