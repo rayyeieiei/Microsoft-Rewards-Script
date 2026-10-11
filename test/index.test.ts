@@ -22,6 +22,7 @@ import { runChapter26ImmediateDapiExecutionAndTokenRefreshTests } from './chapte
 import { runChapter27ReadToEarnResilienceAndTokenSyncTests } from './chapter27ReadToEarnResilienceAndTokenSync.test'
 import { runChapter28TokenExchangeAndConcurrencyMutexTests } from './chapter28TokenExchangeAndConcurrencyMutex.test'
 import { runChapter29SigintBandwidthTelemetryTests } from './chapter29SigintBandwidthTelemetry.test'
+import { runChapter30ZombieWorkerAndPunchCardResolverTests } from './chapter30ZombieWorkerAndPunchCardResolver.test'
 
 async function runAll() {
     console.log('🧪 Starting Full Test Suite Execution...\n')
@@ -96,6 +97,9 @@ async function runAll() {
     console.log('')
 
     await runChapter29SigintBandwidthTelemetryTests()
+    console.log('')
+
+    await runChapter30ZombieWorkerAndPunchCardResolverTests()
     console.log('')
 
     console.log('🎉 ALL TESTS IN SUITE PASSED SUCCESSFULLY!')

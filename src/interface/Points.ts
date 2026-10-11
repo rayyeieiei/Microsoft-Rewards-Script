@@ -10,6 +10,10 @@ export interface AppEarnablePoints {
     readToEarn: number
     checkIn: number
     totalEarnablePoints: number
+    readToEarnProgress?: number
+    readToEarnMax?: number
+    readToEarnCompleted?: boolean
+    readToEarnActivity?: any
 }
 
 export interface MissingSearchPoints {

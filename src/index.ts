@@ -38,7 +38,7 @@ import { DataSaverManager, mapResourceTypeToCategory } from './util/DataSaver'
 import { Database } from './util/Database'
 import { AccountScope } from './runtime/AccountScope'
 import { AccountDisposer } from './runtime/AccountDisposer'
-import { createManagedPage, recoverOwnerPage } from './runtime/BrowserOperationGuard'
+import { createManagedPage, recoverOwnerPage, interruptibleWait } from './runtime/BrowserOperationGuard'
 import crypto from 'crypto'
 import {
     validateOwnershipPolicy,
@@ -372,10 +372,44 @@ export class MicrosoftRewardsBot {
         return await this.activeTokenRefreshPromise
     }
 
+    public resolveFallbackGeoLocale(account?: Account): string {
+        const accountGeo = (account?.geoLocale || this.activeAccount?.geoLocale || '').trim()
+        if (accountGeo && accountGeo.toLowerCase() !== 'auto') {
+            if (accountGeo.toLowerCase() === 'id' || accountGeo.toLowerCase().startsWith('id-')) {
+                return 'ID'
+            }
+            return accountGeo.toUpperCase()
+        }
+
+        const configLocale = String(
+            (this.config as any)?.locale || (this.config as any)?.geoLocale || ''
+        ).trim()
+        if (configLocale && configLocale.toLowerCase() !== 'auto') {
+            if (configLocale.toLowerCase().includes('id')) {
+                return 'ID'
+            }
+            return configLocale.split('-').pop()!.toUpperCase()
+        }
+
+        try {
+            const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''
+            if (
+                tz.includes('Jakarta') ||
+                tz.includes('Pontianak') ||
+                tz.includes('Makassar') ||
+                tz.includes('Jayapura')
+            ) {
+                return 'ID'
+            }
+        } catch {}
+
+        return 'ID'
+    }
+
     constructor() {
         this.userData = {
             userName: '',
-            geoLocale: 'US',
+            geoLocale: 'ID',
             langCode: 'en',
             initialPoints: 0,
             currentPoints: 0,
@@ -411,7 +445,7 @@ export class MicrosoftRewardsBot {
         this.browser?.func?.resetCounters()
         this.userData = {
             userName: '',
-            geoLocale: 'US',
+            geoLocale: this.resolveFallbackGeoLocale(),
             langCode: 'en',
             initialPoints: 0,
             currentPoints: 0,
@@ -1378,7 +1412,11 @@ export class MicrosoftRewardsBot {
                     'cyan'
                 )
                 this.updateDashboardAccount(accountEmail, { status: 'Stealth Delay' })
-                await this.utils.wait(startDelay)
+                await interruptibleWait(startDelay, scope.abortController.signal)
+            }
+
+            if (scope.abortController.signal.aborted) {
+                throw new Error('ACCOUNT_ABORTED_BEFORE_START')
             }
 
             this.logger.info(
@@ -1417,9 +1455,14 @@ export class MicrosoftRewardsBot {
             const statusColor = bRes.status === 'PASS' ? 'cyan' : 'yellow'
 
             if (result) {
-                const collectedPoints = result.collectedPoints ?? 0
-                const accountInitialPoints = result.initialPoints ?? 0
-                const accountFinalPoints = accountInitialPoints + collectedPoints
+                const accountInitialPoints =
+                    this.userData.initialPoints > 0 ? this.userData.initialPoints : (result.initialPoints ?? 0)
+                const accountFinalPoints =
+                    this.userData.currentPoints > 0
+                        ? Math.max(this.userData.currentPoints, accountInitialPoints + (result.collectedPoints ?? 0))
+                        : accountInitialPoints + (result.collectedPoints ?? 0)
+                const totalCollected = Math.max(0, accountFinalPoints - accountInitialPoints)
+                const collectedPoints = totalCollected
 
                 const stat: AccountStats = {
                     email: accountEmail,
@@ -1796,9 +1839,11 @@ export class MicrosoftRewardsBot {
                     }
                 }
 
+                let accountExecutionPromise: Promise<AccountStats> | null = null
                 try {
+                    accountExecutionPromise = this.executeSingleAccount(account)
                     const stat = await Promise.race<AccountStats>([
-                        this.executeSingleAccount(account),
+                        accountExecutionPromise,
                         deadlinePromise as any
                     ])
                     if (deadlineTimer) clearTimeout(deadlineTimer)
@@ -1812,6 +1857,11 @@ export class MicrosoftRewardsBot {
                         'ACCOUNT-DEADLINE',
                         `🚨 Akun ${account.email} melebihi batas waktu maksimal dinamis (${Math.round(accountDeadlineMs / 60000)} menit)! Memaksa pembersihan & pembatalan...`
                     )
+                    if (this.abortController) {
+                        try {
+                            this.abortController.abort()
+                        } catch {}
+                    }
                     if (this.accountScope) {
                         try {
                             await AccountDisposer.forceKill(this.accountScope)
@@ -1826,6 +1876,15 @@ export class MicrosoftRewardsBot {
                     if (this.browserFactory) {
                         try {
                             await this.browserFactory.recycleBrowser().catch(() => {})
+                        } catch {}
+                    }
+                    // Bounded Join: Pastikan eksekusi akun sebelumnya selesai / diputus tuntas (maks 5 detik)
+                    if (accountExecutionPromise) {
+                        try {
+                            await Promise.race([
+                                accountExecutionPromise.catch(() => null),
+                                new Promise(resolve => setTimeout(resolve, 5000))
+                            ])
                         } catch {}
                     }
                     this.resetAccountState()
@@ -2014,6 +2073,13 @@ export class MicrosoftRewardsBot {
                     }
                     wBot.resetAccountState()
                 }
+                // Bounded Join: Pastikan worker batch sebelumnya selesai/settle (maks 5 detik)
+                try {
+                    await Promise.race([
+                        Promise.allSettled(workerPromises),
+                        new Promise(resolve => setTimeout(resolve, 5000))
+                    ])
+                } catch {}
                 for (const acc of batch) {
                     accountStats.push({
                         email: acc.email,
@@ -2076,6 +2142,7 @@ export class MicrosoftRewardsBot {
             this.accountScope.clearDapiToken()
         }
         this.activeAccount = account
+        this.userData.geoLocale = this.resolveFallbackGeoLocale(account)
         this.workers?.completedOffersInSession?.clear()
         this.browser?.func?.resetCounters()
 
@@ -2095,12 +2162,18 @@ export class MicrosoftRewardsBot {
                 })
                 this.accountScope?.trackPage(this.mainMobilePage)
 
+                // =========================================================================
+                // PHASE 1: AUTH & TOKEN HARVEST (Mobile Login & App Access Token)
+                // =========================================================================
                 this.logger.info('main', 'BROWSER', `Mobile Browser started | ${accountEmail}`)
 
                 await this.login.login(this.mainMobilePage, account)
 
                 try {
                     this.accessToken = await this.login.getAppAccessToken(this.mainMobilePage, accountEmail)
+                    if (this.accessToken && this.axios) {
+                        this.axios.setAuthorizationToken(this.accessToken)
+                    }
                 } catch (error) {
                     this.logger.error(
                         'main',
@@ -2109,6 +2182,38 @@ export class MicrosoftRewardsBot {
                     )
                 }
 
+                // =========================================================================
+                // PHASE 2: PURE DAPI PIPELINE (Axios-Only, Zero Browser Contention)
+                // Prioritize DAPI activities immediately while bearer token is fresh (< 60s)
+                // Execute before heavy web dashboard navigation to eliminate packet collisions
+                // =========================================================================
+                this.userData.geoLocale = this.resolveFallbackGeoLocale(account)
+
+                // Pastikan saldo awal murni akun (initialPoints) diambil dan dikunci sebelum DAPI dimulai
+                if (!this.userData.initialPoints || this.userData.initialPoints <= 0) {
+                    try {
+                        const preDapiBalance = await this.browser.func.getCurrentPoints(this.mainMobilePage)
+                        if (preDapiBalance > 0) {
+                            this.userData.initialPoints = preDapiBalance
+                            this.userData.currentPoints = preDapiBalance
+                            this.updateDashboardAccount(accountEmail, { initialPoints: preDapiBalance })
+                        }
+                    } catch {}
+                }
+
+                if (this.config.workers.doDailyCheckIn) {
+                    this.updateDashboardAccount(accountEmail, { status: 'Daily Check-in' })
+                    await this.activities.doDailyCheckIn()
+                }
+
+                if (this.config.workers.doReadToEarn) {
+                    this.updateDashboardAccount(accountEmail, { status: 'Read to Earn' })
+                    await this.activities.doReadToEarn()
+                }
+
+                // =========================================================================
+                // PHASE 3: WEB DASHBOARD & PROMOTIONS PIPELINE
+                // =========================================================================
                 // Pastikan browser owner page tetap sehat di Dashboard Rewards & sinkronisasi cookies aktif
                 if (this.mainMobilePage.isClosed()) {
                     await recoverOwnerPage({
@@ -2135,29 +2240,24 @@ export class MicrosoftRewardsBot {
                     appData = await this.browser.func.getAppDashboardData()
                 } catch {}
 
-                const detectedCountry = (appData?.response?.profile?.attributes?.country || 'ID').toUpperCase()
+                const fallbackGeo = this.resolveFallbackGeoLocale(account)
+                const detectedCountry = (appData?.response?.profile?.attributes?.country || fallbackGeo).toUpperCase()
                 this.userData.geoLocale =
-                    account.geoLocale === 'auto' ? detectedCountry : account.geoLocale.toLowerCase()
+                    account.geoLocale === 'auto' ? detectedCountry : fallbackGeo
 
                 const data: DashboardData = await this.browser.func.getDashboardData()
 
-                this.userData.initialPoints = data.userStatus.availablePoints
-                this.userData.currentPoints = data.userStatus.availablePoints
+                if (!this.userData.initialPoints || this.userData.initialPoints <= 0) {
+                    this.userData.initialPoints = data.userStatus.availablePoints
+                }
+                // JANGAN TIMPA jika initialPoints sudah bernilai > 0 dari fase awal!
+                if (typeof data.userStatus?.availablePoints === 'number' && data.userStatus.availablePoints > 0) {
+                    this.userData.currentPoints = Math.max(
+                        this.userData.currentPoints ?? 0,
+                        data.userStatus.availablePoints
+                    )
+                }
                 const initialPoints = this.userData.initialPoints ?? 0
-
-                // =========================================================================
-                // IMMEDIATE DAPI EXECUTION PIPELINE
-                // Prioritize DAPI activities immediately while bearer token is fresh (< 60s)
-                // =========================================================================
-                if (this.config.workers.doDailyCheckIn) {
-                    this.updateDashboardAccount(accountEmail, { status: 'Daily Check-in' })
-                    await this.activities.doDailyCheckIn()
-                }
-
-                if (this.config.workers.doReadToEarn) {
-                    this.updateDashboardAccount(accountEmail, { status: 'Read to Earn' })
-                    await this.activities.doReadToEarn()
-                }
 
                 const pcProg = data.userStatus.counters.pcSearch?.[0]
                     ? `${data.userStatus.counters.pcSearch[0].pointProgress}/${data.userStatus.counters.pcSearch[0].pointProgressMax}`
@@ -2418,7 +2518,14 @@ export class MicrosoftRewardsBot {
                 this.userData.gainedPoints = mobilePoints + desktopPoints
 
                 const finalPoints = await this.browser.func.getCurrentPoints()
-                const collectedPoints = finalPoints - initialPoints
+                this.userData.currentPoints = Math.max(this.userData.currentPoints ?? 0, finalPoints)
+                const lockedInitialPoints =
+                    this.userData.initialPoints && this.userData.initialPoints > 0
+                        ? this.userData.initialPoints
+                        : initialPoints
+                this.userData.initialPoints = lockedInitialPoints
+                const totalCollected = Math.max(0, this.userData.currentPoints - this.userData.initialPoints)
+                const collectedPoints = totalCollected
 
                 this.logger.info(
                     'main',
@@ -2426,7 +2533,7 @@ export class MicrosoftRewardsBot {
                     `Collected: +${collectedPoints} | Mobile: +${mobilePoints} | Desktop: +${desktopPoints} | ${accountEmail}`
                 )
 
-                return { initialPoints, collectedPoints: collectedPoints || 0 }
+                return { initialPoints: this.userData.initialPoints, collectedPoints: collectedPoints || 0 }
             })
         } finally {
             if (this.accountScope) {

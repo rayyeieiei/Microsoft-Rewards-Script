@@ -9,7 +9,7 @@ export class ReadToEarn extends Workers {
         return this.bot.axios
     }
 
-    public readonly FALLBACK_ARTICLE_POOL: string[] = [
+    public readonly localArticlesPool: string[] = [
         'AA2dEf0r', 'AA1U7twx', 'AA2dFbdU', 'AA2dAusx', 'AA2dy6FB',
         'AA2dzP7w', 'AA2dxyZ1', 'AA2dxQv4', 'AA2dvY9N', 'AA2dw2uA',
         'AA2cEE3R', 'AA2dw8BI', 'AA2aHXIO', 'AA2dzo1D', 'AA2dyPGa',
@@ -18,6 +18,137 @@ export class ReadToEarn extends Workers {
         'AA1wF8xN', 'AA1sQ5zL', 'AA1tM2kY', 'AA1pZ9wQ', 'AA1xK3rZ',
         'AA1yM4pQ', 'AA1zN5oR'
     ]
+
+    public readonly FALLBACK_ARTICLE_POOL: string[] = this.localArticlesPool
+
+    public resolveCountry(): string {
+        const accountGeo = (this.bot.activeAccount?.geoLocale || '').trim()
+        const userGeo = (this.bot.userData?.geoLocale || '').trim()
+        const configLocale = String(
+            (this.bot.config as any)?.locale || (this.bot.config as any)?.geoLocale || ''
+        ).trim()
+
+        if (accountGeo && accountGeo.toLowerCase() !== 'auto') {
+            if (accountGeo.toLowerCase() === 'id' || accountGeo.toLowerCase().startsWith('id-')) {
+                return 'ID'
+            }
+            return accountGeo.toUpperCase()
+        }
+
+        if (configLocale && configLocale.toLowerCase() !== 'auto') {
+            if (configLocale.toLowerCase().includes('id')) {
+                return 'ID'
+            }
+        }
+
+        if (userGeo && userGeo.toLowerCase() !== 'auto' && userGeo.toUpperCase() !== 'US') {
+            if (userGeo.toLowerCase() === 'id' || userGeo.toLowerCase().startsWith('id-')) {
+                return 'ID'
+            }
+            return userGeo.toUpperCase()
+        }
+
+        return 'ID'
+    }
+
+    public evaluateReadToEarnProgress(
+        activity?: any,
+        appEarnable?: {
+            readToEarn?: number
+            readToEarnProgress?: number
+            readToEarnMax?: number
+            readToEarnCompleted?: boolean
+            readToEarnActivity?: any
+        } | null
+    ): {
+        currentProgress: number
+        maxProgress: number
+        remainingQuota: number
+        isExplicitlyCompleted: boolean
+    } {
+        const targetActivity = activity ?? appEarnable?.readToEarnActivity
+
+        // Jika objek aktivitas ditemukan secara eksplisit
+        if (targetActivity && typeof targetActivity === 'object') {
+            const attrs = targetActivity.attributes || targetActivity
+            const rawMax = Number(
+                attrs.pointProgressMax ?? attrs.pointmax ?? attrs.max ?? 30
+            )
+            const maxProgress = !isNaN(rawMax) && rawMax > 0 ? rawMax : 30
+
+            // JANGAN PERNAH menyetel fallback progress ke 30 jika undefined/null! Wajib 0.
+            const rawProgress = attrs.pointProgress ?? attrs.pointprogress ?? attrs.progress
+            const parsedProgress =
+                rawProgress !== undefined && rawProgress !== null ? Number(rawProgress) : 0
+            const currentProgress =
+                !isNaN(parsedProgress) && parsedProgress >= 0 ? parsedProgress : 0
+
+            const isExplicitlyCompleted = maxProgress > 0 && currentProgress >= maxProgress
+            const remainingQuota = isExplicitlyCompleted
+                ? 0
+                : Math.max(0, maxProgress - currentProgress) || 30
+
+            return {
+                currentProgress,
+                maxProgress,
+                remainingQuota,
+                isExplicitlyCompleted
+            }
+        }
+
+        // Jika menggunakan hasil appEarnable (tanpa objek activity langsung)
+        if (appEarnable && typeof appEarnable === 'object') {
+            const maxProgress =
+                typeof appEarnable.readToEarnMax === 'number' && appEarnable.readToEarnMax > 0
+                    ? appEarnable.readToEarnMax
+                    : 30
+
+            const hasExplicitProgress = typeof appEarnable.readToEarnProgress === 'number'
+            const currentProgress = hasExplicitProgress
+                ? Math.max(0, appEarnable.readToEarnProgress!)
+                : typeof appEarnable.readToEarn === 'number' && appEarnable.readToEarn > 0
+                  ? Math.max(0, maxProgress - appEarnable.readToEarn)
+                  : 0
+
+            // Hanya anggap selesai jika ditemukan secara eksplisit dan progress >= max
+            const isExplicitlyCompleted = Boolean(
+                appEarnable.readToEarnCompleted === true &&
+                    hasExplicitProgress &&
+                    currentProgress >= maxProgress &&
+                    maxProgress > 0
+            )
+
+            if (isExplicitlyCompleted) {
+                return {
+                    currentProgress,
+                    maxProgress,
+                    remainingQuota: 0,
+                    isExplicitlyCompleted: true
+                }
+            }
+
+            const remainingQuota =
+                typeof appEarnable.readToEarn === 'number' && appEarnable.readToEarn > 0
+                    ? appEarnable.readToEarn
+                    : Math.max(0, maxProgress - currentProgress) || 30
+
+            return {
+                currentProgress,
+                maxProgress,
+                remainingQuota,
+                isExplicitlyCompleted: false
+            }
+        }
+
+        // Jika activity bernilai null/undefined:
+        // Set currentProgress = 0 dan maxProgress = 30 -> wajib tetap mengeksekusi 10 artikel!
+        return {
+            currentProgress: 0,
+            maxProgress: 30,
+            remainingQuota: 30,
+            isExplicitlyCompleted: false
+        }
+    }
 
     public isValidArticleCard(card: any): boolean {
         if (!card || typeof card !== 'object') return false
@@ -54,7 +185,7 @@ export class ReadToEarn extends Workers {
     }
 
     public resolveMsnMarket(geo: string): { market: string; locale: string } {
-        const g = (geo || 'us').toLowerCase().trim()
+        const g = (geo || 'id').toLowerCase().trim()
         const mapping: Record<string, { market: string; locale: string }> = {
             id: { market: 'id-id', locale: 'id-ID' },
             us: { market: 'en-us', locale: 'en-US' },
@@ -96,7 +227,7 @@ export class ReadToEarn extends Workers {
     }
 
     public async fetchValidMsnArticles(count: number): Promise<string[]> {
-        const geo = (this.bot.userData.geoLocale || 'US').toLowerCase()
+        const geo = this.resolveCountry().toLowerCase()
         const primary = this.resolveMsnMarket(geo)
         const secondary = { market: 'en-us', locale: 'en-US' }
         const targets = [primary]
@@ -137,6 +268,15 @@ export class ReadToEarn extends Workers {
                         timeout: 10000
                     })
 
+                    if (res?.status && res.status !== 200) {
+                        this.bot.logger.debug(
+                            this.bot.isMobile,
+                            'READ-TO-EARN',
+                            `MSN feed non-200 | market=${target.market} status=${res.status}`
+                        )
+                        break
+                    }
+
                     if (res?.data) {
                         const data = typeof res.data === 'string' ? JSON.parse(res.data) : res.data
 
@@ -165,19 +305,23 @@ export class ReadToEarn extends Workers {
                         'READ-TO-EARN',
                         `MSN feed non-200 | market=${target.market} status=${status} msg=${err instanceof Error ? err.message : String(err)}`
                     )
+                    // Jika market tidak didukung (misal status 400), langsung lewati endpoint kedua di market tersebut
+                    if (status === 400 || status === 404) {
+                        break
+                    }
                 }
             }
         }
 
-        // Instant fallback transition to known article pool if network returned fewer than count
+        // Instant fallback transition to localArticlesPool if network returned fewer than count
         const uniqueFound = Array.from(new Set(articleIds))
         if (uniqueFound.length < count) {
             this.bot.logger.info(
                 this.bot.isMobile,
                 'READ-TO-EARN',
-                `Using fallback article pool for Read to Earn (found=${uniqueFound.length}, target=${count})`
+                `Using fallback article pool (localArticlesPool) for Read to Earn (found=${uniqueFound.length}, target=${count})`
             )
-            for (const fallbackId of this.FALLBACK_ARTICLE_POOL) {
+            for (const fallbackId of this.localArticlesPool) {
                 if (!uniqueFound.includes(fallbackId)) {
                     uniqueFound.push(fallbackId)
                 }
@@ -205,6 +349,9 @@ export class ReadToEarn extends Workers {
             return
         }
 
+        const country = this.resolveCountry()
+        this.bot.userData.geoLocale = country
+
         const delayMin = this.bot.config.searchSettings.readDelay.min
         const delayMax = this.bot.config.searchSettings.readDelay.max
         const startBalance = Number(this.bot.userData.currentPoints ?? 0)
@@ -212,26 +359,41 @@ export class ReadToEarn extends Workers {
         this.bot.logger.info(
             this.bot.isMobile,
             'READ-TO-EARN',
-            `Starting Read to Earn | geo=${this.bot.userData.geoLocale} | delayRange=${delayMin}-${delayMax} | currentPoints=${startBalance}`
+            `Starting Read to Earn | geo=${country} | delayRange=${delayMin}-${delayMax} | currentPoints=${startBalance}`
         )
 
         try {
+            let progress = 0
+            let max = 30
             let remainingQuota = 30
+            let isExplicitlyCompleted = false
+
             try {
                 const appEarnable = await this.bot.browser.func.getAppEarnablePoints()
-                if (appEarnable && appEarnable.readToEarn === 0) {
+                const evaluated = this.evaluateReadToEarnProgress(
+                    appEarnable?.readToEarnActivity,
+                    appEarnable
+                )
+                progress = evaluated.currentProgress
+                max = evaluated.maxProgress
+                remainingQuota = evaluated.remainingQuota
+                isExplicitlyCompleted = evaluated.isExplicitlyCompleted
+
+                if (isExplicitlyCompleted) {
                     this.bot.logger.info(
                         this.bot.isMobile,
                         'READ-TO-EARN',
-                        'All Read to Earn points already completed for today (30/30 pts)! Skipping.',
+                        `All Read to Earn points already completed for today (${progress}/${max} pts)! Skipping.`,
                         'green'
                     )
                     return
                 }
-                if (appEarnable && appEarnable.readToEarn > 0) {
-                    remainingQuota = appEarnable.readToEarn
-                }
-            } catch {}
+            } catch {
+                progress = 0
+                max = 30
+                remainingQuota = 30
+                isExplicitlyCompleted = false
+            }
 
             const jsonData = {
                 amount: 1,
@@ -240,18 +402,18 @@ export class ReadToEarn extends Workers {
                 attributes: {
                     offerid: 'ENUS_readarticle3_30points'
                 },
-                country: this.bot.userData.geoLocale
+                country: country
             }
 
             const articleCount = Math.min(10, Math.ceil(remainingQuota / 3))
-            const targetArticles = articleCount
+            const targetArticles = articleCount > 0 ? articleCount : 10
             const fetchedArticleIds = await this.fetchValidMsnArticles(Math.max(30, targetArticles * 3))
 
-            // Candidate queue initialized with fetched articles followed by fallback pool, deduplicated
+            // Candidate queue initialized with fetched articles followed by localArticlesPool, deduplicated
             const candidateQueue: string[] = []
             const seenCandidateIds = new Set<string>()
 
-            for (const id of [...fetchedArticleIds, ...this.FALLBACK_ARTICLE_POOL]) {
+            for (const id of [...fetchedArticleIds, ...this.localArticlesPool]) {
                 if (id && !seenCandidateIds.has(id)) {
                     seenCandidateIds.add(id)
                     candidateQueue.push(id)
@@ -284,7 +446,7 @@ export class ReadToEarn extends Workers {
                         'User-Agent':
                             this.bot.accountScope?.deviceProfile?.userAgent || UserAgentManager.DEFAULT_MOBILE_UA,
                         'Content-Type': 'application/json',
-                        'X-Rewards-Country': this.bot.userData.geoLocale,
+                        'X-Rewards-Country': country,
                         'X-Rewards-Language': 'en',
                         'X-Rewards-ismobile': 'true'
                     },

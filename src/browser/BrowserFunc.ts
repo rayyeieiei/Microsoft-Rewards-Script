@@ -18,6 +18,19 @@ export default class BrowserFunc {
         this.bot = bot
     }
 
+    public lockInitialPoints(availablePoints?: number): void {
+        const pts = Number(availablePoints ?? 0)
+        if (!isNaN(pts) && pts > 0 && this.bot?.userData) {
+            if (!this.bot.userData.initialPoints || this.bot.userData.initialPoints <= 0) {
+                this.bot.userData.initialPoints = pts
+            }
+            // JANGAN TIMPA jika initialPoints sudah bernilai > 0 dari fase awal!
+            if (!this.bot.userData.currentPoints || this.bot.userData.currentPoints <= 0) {
+                this.bot.userData.currentPoints = pts
+            }
+        }
+    }
+
     /**
      * Fetch user desktop dashboard data
      * @returns {DashboardData} Object of user bing rewards dashboard data
@@ -54,6 +67,7 @@ export default class BrowserFunc {
 
                     if (inPageData && inPageData.userStatus && (inPageData.dailySetPromotions || hasAppOnlyInPage || inPageData.punchCards)) {
                         if (hasAppOnlyInPage || (inPageData.morePromotions?.length ?? 0) > 10) {
+                            this.lockInitialPoints(inPageData.userStatus.availablePoints)
                             return inPageData as DashboardData
                         }
                     }
@@ -91,6 +105,7 @@ export default class BrowserFunc {
                     const response = await this.bot.axios.request(request)
 
                     if (response.data?.dashboard && response.data.dashboard.userStatus) {
+                        this.lockInitialPoints(response.data.dashboard.userStatus.availablePoints)
                         return response.data.dashboard as DashboardData
                     }
                 } catch (error) {
@@ -118,6 +133,7 @@ export default class BrowserFunc {
                 if (match?.[1]) {
                     const parsed = JSON.parse(match[1]) as DashboardData
                     if (parsed?.userStatus) {
+                        this.lockInitialPoints(parsed.userStatus.availablePoints)
                         return parsed
                     }
                 }
@@ -129,6 +145,7 @@ export default class BrowserFunc {
                     const appData = await this.getAppDashboardData()
                     if (appData?.response) {
                         const balance = appData.response.balance ?? 0
+                        this.lockInitialPoints(balance)
                         const rawPromos = appData.response.promotions ?? []
                         
                         const dailySetItems: any[] = []
@@ -250,7 +267,9 @@ export default class BrowserFunc {
                 throw new Error(`DAPI dashboard returned status ${response.status}`)
             }
 
-            return response.data as AppDashboardData
+            const appData = response.data as AppDashboardData
+            this.lockInitialPoints(appData?.response?.balance)
+            return appData
         } catch (error) {
             this.bot.logger.warn(
                 this.bot.isMobile,
@@ -472,13 +491,22 @@ export default class BrowserFunc {
     async getAppEarnablePoints(): Promise<AppEarnablePoints> {
         try {
             const eligibleOffers = ['ENUS_readarticle3_30points', 'Gamification_Sapphire_DailyCheckIn']
+            const accountGeo = (this.bot.activeAccount?.geoLocale || '').trim()
+            const userGeo = (this.bot.userData?.geoLocale || '').trim()
+            const country = (
+                accountGeo && accountGeo.toLowerCase() !== 'auto'
+                    ? accountGeo
+                    : userGeo && userGeo.toLowerCase() !== 'auto' && userGeo.toUpperCase() !== 'US'
+                      ? userGeo
+                      : 'ID'
+            ).toUpperCase()
 
             const request: AxiosRequestConfig = {
                 url: 'https://prod.rewardsplatform.microsoft.com/dapi/me?channel=SAAndroid&options=613',
                 method: 'GET',
                 headers: {
                     Authorization: `Bearer ${this.bot.accessToken}`,
-                    'X-Rewards-Country': this.bot.userData.geoLocale,
+                    'X-Rewards-Country': country,
                     'X-Rewards-Language': 'en',
                     'X-Rewards-ismobile': 'true'
                 }
@@ -486,21 +514,38 @@ export default class BrowserFunc {
 
             const response = await this.bot.axios.request(request)
             const userData: AppUserData = response.data
-            const eligibleActivities = userData.response.promotions.filter(x =>
-                eligibleOffers.includes(x.attributes.offerid ?? '')
+            this.lockInitialPoints(userData?.response?.balance)
+            const promotions = userData?.response?.promotions || []
+            const eligibleActivities = promotions.filter(
+                x =>
+                    eligibleOffers.includes(x?.attributes?.offerid ?? '') ||
+                    x?.attributes?.type === 'msnreadearn' ||
+                    x?.attributes?.type === 'checkin'
             )
 
-            let readToEarn = 0
+            // Jika objek aktivitas tidak ditemukan (undefined/null), set currentProgress = 0 & maxProgress = 30 (readToEarn = 30)
+            let readToEarn = 30
+            let readToEarnProgress = 0
+            let readToEarnMax = 30
+            let readToEarnCompleted = false
+            let readToEarnActivity: any = undefined
             let checkIn = 0
 
             for (const item of eligibleActivities) {
                 const attrs = item.attributes
 
-                if (attrs.type === 'msnreadearn') {
-                    const pointMax = parseInt(attrs.pointmax ?? '0')
-                    const pointProgress = parseInt(attrs.pointprogress ?? '0')
+                if (attrs.type === 'msnreadearn' || attrs.offerid === 'ENUS_readarticle3_30points') {
+                    readToEarnActivity = item
+                    const rawMax = parseInt(attrs.pointmax ?? (attrs as any).max ?? '30', 10)
+                    const pointMax = !isNaN(rawMax) && rawMax > 0 ? rawMax : 30
+                    const rawProgress = parseInt(attrs.pointprogress ?? (attrs as any).progress ?? '0', 10)
+                    const pointProgress = !isNaN(rawProgress) && rawProgress >= 0 ? rawProgress : 0
+
+                    readToEarnMax = pointMax
+                    readToEarnProgress = pointProgress
                     readToEarn = Math.max(0, pointMax - pointProgress)
-                } else if (attrs.type === 'checkin') {
+                    readToEarnCompleted = pointMax > 0 && pointProgress >= pointMax
+                } else if (attrs.type === 'checkin' || attrs.offerid === 'Gamification_Sapphire_DailyCheckIn') {
                     const progress = parseInt(attrs.progress ?? '0')
                     const checkInDay = (progress % 7) + 1 // Hari ke-1 s/d Hari ke-7
                     const nextDayKey = `day_${checkInDay}_points`
@@ -529,7 +574,11 @@ export default class BrowserFunc {
             return {
                 readToEarn,
                 checkIn,
-                totalEarnablePoints
+                totalEarnablePoints,
+                readToEarnProgress,
+                readToEarnMax,
+                readToEarnCompleted,
+                readToEarnActivity
             }
         } catch (error) {
             this.bot.logger.error(
@@ -561,6 +610,7 @@ export default class BrowserFunc {
                             const data = await res.json().catch(() => null)
                             const pts = data?.dashboard?.userStatus?.availablePoints
                             if (typeof pts === 'number' && pts > 0) {
+                                this.lockInitialPoints(pts)
                                 this.bot.userData.currentPoints = pts
                                 return pts
                             }
@@ -598,6 +648,7 @@ export default class BrowserFunc {
                 ]).catch(() => null)
 
                 if (typeof apiPoints === 'number' && apiPoints > 0) {
+                    this.lockInitialPoints(apiPoints)
                     this.bot.userData.currentPoints = apiPoints
                     return apiPoints
                 }
@@ -605,10 +656,20 @@ export default class BrowserFunc {
                 // 3. Ekstrak langsung dari DOM dengan Node-level timeout (3000ms)
                 const domPoints = await Promise.race([
                     activePage.evaluate(() => {
+                        const cleanPointString = (raw?: string | null): number | null => {
+                            if (!raw) return null
+                            const trimmed = raw.trim()
+                            if (trimmed.startsWith('+')) return null
+                            const num = parseInt(trimmed.replace(/[^0-9]/g, ''), 10)
+                            return isNaN(num) || num <= 0 ? null : num
+                        }
+
+                        // 1. Kartu dashboard resmi dengan teks 'Available points' / 'Poin yang tersedia'
                         const allCards = Array.from(document.querySelectorAll('div, section, .card, .p-card, .c-card, [class*="card"]'))
                         for (const el of allCards) {
                             const txt = (el.textContent || '').trim()
                             if ((txt.includes('Available points') || txt.includes('Poin yang tersedia')) && !txt.includes('Ready to claim') && txt.length < 150) {
+                                if (txt.startsWith('+')) continue
                                 const numbers = txt.replace(/Available points|Poin yang tersedia|Redeem|>|,/gi, ' ').match(/\b(\d+)\b/g)
                                 if (numbers && numbers.length > 0) {
                                     const val = parseInt(numbers[0], 10)
@@ -618,17 +679,28 @@ export default class BrowserFunc {
                         }
 
                         // 2. Badge koin header Bing search (#id_rc atau #rh_meter)
-                        const rc = document.getElementById('id_rc')?.innerText?.replace(/[^0-9]/g, '')
-                        if (rc && !isNaN(Number(rc)) && Number(rc) > 0) return Number(rc)
-                        const flyout = document.querySelector('#rh_meter .rh_meter_points, .id_rh_pts, #id_rh, #id_h')?.textContent?.replace(/[^0-9]/g, '')
-                        if (flyout && !isNaN(Number(flyout)) && Number(flyout) > 0) return Number(flyout)
+                        const rcEl = document.getElementById('id_rc')
+                        if (rcEl && !rcEl.innerText.trim().startsWith('+')) {
+                            const rc = cleanPointString(rcEl.innerText)
+                            if (rc) return rc
+                        }
 
-                        const headerPts = document.querySelector('header [class*="points"], [data-bi-area*="points"], #userPoints, .user-points')?.textContent?.replace(/[^0-9]/g, '')
-                        if (headerPts && !isNaN(Number(headerPts)) && Number(headerPts) > 0) return Number(headerPts)
+                        const flyoutEl = document.querySelector('#rh_meter .rh_meter_points, .id_rh_pts, #id_rh span, #id_h')
+                        if (flyoutEl && !flyoutEl.textContent?.trim().startsWith('+')) {
+                            const flyout = cleanPointString(flyoutEl.textContent)
+                            if (flyout) return flyout
+                        }
+
+                        // Profile header badge (strictly header / profile, NO generic promo card selectors)
+                        const headerEl = document.querySelector('header #userPoints, header .user-points, header .points-number, div.m-points-badge .points-number')
+                        if (headerEl && !headerEl.textContent?.trim().startsWith('+')) {
+                            const hp = cleanPointString(headerEl.textContent)
+                            if (hp) return hp
+                        }
 
                         // 3. Fallback ke window.dashboard jika di SSR awal
                         const dashPoints = (window as any).dashboard?.userStatus?.availablePoints
-                        if (dashPoints && !isNaN(Number(dashPoints)) && Number(dashPoints) > 0) return Number(dashPoints)
+                        if (typeof dashPoints === 'number' && dashPoints > 0) return dashPoints
 
                         return null
                     }),
@@ -636,6 +708,11 @@ export default class BrowserFunc {
                 ]).catch(() => null)
 
                 if (typeof domPoints === 'number' && domPoints > 0) {
+                    const prevPoints = Number(this.bot.userData.currentPoints ?? 0)
+                    if (prevPoints > 200 && domPoints < 50) {
+                        return prevPoints
+                    }
+                    this.lockInitialPoints(domPoints)
                     this.bot.userData.currentPoints = domPoints
                     return domPoints
                 }

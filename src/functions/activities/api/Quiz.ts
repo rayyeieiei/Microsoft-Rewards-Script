@@ -100,7 +100,15 @@ export class Quiz extends Workers {
                             `Received ReportActivity response | attempt=${i + 1}/${maxAttempts} | offerId=${offerId} | status=${response.status}`
                         )
 
-                        const newBalance = await this.bot.browser.func.getCurrentPoints()
+                        let newBalance = await this.bot.browser.func.getCurrentPoints()
+                        if (oldBalance > 0 && newBalance < oldBalance * 0.7) {
+                            this.bot.logger.warn(
+                                this.bot.isMobile,
+                                'QUIZ-SANITY',
+                                `⚠️ Deteksi anomali scraper poin (oldBalance=${oldBalance}, newBalance=${newBalance}). Menahan nilai saldo sebelumnya.`
+                            )
+                            newBalance = oldBalance
+                        }
                         gainedPoints = newBalance - oldBalance
 
                         this.bot.logger.debug(

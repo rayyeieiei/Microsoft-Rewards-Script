@@ -5,7 +5,7 @@ import type { AppDashboardData } from '../interface/AppDashBoardData'
 import type { PunchCardExecutionMode } from '../interface/Config'
 import { Database } from '../util/Database'
 import { resolveUrlRewardAction } from './UrlRewardActionResolver'
-import { isLocalAppUri } from '../runtime/BrowserOperationGuard'
+import { isLocalAppUri, extractHttpUrlFromAppUri, isAppExclusiveUri } from '../runtime/BrowserOperationGuard'
 import { ManualQuestQueue } from '../runtime/manual/ManualQuestQueue'
 import { resolveAccountIdentity } from '../runtime/identity/AccountIdentity'
 import {
@@ -513,7 +513,7 @@ export class Workers {
                 observedAccountBalanceDelta: observedBalanceDelta
             }
 
-            this.bot.userData.currentPoints = updatedBalance
+            this.bot.userData.currentPoints = Math.max(this.bot.userData.currentPoints ?? 0, updatedBalance)
 
             const advertisedTotal = allResults.reduce((sum, r) => sum + r.advertisedPoints, 0)
             this.bot.logger.info(
@@ -943,7 +943,7 @@ export class Workers {
             observedAccountBalanceDelta: bonusGained
         }
 
-        this.bot.userData.currentPoints = updatedBonusBalance
+        this.bot.userData.currentPoints = Math.max(this.bot.userData.currentPoints ?? 0, updatedBonusBalance)
 
         const advertisedTotal = allResults.reduce((sum, r) => sum + r.advertisedPoints, 0)
         this.bot.logger.info(
@@ -1277,6 +1277,20 @@ export class Workers {
                         }
 
                         const targetChildOfferId = activeChild.offerId || ''
+
+                        // Fast-Skip untuk aplikasi eksklusif (Windows Store, Xbox, dsb.)
+                        if (isAppExclusiveUri(activeChild.destinationUrl)) {
+                            this.bot.logger.warn(
+                                this.bot.isMobile,
+                                'PUNCHCARD-FAST-SKIP',
+                                `⚠️ [FAST-SKIP] Melewati quest aplikasi eksklusif: "${activeChild.title}" (${activeChild.destinationUrl})`
+                            )
+                            if (targetChildOfferId) this.completedOffersInSession.add(targetChildOfferId)
+                            this.bot.accountScope?.recordAttempt(offerId, targetChildOfferId, 'execution-unavailable')
+                            stepsProcessed++
+                            continue
+                        }
+
                         const stepTitle = activeChild.title || activeChild.name || `Step ${stepsProcessed + 1}`
                         const currentTaskCounts = this.getPunchCardTaskCounts(card)
                         const stepNum = currentTaskCounts.completed + 1
@@ -1425,24 +1439,36 @@ export class Workers {
                     const balanceBefore = Number(this.bot.userData.currentPoints ?? 0)
                     const claimActivity = card.parentPromotion as unknown as BasePromotion
                     const activityUrl = (claimActivity?.destinationUrl || '').trim()
-                    if (isLocalAppUri(activityUrl)) {
+                    if (isAppExclusiveUri(activityUrl)) {
                         this.bot.logger.warn(
                             this.bot.isMobile,
-                            'PUNCHCARD-GUARD',
-                            `⚠️ [PUNCHCARD-GUARD] Melewati navigasi protokol sistem lokal: ${activityUrl}`
+                            'PUNCHCARD-FAST-SKIP',
+                            `⚠️ [FAST-SKIP] Melewati single-step punchcard aplikasi eksklusif: ${activityUrl}`
                         )
-                        await this.bot.utils.wait(1800)
                     } else {
-                        try {
-                            if (this.bot.activities?.doUrlReward) {
-                                await this.bot.activities.doUrlReward(claimActivity, page, card)
-                            }
-                        } catch (err: any) {
-                            this.bot.logger.error(
+                        const resolvedHttpUrl = extractHttpUrlFromAppUri(activityUrl)
+                        if (resolvedHttpUrl) {
+                            claimActivity.destinationUrl = resolvedHttpUrl
+                        }
+                        if (isLocalAppUri(claimActivity?.destinationUrl)) {
+                            this.bot.logger.warn(
                                 this.bot.isMobile,
-                                'PUNCHCARD',
-                                `[PUNCHCARD] Error executing single-step punchcard "${title}": ${err?.message || err}`
+                                'PUNCHCARD-GUARD',
+                                `⚠️ [PUNCHCARD-GUARD] Melewati navigasi protokol sistem lokal: ${claimActivity?.destinationUrl}`
                             )
+                            await this.bot.utils.wait(1000)
+                        } else {
+                            try {
+                                if (this.bot.activities?.doUrlReward) {
+                                    await this.bot.activities.doUrlReward(claimActivity, page, card)
+                                }
+                            } catch (err: any) {
+                                this.bot.logger.error(
+                                    this.bot.isMobile,
+                                    'PUNCHCARD',
+                                    `[PUNCHCARD] Error executing single-step punchcard "${title}": ${err?.message || err}`
+                                )
+                            }
                         }
                     }
 
@@ -2149,7 +2175,10 @@ export class Workers {
     ): Promise<boolean> {
         if (!page || page.isClosed()) return false
 
-        const targetDashboard = (card.parentPromotion?.destinationUrl || 'https://rewards.bing.com').trim()
+        let targetDashboard = (card.parentPromotion?.destinationUrl || 'https://rewards.bing.com').trim()
+        if (targetDashboard.includes('/dashboard/envelope')) {
+            targetDashboard = 'https://rewards.bing.com'
+        }
         const currentUrl = page.url().toLowerCase()
         if (!currentUrl.includes('rewards.bing.com')) {
             await page
@@ -2211,15 +2240,42 @@ export class Workers {
         card: PunchCard,
         stepNum: number
     ): Promise<{ verified: boolean; usedEnvelope: boolean }> {
+        const activityUrl = (activeChild.destinationUrl || '').trim()
+
+        // Fast-Skip: Langsung skip jika aktivitas mengarah ke aplikasi eksklusif (Windows Store, Xbox, dsb.)
+        if (isAppExclusiveUri(activityUrl)) {
+            this.bot.logger.warn(
+                this.bot.isMobile,
+                'PUNCHCARD-FAST-SKIP',
+                `⚠️ [FAST-SKIP] Melewati quest aplikasi eksklusif tanpa loop amplop: ${activityUrl}`
+            )
+            return { verified: false, usedEnvelope: false }
+        }
+
+        // Smart Resolver: Konversi URL skema ms-search:// atau microsoft-edge: ke HTTP URL pencarian Bing resmi
+        const resolvedHttpUrl = extractHttpUrlFromAppUri(activityUrl)
+        if (resolvedHttpUrl) {
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'PUNCHCARD-RESOLVER',
+                `✨ [SMART-RESOLVER] Mengonversi URI aplikasi (${activityUrl}) menjadi Web Search URL: ${resolvedHttpUrl}`
+            )
+            activeChild.destinationUrl = resolvedHttpUrl
+            if (this.bot.activities?.doUrlReward) {
+                await this.bot.activities.doUrlReward(activeChild, page, card).catch(() => {})
+                await this.bot.utils.wait(1500)
+                return { verified: true, usedEnvelope: false }
+            }
+        }
+
         if (!page || typeof page.goto !== 'function') {
-            const activityUrl = (activeChild.destinationUrl || '').trim()
             if (isLocalAppUri(activityUrl)) {
                 this.bot.logger.warn(
                     this.bot.isMobile,
                     'PUNCHCARD-GUARD',
                     `⚠️ [PUNCHCARD-GUARD] Melewati navigasi protokol sistem lokal: ${activityUrl}`
                 )
-                await this.bot.utils.wait(1800)
+                await this.bot.utils.wait(1000)
                 return { verified: false, usedEnvelope: false }
             }
             if (this.bot.activities?.doUrlReward) {
@@ -2238,8 +2294,8 @@ export class Workers {
                     'PUNCHCARD-ENVELOPE',
                     `[ENVELOPE] Opening envelope page: ${envelopeUrl}`
                 )
-                await page.goto(envelopeUrl, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {})
-                await this.bot.utils.wait(2000)
+                await page.goto(envelopeUrl, { waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {})
+                await this.bot.utils.wait(1500)
             }
 
             // Tunggu hidrasi asinkron halaman amplop SPA dengan batas aman
@@ -2431,13 +2487,30 @@ export class Workers {
                     `[ENVELOPE] Active step button not found via standard selectors, delegating to UrlReward...`
                 )
                 const activityUrl = (activeChild.destinationUrl || '').trim()
+                if (isAppExclusiveUri(activityUrl)) {
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'PUNCHCARD-FAST-SKIP',
+                        `⚠️ [FAST-SKIP] Melewati quest aplikasi eksklusif tanpa loop: ${activityUrl}`
+                    )
+                    return { verified: false, usedEnvelope: false }
+                }
+                const resolvedHttpUrl = extractHttpUrlFromAppUri(activityUrl)
+                if (resolvedHttpUrl) {
+                    activeChild.destinationUrl = resolvedHttpUrl
+                    if (this.bot.activities?.doUrlReward) {
+                        await this.bot.activities.doUrlReward(activeChild, page, card).catch(() => {})
+                        await this.bot.utils.wait(1500)
+                        return { verified: true, usedEnvelope: false }
+                    }
+                }
                 if (isLocalAppUri(activityUrl)) {
                     this.bot.logger.warn(
                         this.bot.isMobile,
                         'PUNCHCARD-GUARD',
                         `⚠️ [PUNCHCARD-GUARD] Melewati navigasi protokol sistem lokal: ${activityUrl}`
                     )
-                    await this.bot.utils.wait(1800)
+                    await this.bot.utils.wait(1000)
                     return { verified: false, usedEnvelope: false }
                 }
                 if (this.bot.activities?.doUrlReward) {
@@ -2452,16 +2525,16 @@ export class Workers {
                 try {
                     const popupPromises: Promise<any>[] = []
                     if (page.context && typeof page.context === 'function' && typeof page.context().waitForEvent === 'function') {
-                        popupPromises.push(page.context().waitForEvent('page', { timeout: 15000 }).catch(() => null))
+                        popupPromises.push(page.context().waitForEvent('page', { timeout: 4000 }).catch(() => null))
                     }
                     if (typeof page.waitForEvent === 'function') {
-                        popupPromises.push(page.waitForEvent('popup', { timeout: 15000 }).catch(() => null))
+                        popupPromises.push(page.waitForEvent('popup', { timeout: 4000 }).catch(() => null))
                     }
                     const waitPopup = popupPromises.length > 0 ? Promise.race(popupPromises) : Promise.resolve(null)
 
                     const waitNav =
                         typeof page.waitForNavigation === 'function'
-                            ? page.waitForNavigation({ timeout: 5000 }).catch(() => null)
+                            ? page.waitForNavigation({ timeout: 4000 }).catch(() => null)
                             : Promise.resolve(null)
 
                     const clickAction = (async () => {
@@ -2500,23 +2573,35 @@ export class Workers {
                     this.bot.accountScope?.untrackPage(newTab)
                 } else if (activeChild.destinationUrl && this.bot.activities?.doUrlReward) {
                     const activityUrl = (activeChild.destinationUrl || '').trim()
-                    if (isLocalAppUri(activityUrl)) {
+                    if (isAppExclusiveUri(activityUrl)) {
                         this.bot.logger.warn(
                             this.bot.isMobile,
-                            'PUNCHCARD-GUARD',
-                            `⚠️ [PUNCHCARD-GUARD] Melewati navigasi protokol sistem lokal: ${activityUrl}`
+                            'PUNCHCARD-FAST-SKIP',
+                            `⚠️ [FAST-SKIP] Melewati quest aplikasi eksklusif: ${activityUrl}`
                         )
-                        await this.bot.utils.wait(1800)
                     } else {
-                        await this.bot.activities.doUrlReward(activeChild, page, card).catch(() => {})
+                        const resolvedHttpUrl = extractHttpUrlFromAppUri(activityUrl)
+                        if (resolvedHttpUrl) {
+                            activeChild.destinationUrl = resolvedHttpUrl
+                        }
+                        if (isLocalAppUri(activeChild.destinationUrl)) {
+                            this.bot.logger.warn(
+                                this.bot.isMobile,
+                                'PUNCHCARD-GUARD',
+                                `⚠️ [PUNCHCARD-GUARD] Melewati navigasi protokol sistem lokal: ${activityUrl}`
+                            )
+                            await this.bot.utils.wait(1000)
+                        } else {
+                            await this.bot.activities.doUrlReward(activeChild, page, card).catch(() => {})
+                        }
                     }
                 }
 
-                // Langkah E: Jeda propagasi 3 detik, reload halaman amplop
-                await this.bot.utils.wait(3000)
+                // Langkah E: Jeda propagasi 2 detik, reload halaman amplop
+                await this.bot.utils.wait(2000)
                 if (typeof page.reload === 'function') {
-                    await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
-                    await this.bot.utils.wait(1500)
+                    await page.reload({ waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {})
+                    await this.bot.utils.wait(1000)
                 }
 
                 // Langkah F: Evaluasi DOM amplop

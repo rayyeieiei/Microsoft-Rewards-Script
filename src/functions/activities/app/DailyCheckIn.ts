@@ -7,6 +7,36 @@ import { UserAgentManager } from '../../../browser/UserAgent'
 export class DailyCheckIn extends Workers {
     private oldBalance: number = this.bot.userData.currentPoints
 
+    public resolveCountry(): string {
+        const accountGeo = (this.bot.activeAccount?.geoLocale || '').trim()
+        const userGeo = (this.bot.userData?.geoLocale || '').trim()
+        const configLocale = String(
+            (this.bot.config as any)?.locale || (this.bot.config as any)?.geoLocale || ''
+        ).trim()
+
+        if (accountGeo && accountGeo.toLowerCase() !== 'auto') {
+            if (accountGeo.toLowerCase() === 'id' || accountGeo.toLowerCase().startsWith('id-')) {
+                return 'ID'
+            }
+            return accountGeo.toUpperCase()
+        }
+
+        if (configLocale && configLocale.toLowerCase() !== 'auto') {
+            if (configLocale.toLowerCase().includes('id')) {
+                return 'ID'
+            }
+        }
+
+        if (userGeo && userGeo.toLowerCase() !== 'auto' && userGeo.toUpperCase() !== 'US') {
+            if (userGeo.toLowerCase() === 'id' || userGeo.toLowerCase().startsWith('id-')) {
+                return 'ID'
+            }
+            return userGeo.toUpperCase()
+        }
+
+        return 'ID'
+    }
+
     public async doDailyCheckIn() {
         if (!this.bot.accessToken) {
             this.bot.logger.warn(
@@ -17,13 +47,8 @@ export class DailyCheckIn extends Workers {
             return
         }
 
-        this.oldBalance = Number(this.bot.userData.currentPoints ?? 0)
-
-        this.bot.logger.info(
-            this.bot.isMobile,
-            'DAILY-CHECK-IN',
-            `Starting Daily Check-In | geo=${this.bot.userData.geoLocale} | currentPoints=${this.oldBalance}`
-        )
+        const country = this.resolveCountry()
+        this.bot.userData.geoLocale = country
 
         try {
             let expectedPoints = 0
@@ -33,6 +58,14 @@ export class DailyCheckIn extends Workers {
                     expectedPoints = appEarnable.checkIn
                 }
             } catch {}
+
+            this.oldBalance = Number(this.bot.userData.currentPoints ?? 0)
+
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'DAILY-CHECK-IN',
+                `Starting Daily Check-In | geo=${country} | currentPoints=${this.oldBalance}`
+            )
 
             // Helper to check if already claimed
             const isAlreadyClaimed = (res: any) => {
@@ -81,16 +114,37 @@ export class DailyCheckIn extends Workers {
 
             if (isSuccess) {
                 const rawServerBalance = Number(response?.data?.response?.balance ?? 0)
-                const gained = expectedPoints > 0 ? expectedPoints : (rawServerBalance > this.oldBalance ? (rawServerBalance - this.oldBalance) : 10)
-                const newBal = Number(this.bot.userData.currentPoints ?? this.oldBalance) + gained
+                const gainedCheckInPoints =
+                    this.oldBalance > 0 && rawServerBalance >= this.oldBalance
+                        ? rawServerBalance - this.oldBalance
+                        : expectedPoints > 0
+                          ? expectedPoints
+                          : 10
+
+                if (!this.bot.userData.initialPoints || this.bot.userData.initialPoints <= 0) {
+                    if (rawServerBalance > 0) {
+                        this.bot.userData.initialPoints = Math.max(0, rawServerBalance - gainedCheckInPoints)
+                        this.oldBalance = this.bot.userData.initialPoints
+                    } else if (this.oldBalance > 0) {
+                        this.bot.userData.initialPoints = this.oldBalance
+                    }
+                }
+
+                const gained = gainedCheckInPoints
+                const newBal =
+                    rawServerBalance > 0
+                        ? Math.max(rawServerBalance, this.oldBalance + gained)
+                        : Number(this.bot.userData.currentPoints ?? this.oldBalance) + gained
                 this.bot.userData.currentPoints = newBal
                 this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gained
 
-                void Database.getInstance().recordActivity(
-                    this.bot.activeAccount?.email || '',
-                    'DAILY_CHECK_IN',
-                    gained
-                )
+                if (gained > 0) {
+                    void Database.getInstance().recordActivity(
+                        this.bot.activeAccount?.email || '',
+                        'DAILY_CHECK_IN',
+                        gained
+                    )
+                }
 
                 this.bot.logger.info(
                     this.bot.isMobile,
@@ -123,6 +177,7 @@ export class DailyCheckIn extends Workers {
 
     private async submitDaily(type: number) {
         try {
+            const country = this.resolveCountry()
             const jsonData = {
                 id: randomUUID(),
                 amount: 1,
@@ -130,7 +185,7 @@ export class DailyCheckIn extends Workers {
                 attributes: {
                     offerid: 'Gamification_Sapphire_DailyCheckIn'
                 },
-                country: this.bot.userData.geoLocale
+                country: country
             }
 
             this.bot.logger.debug(
@@ -147,7 +202,7 @@ export class DailyCheckIn extends Workers {
                     'User-Agent':
                         this.bot.accountScope?.deviceProfile?.userAgent || UserAgentManager.DEFAULT_MOBILE_UA,
                     'Content-Type': 'application/json',
-                    'X-Rewards-Country': this.bot.userData.geoLocale,
+                    'X-Rewards-Country': country,
                     'X-Rewards-Language': 'en',
                     'X-Rewards-ismobile': 'true'
                 },

@@ -9,6 +9,7 @@ import { OrganicEngine } from './OrganicEngine'
 import { TopicalChainer } from './TopicalChainer'
 
 import type { QueryEngine } from '../../../interface/Config'
+import { interruptibleWait } from '../../../runtime/BrowserOperationGuard'
 
 export class Search extends Workers {
     private bingHome = 'https://bing.com'
@@ -656,7 +657,17 @@ export class Search extends Workers {
                 const safeMin = Math.max(10000, Math.min(configuredMin, 12000))
                 const safeMax = Math.max(safeMin, Math.min(configuredMax, 14000))
                 const dynamicSearchDelay = Math.floor(Math.random() * (safeMax - safeMin + 1)) + safeMin
-                await this.bot.utils.wait(dynamicSearchDelay)
+                const abortSignal = this.bot.accountScope?.abortController?.signal || this.bot.abortController?.signal
+                await interruptibleWait(dynamicSearchDelay, abortSignal)
+
+                if (isAborted()) {
+                    return {
+                        pcSearch: [],
+                        mobileSearch: [],
+                        activityAndQuiz: [],
+                        dailyPoint: []
+                    }
+                }
 
                 const counters = await this.bot.browser.func.getSearchPoints(searchPage, false, isMobile)
 

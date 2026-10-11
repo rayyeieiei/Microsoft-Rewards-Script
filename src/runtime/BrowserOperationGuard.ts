@@ -71,7 +71,9 @@ export function isLocalAppUri(url?: string): boolean {
 export function extractHttpUrlFromAppUri(url?: string): string | null {
     if (!url || typeof url !== 'string') return null
     const trimmed = url.trim()
-    if (trimmed.toLowerCase().startsWith('microsoft-edge:')) {
+    const lower = trimmed.toLowerCase()
+
+    if (lower.startsWith('microsoft-edge:')) {
         const afterScheme = trimmed.replace(/^microsoft-edge:(?:\/\/)?/i, '').trim()
         if (afterScheme.toLowerCase().startsWith('http://') || afterScheme.toLowerCase().startsWith('https://')) {
             return afterScheme
@@ -87,7 +89,27 @@ export function extractHttpUrlFromAppUri(url?: string): string | null {
             } catch {}
         }
     }
+
+    if (lower.startsWith('ms-search:')) {
+        const qMatch = trimmed.match(/[?&]q=([^&]+)/i)
+        if (qMatch && qMatch[1]) {
+            const query = decodeURIComponent(qMatch[1].replace(/\+/g, ' '))
+            return `https://www.bing.com/search?q=${encodeURIComponent(query)}&FORM=RWRD1`
+        }
+    }
+
     return null
+}
+
+export function isAppExclusiveUri(url?: string): boolean {
+    if (!url || typeof url !== 'string') return false
+    const lower = url.trim().toLowerCase()
+    return (
+        lower.startsWith('ms-windows-store:') ||
+        lower.startsWith('xbox:') ||
+        lower.startsWith('intent:') ||
+        lower.startsWith('market:')
+    )
 }
 
 export async function interruptibleWait(ms: number, signal?: AbortSignal): Promise<void> {

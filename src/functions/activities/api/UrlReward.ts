@@ -77,19 +77,21 @@ export class UrlReward extends Workers {
             let dashboardTileClicked = false
 
             // Pre-flight sanitasi skema URI lokal aplikasi (ms-search:, microsoft-edge:, ms-windows-store:, intent:, market:)
-            const extractedEarly = extractHttpUrlFromAppUri(targetUrl)
-            if (extractedEarly) {
-                targetUrl = extractedEarly
-            } else if (isLocalAppUri(targetUrl)) {
-                this.bot.logger.warn(
-                    this.bot.isMobile,
-                    punchCard ? 'PUNCHCARD-GUARD' : 'URL-GUARD',
-                    punchCard
-                        ? `⚠️ [PUNCHCARD-GUARD] Melewati navigasi protokol sistem lokal: ${targetUrl}`
-                        : `⚠️ [URL-GUARD] Melewati navigasi skema URI lokal aplikasi: ${targetUrl}`
-                )
-                await this.bot.utils.wait(1800)
-                return
+            if (targetUrl.toLowerCase().startsWith('ms-search:') || isLocalAppUri(targetUrl)) {
+                const extractedEarly = extractHttpUrlFromAppUri(targetUrl)
+                if (extractedEarly && !targetUrl.toLowerCase().startsWith('ms-search:')) {
+                    targetUrl = extractedEarly
+                } else {
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        punchCard ? 'PUNCHCARD-GUARD' : 'URL-GUARD',
+                        punchCard
+                            ? `⚠️ [PUNCHCARD-GUARD] Melewati navigasi protokol sistem lokal: ${targetUrl}`
+                            : `⚠️ [URL-GUARD] Melewati navigasi skema URI lokal aplikasi: ${targetUrl}`
+                    )
+                    await this.bot.utils.wait(1800)
+                    return
+                }
             }
 
             // 1. Coba cari kartu di dashboard untuk mengambil URL terlengkap & trigger event klik
