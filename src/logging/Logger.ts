@@ -77,7 +77,11 @@ export class Logger {
         const rawFormatted = formatMessage(message)
         const formatted = sanitizeLogMessage(rawFormatted, false)
 
-        const userName = this.bot.userData.userName ? this.bot.userData.userName : 'MAIN'
+        const resolvedName =
+            typeof (this.bot as any).resolveLoggerUserName === 'function'
+                ? (this.bot as any).resolveLoggerUserName()
+                : this.bot.userData?.userName
+        const userName = resolvedName ? resolvedName : 'MAIN'
 
         const levelTag = level.toUpperCase()
         const cleanMsg = sanitizeLogMessage(

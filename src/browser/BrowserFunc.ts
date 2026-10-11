@@ -19,6 +19,12 @@ export default class BrowserFunc {
     }
 
     public lockInitialPoints(availablePoints?: number): void {
+        if (
+            this.bot?.abortController?.signal?.aborted ||
+            this.bot?.accountScope?.abortController?.signal?.aborted
+        ) {
+            return
+        }
         const pts = Number(availablePoints ?? 0)
         if (!isNaN(pts) && pts > 0 && this.bot?.userData) {
             if (!this.bot.userData.initialPoints || this.bot.userData.initialPoints <= 0) {
@@ -726,27 +732,36 @@ export default class BrowserFunc {
 
     async closeBrowser(browser: BrowserContext, email: string) {
         const rootBrowser = (browser as any).browser?.() || null
+        const isAborted = Boolean(
+            this.bot.abortController?.signal?.aborted ||
+            this.bot.accountScope?.abortController?.signal?.aborted ||
+            this.bot.accountScope?.isDisposed
+        )
 
         try {
-            if (this.bot.accountScope) {
-                const saveResult = await AccountSessionStore.saveContextSession(
-                    browser,
-                    this.bot.accountScope,
-                    this.bot.isMobile ? 'mobile' : 'desktop'
-                )
-                this.bot.logger.debug(
-                    this.bot.isMobile,
-                    'CLOSE-BROWSER',
-                    `Unified session persistence completed (${saveResult.status})`
-                )
-            } else {
-                // Fallback for legacy standalone invocation without scope
-                const cookies = await browser.cookies()
-                this.bot.logger.debug(this.bot.isMobile, 'CLOSE-BROWSER', `Saving ${cookies.length} cookies.`)
-                await saveSessionData(this.bot.config.sessionPath, cookies, email, this.bot.isMobile)
+            if (!isAborted) {
+                if (this.bot.accountScope) {
+                    const saveResult = await AccountSessionStore.saveContextSession(
+                        browser,
+                        this.bot.accountScope,
+                        this.bot.isMobile ? 'mobile' : 'desktop'
+                    )
+                    this.bot.logger.debug(
+                        this.bot.isMobile,
+                        'CLOSE-BROWSER',
+                        `Unified session persistence completed (${saveResult.status})`
+                    )
+                } else {
+                    // Fallback for legacy standalone invocation without scope
+                    const cookies = await browser.cookies()
+                    this.bot.logger.debug(this.bot.isMobile, 'CLOSE-BROWSER', `Saving ${cookies.length} cookies.`)
+                    await saveSessionData(this.bot.config.sessionPath, cookies, email, this.bot.isMobile)
+                }
             }
         } catch (error) {
-            this.bot.logger.error(this.bot.isMobile, 'CLOSE-BROWSER', `Failed to save session: ${error}`)
+            if (!isAborted) {
+                this.bot.logger.error(this.bot.isMobile, 'CLOSE-BROWSER', `Failed to save session: ${error}`)
+            }
         } finally {
             try {
                 await browser.close()

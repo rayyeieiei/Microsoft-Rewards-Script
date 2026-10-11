@@ -120,6 +120,9 @@ function waitForUserConfirmation(): Promise<void> {
 interface ExecutionContext {
     isMobile: boolean
     account: Account
+    accountEmail?: string
+    userData?: UserData
+    scope?: AccountScope
 }
 
 interface BrowserSession {
@@ -160,7 +163,7 @@ export interface ShutdownResult {
     durationMs: number
 }
 
-interface UserData {
+export interface UserData {
     userName: string
     geoLocale: string
     langCode: string
@@ -168,6 +171,18 @@ interface UserData {
     currentPoints: number
     gainedPoints: number
     timezoneOffset: string // FIX COMPILER
+}
+
+export function createIsolatedUserData(userName: string = '', geoLocale: string = 'ID'): UserData {
+    return {
+        userName,
+        geoLocale: geoLocale || 'ID',
+        langCode: 'en',
+        initialPoints: 0,
+        currentPoints: 0,
+        gainedPoints: 0,
+        timezoneOffset: new Date().getTimezoneOffset().toString()
+    }
 }
 
 export class MicrosoftRewardsBot {
@@ -180,7 +195,49 @@ export class MicrosoftRewardsBot {
 
     public mainMobilePage!: Page
     public mainDesktopPage!: Page
-    public userData: UserData
+    private _activeUserData: UserData = createIsolatedUserData()
+    public get userData(): UserData {
+        const store = executionContext.getStore()
+        if (store?.userData) {
+            return store.userData
+        }
+        return this._activeUserData
+    }
+    public set userData(val: UserData) {
+        const store = executionContext.getStore()
+        if (store?.scope?.abortController?.signal?.aborted) {
+            if (store.userData) {
+                store.userData = val
+            }
+            return
+        }
+        if (store?.userData) {
+            store.userData = val
+        }
+        this._activeUserData = val
+    }
+    public resolveLoggerUserName(): string {
+        const store = executionContext.getStore()
+        if (store?.scope?.abortController?.signal?.aborted || store?.scope?.isDisposed) {
+            return 'MAIN'
+        }
+        if (store?.userData?.userName) {
+            return store.userData.userName
+        }
+        if (this.abortController?.signal?.aborted || this.accountScope?.abortController?.signal?.aborted) {
+            return 'MAIN'
+        }
+        return this._activeUserData?.userName || 'MAIN'
+    }
+    public detachLoggerContext(): void {
+        const store = executionContext.getStore()
+        if (store?.userData) {
+            store.userData.userName = ''
+        }
+        if (this._activeUserData) {
+            this._activeUserData = createIsolatedUserData('', this._activeUserData.geoLocale || 'ID')
+        }
+    }
     public rewardsVersion: 'legacy' | 'modern' = 'legacy'
     public get accessToken(): string {
         return this.accountScope ? this.accountScope.getDapiToken() : ''
@@ -443,15 +500,8 @@ export class MicrosoftRewardsBot {
         this.searchCooldownActive = false
         this.abortController = undefined
         this.browser?.func?.resetCounters()
-        this.userData = {
-            userName: '',
-            geoLocale: this.resolveFallbackGeoLocale(),
-            langCode: 'en',
-            initialPoints: 0,
-            currentPoints: 0,
-            gainedPoints: 0,
-            timezoneOffset: new Date().getTimezoneOffset().toString()
-        }
+        const freshUserData = createIsolatedUserData('', this.resolveFallbackGeoLocale())
+        this._activeUserData = freshUserData
         this.bandwidthTracker = {
             totalBytes: 0,
             blockedRequests: 0
@@ -467,6 +517,67 @@ export class MicrosoftRewardsBot {
         this.mainMobilePage = undefined as any
         this.mainDesktopPage = undefined as any
         this.workers?.completedOffersInSession?.clear()
+    }
+
+    public async cleanupBrowserResources(
+        scopeToClean?: AccountScope | null,
+        accountEmail?: string,
+        pendingExecution?: Promise<any> | null
+    ): Promise<void> {
+        // 1. Immediately detach logger context from old account tag and fire abort signal
+        this.detachLoggerContext()
+        const targetScope = scopeToClean ?? this.accountScope
+
+        if (this.abortController && !this.abortController.signal.aborted) {
+            try {
+                this.abortController.abort()
+            } catch {}
+        }
+        if (targetScope && !targetScope.abortController.signal.aborted) {
+            try {
+                targetScope.abortController.abort()
+            } catch {}
+        }
+
+        // 2. Force-kill AccountScope and close pages/contexts
+        if (targetScope) {
+            try {
+                await AccountDisposer.forceKill(targetScope)
+            } catch {}
+            if (this.accountScope === targetScope) {
+                this.accountScope = null
+            }
+        } else {
+            try {
+                if (this.mainMobilePage) await this.mainMobilePage.close({ runBeforeUnload: false }).catch(() => {})
+                if (this.mainDesktopPage) await this.mainDesktopPage.close({ runBeforeUnload: false }).catch(() => {})
+            } catch {}
+        }
+
+        // 3. Recycle browser instance
+        if (this.browserFactory) {
+            try {
+                await this.browserFactory.recycleBrowser().catch(() => {})
+            } catch {}
+        }
+
+        // 4. Clean Bounded Join: await old account execution promise settlement
+        if (pendingExecution) {
+            try {
+                await Promise.race([
+                    pendingExecution.catch(() => null),
+                    new Promise(resolve => setTimeout(resolve, 5000))
+                ])
+            } catch {}
+        }
+
+        // 5. Reset isolated account state & quota trackers completely before next account starts
+        if (accountEmail) {
+            try {
+                DataSaverManager.getInstance().resetAccountQuota(accountEmail)
+            } catch {}
+        }
+        this.resetAccountState()
     }
 
     public updateDashboardAccount(email: string, update: any) {
@@ -1381,6 +1492,12 @@ export class MicrosoftRewardsBot {
         }
         try {
             this.resetAccountState()
+            const isolatedUserData = createIsolatedUserData(
+                this.utils.getEmailUsername(accountEmail),
+                this.resolveFallbackGeoLocale(account)
+            )
+            this._activeUserData = isolatedUserData
+
             scope = await AccountScope.create({
                 account,
                 bot: this,
@@ -1388,150 +1505,180 @@ export class MicrosoftRewardsBot {
             })
             this.accountScope = scope
             this.abortController = scope.abortController
-            this.userData.userName = this.utils.getEmailUsername(accountEmail)
             this.activeAccount = account
 
-            this.updateDashboardAccount(accountEmail, {
-                email: accountEmail,
-                status: 'Stealth Delay',
-                initialPoints: 0,
-                collectedPoints: 0,
-                desktopProgress: '0/0',
-                mobileProgress: '0/0'
-            })
-
-            const startDelay = customStartDelayMs !== undefined
-                ? customStartDelayMs
-                : Math.floor(Math.random() * (60000 - 10000 + 1)) + 10000
-
-            if (startDelay > 0) {
-                this.logger.info(
-                    'main',
-                    'STEALTH',
-                    `Menunggu ${(startDelay / 1000).toFixed(0)} detik sebelum buka browser biar keliatan natural...`,
-                    'cyan'
-                )
-                this.updateDashboardAccount(accountEmail, { status: 'Stealth Delay' })
-                await interruptibleWait(startDelay, scope.abortController.signal)
-            }
-
-            if (scope.abortController.signal.aborted) {
-                throw new Error('ACCOUNT_ABORTED_BEFORE_START')
-            }
-
-            this.logger.info(
-                'main',
-                'ACCOUNT-START',
-                `[ACCOUNT-START] Starting workflow for: ${accountEmail} | geoLocale: ${account.geoLocale}`
+            scope.abortController.signal.addEventListener(
+                'abort',
+                () => {
+                    isolatedUserData.userName = ''
+                    if (this._activeUserData === isolatedUserData) {
+                        this.detachLoggerContext()
+                    }
+                },
+                { once: true }
             )
-            this.updateDashboardAccount(accountEmail, { status: 'Starting Browser' })
-            DataSaverManager.getInstance().beginAccountQuota(accountEmail)
-            this.axios = new AxiosClient(
-                account.proxy,
-                this.localProxyPort,
-                bytes => this.trackBandwidth(bytes),
-                err => { void this.notifySuspectedConnectivityFailure('axios', err) }
+
+            return await executionContext.run(
+                {
+                    isMobile: true,
+                    account,
+                    accountEmail,
+                    userData: isolatedUserData,
+                    scope
+                },
+                async () => {
+                    this.updateDashboardAccount(accountEmail, {
+                        email: accountEmail,
+                        status: 'Stealth Delay',
+                        initialPoints: 0,
+                        collectedPoints: 0,
+                        desktopProgress: '0/0',
+                        mobileProgress: '0/0'
+                    })
+
+                    const startDelay = customStartDelayMs !== undefined
+                        ? customStartDelayMs
+                        : Math.floor(Math.random() * (60000 - 10000 + 1)) + 10000
+
+                    if (startDelay > 0) {
+                        this.logger.info(
+                            'main',
+                            'STEALTH',
+                            `Menunggu ${(startDelay / 1000).toFixed(0)} detik sebelum buka browser biar keliatan natural...`,
+                            'cyan'
+                        )
+                        this.updateDashboardAccount(accountEmail, { status: 'Stealth Delay' })
+                        await interruptibleWait(startDelay, scope!.abortController.signal)
+                    }
+
+                    if (scope!.abortController.signal.aborted) {
+                        throw new Error('ACCOUNT_ABORTED_BEFORE_START')
+                    }
+
+                    this.logger.info(
+                        'main',
+                        'ACCOUNT-START',
+                        `[ACCOUNT-START] Starting workflow for: ${accountEmail} | geoLocale: ${account.geoLocale}`
+                    )
+                    this.updateDashboardAccount(accountEmail, { status: 'Starting Browser' })
+                    DataSaverManager.getInstance().beginAccountQuota(accountEmail)
+                    this.axios = new AxiosClient(
+                        account.proxy,
+                        this.localProxyPort,
+                        bytes => this.trackBandwidth(bytes),
+                        err => { void this.notifySuspectedConnectivityFailure('axios', err) }
+                    )
+                    if (this.accessToken) {
+                        this.axios.setAuthorizationToken(this.accessToken)
+                    }
+
+                    const result = await this.Main(account, scope!).catch(error => {
+                        if (scope?.abortController?.signal?.aborted) {
+                            return undefined
+                        }
+                        const errMsg = error instanceof Error ? error.message : String(error)
+                        void this.logger.error(
+                            true,
+                            'FLOW',
+                            `Mobile flow failed for ${accountEmail}: ${errMsg}`
+                        )
+                        this.updateDashboardAccount(accountEmail, { status: 'Error', error: errMsg })
+                        return undefined
+                    })
+
+                    if (scope!.abortController.signal.aborted) {
+                        throw new Error('SEQUENTIAL_DEADLINE_TIMEOUT_EXCEEDED')
+                    }
+
+                    const durationSeconds = ((Date.now() - accountStartTime) / 1000).toFixed(1)
+                    const mbConsumed = (this.bandwidthTracker.totalBytes / (1024 * 1024)).toFixed(2)
+
+                    const quotaReport = DataSaverManager.getInstance().finishAccountQuota(accountEmail)
+                    const bRes = quotaReport.budgetResult
+                    const statusColor = bRes.status === 'PASS' ? 'cyan' : 'yellow'
+
+                    if (result) {
+                        const accountInitialPoints =
+                            isolatedUserData.initialPoints > 0 ? isolatedUserData.initialPoints : (result.initialPoints ?? 0)
+                        const accountFinalPoints =
+                            isolatedUserData.currentPoints > 0
+                                ? Math.max(isolatedUserData.currentPoints, accountInitialPoints + (result.collectedPoints ?? 0))
+                                : accountInitialPoints + (result.collectedPoints ?? 0)
+                        const totalCollected = Math.max(0, accountFinalPoints - accountInitialPoints)
+                        const collectedPoints = totalCollected
+
+                        const stat: AccountStats = {
+                            email: accountEmail,
+                            initialPoints: accountInitialPoints,
+                            finalPoints: accountFinalPoints,
+                            collectedPoints: collectedPoints,
+                            duration: parseFloat(durationSeconds),
+                            bandwidthMb: parseFloat(mbConsumed),
+                            success: true
+                        }
+
+                        this.logger.info(
+                            'main',
+                            'ACCOUNT-FINISH',
+                            `[ACCOUNT-FINISH] Completed workflow for: ${accountEmail} | Total: +${collectedPoints} | Old: ${accountInitialPoints} → New: ${accountFinalPoints} | Duration: ${durationSeconds}s`,
+                            'green'
+                        )
+                        this.logger.info(
+                            'main',
+                            'DATA-SAVER',
+                            `[DATA-SAVER] Quota=${bRes.consumedMb.toFixed(2)}MB budget=${bRes.budgetMb.toFixed(2)}MB usage=${bRes.percentage.toFixed(1)}% status=${bRes.status}${bRes.status === 'OVER_BUDGET' ? ` overBy=${bRes.overMb.toFixed(2)}MB` : ''}`,
+                            statusColor
+                        )
+                        const bd = quotaReport.breakdown
+                        this.logger.info(
+                            'main',
+                            'DATA-SAVER',
+                            `[DATA-SAVER] Breakdown: document=${(bd.document.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.document.requests} req) | script=${(bd.script.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.script.requests} req) | xhr/fetch=${(bd['xhr/fetch'].bytes / (1024 * 1024)).toFixed(2)}MB (${bd['xhr/fetch'].requests} req) | image=${(bd.image.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.image.requests} req) | media=${(bd.media.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.media.requests} req) | font=${(bd.font.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.font.requests} req) | other=${(bd.other.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.other.requests} req)`
+                        )
+                        this.updateDashboardAccount(accountEmail, {
+                            status: 'Completed',
+                            collectedPoints: collectedPoints,
+                            bandwidth: `${mbConsumed} MB`
+                        })
+                        return stat
+                    } else {
+                        this.logger.info(
+                            'main',
+                            'DATA-SAVER',
+                            `[DATA-SAVER] Quota=${bRes.consumedMb.toFixed(2)}MB budget=${bRes.budgetMb.toFixed(2)}MB usage=${bRes.percentage.toFixed(1)}% status=${bRes.status}${bRes.status === 'OVER_BUDGET' ? ` overBy=${bRes.overMb.toFixed(2)}MB` : ''}`,
+                            statusColor
+                        )
+                        const bd = quotaReport.breakdown
+                        this.logger.info(
+                            'main',
+                            'DATA-SAVER',
+                            `[DATA-SAVER] Breakdown: document=${(bd.document.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.document.requests} req) | script=${(bd.script.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.script.requests} req) | xhr/fetch=${(bd['xhr/fetch'].bytes / (1024 * 1024)).toFixed(2)}MB (${bd['xhr/fetch'].requests} req) | image=${(bd.image.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.image.requests} req) | media=${(bd.media.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.media.requests} req) | font=${(bd.font.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.font.requests} req) | other=${(bd.other.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.other.requests} req)`
+                        )
+                        const stat: AccountStats = {
+                            email: accountEmail,
+                            initialPoints: 0,
+                            finalPoints: 0,
+                            collectedPoints: 0,
+                            duration: parseFloat(durationSeconds),
+                            bandwidthMb: parseFloat(mbConsumed),
+                            success: false,
+                            error: 'Flow failed'
+                        }
+                        this.updateDashboardAccount(accountEmail, {
+                            status: 'Failed',
+                            error: 'Flow failed',
+                            bandwidth: `${mbConsumed} MB`
+                        })
+                        return stat
+                    }
+                }
             )
-            if (this.accessToken) {
-                this.axios.setAuthorizationToken(this.accessToken)
-            }
-
-            const result = await this.Main(account, scope).catch(error => {
-                const errMsg = error instanceof Error ? error.message : String(error)
-                void this.logger.error(
-                    true,
-                    'FLOW',
-                    `Mobile flow failed for ${accountEmail}: ${errMsg}`
-                )
-                this.updateDashboardAccount(accountEmail, { status: 'Error', error: errMsg })
-                return undefined
-            })
-
-            const durationSeconds = ((Date.now() - accountStartTime) / 1000).toFixed(1)
-            const mbConsumed = (this.bandwidthTracker.totalBytes / (1024 * 1024)).toFixed(2)
-
-            const quotaReport = DataSaverManager.getInstance().finishAccountQuota(accountEmail)
-            const bRes = quotaReport.budgetResult
-            const statusColor = bRes.status === 'PASS' ? 'cyan' : 'yellow'
-
-            if (result) {
-                const accountInitialPoints =
-                    this.userData.initialPoints > 0 ? this.userData.initialPoints : (result.initialPoints ?? 0)
-                const accountFinalPoints =
-                    this.userData.currentPoints > 0
-                        ? Math.max(this.userData.currentPoints, accountInitialPoints + (result.collectedPoints ?? 0))
-                        : accountInitialPoints + (result.collectedPoints ?? 0)
-                const totalCollected = Math.max(0, accountFinalPoints - accountInitialPoints)
-                const collectedPoints = totalCollected
-
-                const stat: AccountStats = {
-                    email: accountEmail,
-                    initialPoints: accountInitialPoints,
-                    finalPoints: accountFinalPoints,
-                    collectedPoints: collectedPoints,
-                    duration: parseFloat(durationSeconds),
-                    bandwidthMb: parseFloat(mbConsumed),
-                    success: true
-                }
-
-                this.logger.info(
-                    'main',
-                    'ACCOUNT-FINISH',
-                    `[ACCOUNT-FINISH] Completed workflow for: ${accountEmail} | Total: +${collectedPoints} | Old: ${accountInitialPoints} → New: ${accountFinalPoints} | Duration: ${durationSeconds}s`,
-                    'green'
-                )
-                this.logger.info(
-                    'main',
-                    'DATA-SAVER',
-                    `[DATA-SAVER] Quota=${bRes.consumedMb.toFixed(2)}MB budget=${bRes.budgetMb.toFixed(2)}MB usage=${bRes.percentage.toFixed(1)}% status=${bRes.status}${bRes.status === 'OVER_BUDGET' ? ` overBy=${bRes.overMb.toFixed(2)}MB` : ''}`,
-                    statusColor
-                )
-                const bd = quotaReport.breakdown
-                this.logger.info(
-                    'main',
-                    'DATA-SAVER',
-                    `[DATA-SAVER] Breakdown: document=${(bd.document.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.document.requests} req) | script=${(bd.script.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.script.requests} req) | xhr/fetch=${(bd['xhr/fetch'].bytes / (1024 * 1024)).toFixed(2)}MB (${bd['xhr/fetch'].requests} req) | image=${(bd.image.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.image.requests} req) | media=${(bd.media.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.media.requests} req) | font=${(bd.font.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.font.requests} req) | other=${(bd.other.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.other.requests} req)`
-                )
-                this.updateDashboardAccount(accountEmail, {
-                    status: 'Completed',
-                    collectedPoints: collectedPoints,
-                    bandwidth: `${mbConsumed} MB`
-                })
-                return stat
-            } else {
-                this.logger.info(
-                    'main',
-                    'DATA-SAVER',
-                    `[DATA-SAVER] Quota=${bRes.consumedMb.toFixed(2)}MB budget=${bRes.budgetMb.toFixed(2)}MB usage=${bRes.percentage.toFixed(1)}% status=${bRes.status}${bRes.status === 'OVER_BUDGET' ? ` overBy=${bRes.overMb.toFixed(2)}MB` : ''}`,
-                    statusColor
-                )
-                const bd = quotaReport.breakdown
-                this.logger.info(
-                    'main',
-                    'DATA-SAVER',
-                    `[DATA-SAVER] Breakdown: document=${(bd.document.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.document.requests} req) | script=${(bd.script.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.script.requests} req) | xhr/fetch=${(bd['xhr/fetch'].bytes / (1024 * 1024)).toFixed(2)}MB (${bd['xhr/fetch'].requests} req) | image=${(bd.image.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.image.requests} req) | media=${(bd.media.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.media.requests} req) | font=${(bd.font.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.font.requests} req) | other=${(bd.other.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.other.requests} req)`
-                )
-                const stat: AccountStats = {
-                    email: accountEmail,
-                    initialPoints: 0,
-                    finalPoints: 0,
-                    collectedPoints: 0,
-                    duration: parseFloat(durationSeconds),
-                    bandwidthMb: parseFloat(mbConsumed),
-                    success: false,
-                    error: 'Flow failed'
-                }
-                this.updateDashboardAccount(accountEmail, {
-                    status: 'Failed',
-                    error: 'Flow failed',
-                    bandwidth: `${mbConsumed} MB`
-                })
-                return stat
-            }
         } catch (error) {
             const durationSeconds = ((Date.now() - accountStartTime) / 1000).toFixed(1)
             const errMsg = error instanceof Error ? error.message : String(error)
-            this.logger.error('main', 'ACCOUNT-ERROR', `${accountEmail}: ${errMsg}`)
+            if (!scope?.abortController?.signal?.aborted) {
+                this.logger.error('main', 'ACCOUNT-ERROR', `${accountEmail}: ${errMsg}`)
+            }
             const stat: AccountStats = {
                 email: accountEmail,
                 initialPoints: 0,
@@ -1547,8 +1694,9 @@ export class MicrosoftRewardsBot {
             })
             return stat
         } finally {
+            const isCurrentActiveScope = this.accountScope === scope
             try {
-                if (scope) {
+                if (scope && !scope.isDisposed) {
                     await AccountDisposer.dispose(scope).catch(err => {
                         this.logger.error(
                             'main',
@@ -1557,14 +1705,14 @@ export class MicrosoftRewardsBot {
                         )
                     })
                 }
-                if (this.browserFactory) {
+                if (isCurrentActiveScope && this.browserFactory) {
                     await this.browserFactory.recycleBrowser().catch(() => {})
                 }
             } finally {
                 if (this.sessionActiveAccountEmail === accountEmail) {
                     this.sessionActiveAccountEmail = ''
                 }
-                if (this.accountScope === scope) {
+                if (isCurrentActiveScope) {
                     this.accountScope = null
                     this.abortController = undefined
                     this.resetAccountState()
@@ -1572,7 +1720,7 @@ export class MicrosoftRewardsBot {
                 DataSaverManager.getInstance().resetAccountQuota(accountEmail)
             }
 
-            if (this.pendingOperatorRecovery) {
+            if (isCurrentActiveScope && this.pendingOperatorRecovery) {
                 const pending = this.pendingOperatorRecovery
                 this.pendingOperatorRecovery = null
                 const now = Date.now()
@@ -1852,42 +2000,19 @@ export class MicrosoftRewardsBot {
                 } catch (err) {
                     if (deadlineTimer) clearTimeout(deadlineTimer)
                     this.activeDeadlineAdjuster = null
+                    const timedOutScope = this.accountScope
+                    // Segera lepas context logger dari tag akun lama begitu sinyal abort dikirim
+                    this.detachLoggerContext()
                     this.logger.error(
                         'main',
                         'ACCOUNT-DEADLINE',
                         `🚨 Akun ${account.email} melebihi batas waktu maksimal dinamis (${Math.round(accountDeadlineMs / 60000)} menit)! Memaksa pembersihan & pembatalan...`
                     )
-                    if (this.abortController) {
-                        try {
-                            this.abortController.abort()
-                        } catch {}
-                    }
-                    if (this.accountScope) {
-                        try {
-                            await AccountDisposer.forceKill(this.accountScope)
-                        } catch {}
-                        this.accountScope = null
-                    } else {
-                        try {
-                            if (this.mainMobilePage) await this.mainMobilePage.close({ runBeforeUnload: false }).catch(() => {})
-                            if (this.mainDesktopPage) await this.mainDesktopPage.close({ runBeforeUnload: false }).catch(() => {})
-                        } catch {}
-                    }
-                    if (this.browserFactory) {
-                        try {
-                            await this.browserFactory.recycleBrowser().catch(() => {})
-                        } catch {}
-                    }
-                    // Bounded Join: Pastikan eksekusi akun sebelumnya selesai / diputus tuntas (maks 5 detik)
-                    if (accountExecutionPromise) {
-                        try {
-                            await Promise.race([
-                                accountExecutionPromise.catch(() => null),
-                                new Promise(resolve => setTimeout(resolve, 5000))
-                            ])
-                        } catch {}
-                    }
-                    this.resetAccountState()
+                    await this.cleanupBrowserResources(
+                        timedOutScope,
+                        account.email,
+                        accountExecutionPromise
+                    )
                     accountStats.push({
                         email: account.email,
                         initialPoints: 0,
@@ -2148,19 +2273,24 @@ export class MicrosoftRewardsBot {
 
         let mobileSession: BrowserSession | null = null
         let mobileContextClosed = false
+        const parentStore = executionContext.getStore()
+        const activeScope = scope ?? parentStore?.scope ?? this.accountScope ?? undefined
+        const activeUserData = parentStore?.userData ?? this.userData
 
         try {
-            return await executionContext.run({ isMobile: true, account }, async () => {
+            return await executionContext.run(
+                { ...parentStore, isMobile: true, account, scope: activeScope, userData: activeUserData },
+                async () => {
                 mobileSession = await this.browserFactory.createBrowser(account)
                 const initialContext: BrowserContext = mobileSession.context
-                this.accountScope?.setContext('mobile', initialContext)
+                activeScope?.setContext('mobile', initialContext)
                 this.mainMobilePage = await createManagedPage({
                     context: initialContext,
                     accountScope: accountEmail,
                     purpose: 'main-mobile-owner',
                     isMobile: true
                 })
-                this.accountScope?.trackPage(this.mainMobilePage)
+                activeScope?.trackPage(this.mainMobilePage)
 
                 // =========================================================================
                 // PHASE 1: AUTH & TOKEN HARVEST (Mobile Login & App Access Token)
@@ -2419,6 +2549,14 @@ export class MicrosoftRewardsBot {
                     accountEmail
                 )
 
+                if (
+                    activeScope?.abortController?.signal?.aborted ||
+                    activeScope?.isDisposed ||
+                    this.abortController?.signal?.aborted
+                ) {
+                    throw new Error('SEQUENTIAL_DEADLINE_TIMEOUT_EXCEEDED')
+                }
+
                 // Post-Search Re-Evaluation: Re-fetch dashboard data to claim punchcards completed by searches (e.g. 4-day search challenges) and any remaining pending points!
                 try {
                     const postSearchData = await this.browser.func.getDashboardData().catch(() => null)
@@ -2514,6 +2652,14 @@ export class MicrosoftRewardsBot {
                     this.logger.debug('main', 'POST-SEARCH', `Post-search claim check skipped: ${postError}`)
                 }
 
+                if (
+                    activeScope?.abortController?.signal?.aborted ||
+                    activeScope?.isDisposed ||
+                    this.abortController?.signal?.aborted
+                ) {
+                    throw new Error('SEQUENTIAL_DEADLINE_TIMEOUT_EXCEEDED')
+                }
+
                 mobileContextClosed = true
                 this.userData.gainedPoints = mobilePoints + desktopPoints
 
@@ -2534,18 +2680,26 @@ export class MicrosoftRewardsBot {
                 )
 
                 return { initialPoints: this.userData.initialPoints, collectedPoints: collectedPoints || 0 }
-            })
+                }
+            )
         } finally {
-            if (this.accountScope) {
+            if (activeScope) {
+                activeScope.clearDapiToken()
+            } else if (this.accountScope) {
                 this.accountScope.clearDapiToken()
             }
-            this.workers?.completedOffersInSession?.clear()
+            if (!activeScope || this.accountScope === activeScope) {
+                this.workers?.completedOffersInSession?.clear()
+            }
 
             if (mobileSession && !mobileContextClosed) {
                 try {
-                    await executionContext.run({ isMobile: true, account }, async () => {
-                        await this.browser.func.closeBrowser(mobileSession!.context, accountEmail)
-                    })
+                    await executionContext.run(
+                        { ...parentStore, isMobile: true, account, scope: activeScope, userData: activeUserData },
+                        async () => {
+                            await this.browser.func.closeBrowser(mobileSession!.context, accountEmail)
+                        }
+                    )
                 } catch {}
             }
         }

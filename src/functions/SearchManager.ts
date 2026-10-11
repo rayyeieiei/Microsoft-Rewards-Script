@@ -223,7 +223,8 @@ export class SearchManager {
                     `Desktop login | account=${redactAccountKey(accountEmail)} | ${proxySummary}`
                 )
                 try {
-                    desktopSession = await executionContext.run({ isMobile: false, accountEmail }, async () =>
+                    const parentStore = typeof executionContext?.getStore === 'function' ? (executionContext.getStore() ?? {}) : {}
+                    desktopSession = await executionContext.run({ ...parentStore, isMobile: false, accountEmail }, async () =>
                         this.createDesktopSession(account, accountEmail)
                     )
                     this.bot.logger.info('main', 'SEARCH-MANAGER', 'Desktop login done')
@@ -302,7 +303,8 @@ export class SearchManager {
                     `Cleanup mobile | account=${redactAccountKey(accountEmail)}`
                 )
                 try {
-                    await executionContext.run({ isMobile: true, accountEmail }, async () => {
+                    const parentStore = typeof executionContext?.getStore === 'function' ? (executionContext.getStore() ?? {}) : {}
+                    await executionContext.run({ ...parentStore, isMobile: true, accountEmail }, async () => {
                         await this.bot.browser.func.closeBrowser(mobileSession.context, accountEmail)
                     })
                     this.bot.logger.info('main', 'SEARCH-MANAGER', 'Cleanup: mobile session closed')
@@ -383,7 +385,8 @@ export class SearchManager {
             this.bot.logger.info('main', 'SEARCH-MANAGER', `Step 1: skip mobile (${reason}); closing mobile session`)
             this.bot.logger.debug('main', 'SEARCH-MANAGER', 'Closing unused mobile context')
             try {
-                await executionContext.run({ isMobile: true, accountEmail }, async () => {
+                const parentStore = typeof executionContext?.getStore === 'function' ? (executionContext.getStore() ?? {}) : {}
+                await executionContext.run({ ...parentStore, isMobile: true, accountEmail }, async () => {
                     await this.bot.browser.func.closeBrowser(mobileSession.context, accountEmail)
                 })
                 this.bot.logger.info('main', 'SEARCH-MANAGER', 'Unused mobile session closed')
@@ -501,7 +504,8 @@ export class SearchManager {
             `Start | account=${redactAccountKey(accountEmail)} | target=${missingSearchPoints.mobilePoints}`
         )
 
-        return await executionContext.run({ isMobile: true, accountEmail }, async () => {
+        const parentStore = typeof executionContext?.getStore === 'function' ? (executionContext.getStore() ?? {}) : {}
+        return await executionContext.run({ ...parentStore, isMobile: true, accountEmail }, async () => {
             try {
                 if (
                     this.bot.abortController?.signal?.aborted ||
@@ -595,7 +599,8 @@ export class SearchManager {
             `Start | account=${redactAccountKey(accountEmail)} | target=${missingSearchPoints.desktopPoints}`
         )
 
-        return await executionContext.run({ isMobile: false, accountEmail }, async () => {
+        const parentStore = typeof executionContext?.getStore === 'function' ? (executionContext.getStore() ?? {}) : {}
+        return await executionContext.run({ ...parentStore, isMobile: false, accountEmail }, async () => {
             try {
                 if (
                     this.bot.abortController?.signal?.aborted ||
@@ -677,7 +682,8 @@ export class SearchManager {
             `Start | account=${redactAccountKey(accountEmail)} | target=${missingSearchPoints.desktopPoints}`
         )
 
-        return await executionContext.run({ isMobile: false, accountEmail }, async () => {
+        const parentStore = typeof executionContext?.getStore === 'function' ? (executionContext.getStore() ?? {}) : {}
+        return await executionContext.run({ ...parentStore, isMobile: false, accountEmail }, async () => {
             if (
                 this.bot.abortController?.signal?.aborted ||
                 this.bot.accountScope?.abortController?.signal?.aborted
