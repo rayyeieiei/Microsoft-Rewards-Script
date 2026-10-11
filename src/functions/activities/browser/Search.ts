@@ -11,6 +11,53 @@ import { TopicalChainer } from './TopicalChainer'
 import type { QueryEngine } from '../../../interface/Config'
 import { interruptibleWait } from '../../../runtime/BrowserOperationGuard'
 
+export interface ClampedSearchDelta {
+    gainedPoints: number
+    remaining: number
+    wasClamped: boolean
+    rawDelta: number
+}
+
+export function clampSearchPointDelta(
+    missingBefore: number,
+    missingAfter: number,
+    pointsPerSearch: number = 3
+): ClampedSearchDelta {
+    const safePointsPerSearch = Math.max(1, Math.min(5, pointsPerSearch || 3))
+    const rawDelta = missingBefore - missingAfter
+
+    if (missingAfter > missingBefore) {
+        const remaining = Math.max(0, missingBefore - safePointsPerSearch)
+        const gainedPoints = Math.max(0, missingBefore - remaining)
+        return {
+            gainedPoints,
+            remaining,
+            wasClamped: true,
+            rawDelta
+        }
+    }
+
+    if (rawDelta > safePointsPerSearch) {
+        const remaining = Math.max(0, missingBefore - safePointsPerSearch)
+        const gainedPoints = Math.min(safePointsPerSearch, Math.max(0, missingBefore - remaining))
+        return {
+            gainedPoints,
+            remaining,
+            wasClamped: true,
+            rawDelta
+        }
+    }
+
+    const remaining = Math.max(0, missingAfter)
+    const gainedPoints = Math.max(0, missingBefore - remaining)
+    return {
+        gainedPoints,
+        remaining,
+        wasClamped: false,
+        rawDelta
+    }
+}
+
 export class Search extends Workers {
     private bingHome = 'https://bing.com'
     private organicEngine: OrganicEngine = new OrganicEngine(this.bot)
@@ -84,8 +131,11 @@ export class Search extends Workers {
             }
 
             const queryCore = new QueryCore(this.bot)
-            const locale = (this.bot.userData.geoLocale ?? 'US').toUpperCase()
+            const locale = (this.bot.userData.geoLocale ?? 'ID').toUpperCase()
             const langCode = (this.bot.userData.langCode ?? 'en').toLowerCase()
+            const pcMax = searchCounters.pcSearch?.[0]?.pointProgressMax ?? 90
+            const mobMax = searchCounters.mobileSearch?.[0]?.pointProgressMax ?? 60
+            const pointsPerSearch = locale === 'US' && (pcMax === 150 || mobMax === 100) ? 5 : 3
 
             // Partisi sumber pencarian agar Mobile & Desktop tidak pernah bertabrakan kata kunci
             const sources: QueryEngine[] = isMobile
@@ -196,18 +246,19 @@ export class Search extends Workers {
                 }
 
                 const newMissingPoints = this.bot.browser.func.missingSearchPoints(searchCounters, isMobile)
-                let newMissingPointsTotal = newMissingPoints.totalPoints
+                const rawMissingAfter = newMissingPoints.totalPoints
+                const clamped = clampSearchPointDelta(missingPointsTotal, rawMissingAfter, pointsPerSearch)
 
-                // Sanity Clamp & Eliminasi Poin Negatif:
-                // Sisa poin TIDAK BOLEH melonjak kembali ke 90 di tengah loop pencarian
-                if (newMissingPointsTotal > missingPointsTotal) {
+                if (clamped.wasClamped) {
                     this.bot.logger.warn(
                         isMobile,
                         'SEARCH-BING',
-                        `[COUNTER-ANOMALY] Counter melonjak dari ${missingPointsTotal} ke ${newMissingPointsTotal}. Mengabaikan anomali counter Bing dan menggunakan baseline kueri (+3 poin).`
+                        `[COUNTER-ANOMALY] Counter pencarian melonjak tidak wajar (missingBefore=${missingPointsTotal}, missingAfter=${rawMissingAfter}, rawDelta=${clamped.rawDelta}). Melakukan clamp ketat ke +${clamped.gainedPoints} poin (remaining=${clamped.remaining}).`
                     )
-                    newMissingPointsTotal = Math.max(0, missingPointsTotal - 3)
                 }
+
+                const newMissingPointsTotal = clamped.remaining
+                const gainedPoints = clamped.gainedPoints
 
                 const pcProg = searchCounters.pcSearch?.[0] ? `${searchCounters.pcSearch[0].pointProgress}/${searchCounters.pcSearch[0].pointProgressMax}` : '0/0'
                 const edgeProg = searchCounters.pcSearch?.[1] && searchCounters.pcSearch[1].pointProgressMax > 0 ? ` (+${searchCounters.pcSearch[1].pointProgress}/${searchCounters.pcSearch[1].pointProgressMax} Edge)` : ''
@@ -224,9 +275,6 @@ export class Search extends Workers {
                     mobileProgress,
                     status: `Searching (${isMobile ? 'Mobile' : 'Desktop'})`
                 })
-
-                const rawDelta = missingPointsTotal - newMissingPointsTotal
-                const gainedPoints = Math.max(0, rawDelta)
 
                 if (gainedPoints === 0) {
                     stagnantLoop++
@@ -417,20 +465,19 @@ export class Search extends Workers {
                         }
 
                         const newMissingPoints = this.bot.browser.func.missingSearchPoints(searchCounters, isMobile)
-                        let newMissingPointsTotal = newMissingPoints.totalPoints
+                        const rawMissingAfter = newMissingPoints.totalPoints
+                        const clamped = clampSearchPointDelta(missingPointsTotal, rawMissingAfter, pointsPerSearch)
 
-                        // Sanity Clamp & Eliminasi Poin Negatif
-                        if (newMissingPointsTotal > missingPointsTotal) {
+                        if (clamped.wasClamped) {
                             this.bot.logger.warn(
                                 isMobile,
                                 'SEARCH-BING-EXTRA',
-                                `[COUNTER-ANOMALY] Counter melonjak dari ${missingPointsTotal} ke ${newMissingPointsTotal}. Mengabaikan anomali counter Bing dan menggunakan baseline kueri (+3 poin).`
+                                `[COUNTER-ANOMALY] Counter pencarian melonjak tidak wajar (missingBefore=${missingPointsTotal}, missingAfter=${rawMissingAfter}, rawDelta=${clamped.rawDelta}). Melakukan clamp ketat ke +${clamped.gainedPoints} poin (remaining=${clamped.remaining}).`
                             )
-                            newMissingPointsTotal = Math.max(0, missingPointsTotal - 3)
                         }
 
-                        const rawDelta = missingPointsTotal - newMissingPointsTotal
-                        const gainedPoints = Math.max(0, rawDelta)
+                        const newMissingPointsTotal = clamped.remaining
+                        const gainedPoints = clamped.gainedPoints
 
                         if (gainedPoints === 0) {
                             stagnantLoop++

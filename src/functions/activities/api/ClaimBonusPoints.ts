@@ -11,14 +11,71 @@ export class ClaimBonusPoints extends Workers {
     private oldBalance: number = this.bot.userData.currentPoints
 
     public async claimBonusPoints() {
+        this.oldBalance = Number(this.bot.userData.currentPoints ?? 0)
+
+        const activePage =
+            this.bot.mainMobilePage && !this.bot.mainMobilePage.isClosed()
+                ? this.bot.mainMobilePage
+                : this.bot.mainDesktopPage && !this.bot.mainDesktopPage.isClosed()
+                  ? this.bot.mainDesktopPage
+                  : null
+
+        if (!this.bot.requestToken && activePage?.context && typeof activePage.context === 'function') {
+            try {
+                const context = activePage.context()
+                if (context && typeof context.cookies === 'function') {
+                    const cookies = await context.cookies()
+                    const csrfCookie = cookies.find(
+                        c => c.name === '__RequestVerificationToken' || c.name.startsWith('__RequestVerificationToken')
+                    )
+                    if (csrfCookie?.value) {
+                        this.bot.requestToken = csrfCookie.value
+                    }
+                    if (cookies.length > 0) {
+                        if (this.bot.isMobile) {
+                            this.bot.cookies.mobile = cookies
+                        } else {
+                            this.bot.cookies.desktop = cookies
+                        }
+                    }
+                }
+            } catch {}
+        }
+
         if (!this.bot.requestToken) {
             const cookies = this.bot.isMobile ? this.bot.cookies.mobile : this.bot.cookies.desktop
-            const tokenCookie = (cookies ?? []).find(
+            const csrfCookie = (cookies ?? []).find(
                 c => c.name === '__RequestVerificationToken' || c.name.startsWith('__RequestVerificationToken')
             )
-            if (tokenCookie?.value) {
-                this.bot.requestToken = tokenCookie.value
+            if (csrfCookie?.value) {
+                this.bot.requestToken = csrfCookie.value
             }
+        }
+
+        if (!this.bot.requestToken && activePage && typeof activePage.evaluate === 'function') {
+            try {
+                const evaluatedToken = await activePage
+                    .evaluate(() => {
+                        const input = document.querySelector(
+                            'input[name="__RequestVerificationToken"]'
+                        ) as HTMLInputElement | null
+                        if (input?.value) return input.value
+                        const meta = document.querySelector(
+                            'meta[name="__RequestVerificationToken"], meta[name="RequestVerificationToken"]'
+                        ) as HTMLMetaElement | null
+                        if (meta?.content) return meta.content
+                        if ((window as any).__RequestVerificationToken) return (window as any).__RequestVerificationToken
+                        if ((window as any).dashboard?.requestVerificationToken)
+                            return (window as any).dashboard.requestVerificationToken
+                        const cookieMatch = document.cookie.match(/__RequestVerificationToken(?:_[^=]+)?=([^;]+)/)
+                        if (cookieMatch && cookieMatch[1]) return decodeURIComponent(cookieMatch[1])
+                        return null
+                    })
+                    .catch(() => null)
+                if (evaluatedToken) {
+                    this.bot.requestToken = evaluatedToken
+                }
+            } catch {}
         }
 
         if (!this.bot.requestToken) {
@@ -71,7 +128,10 @@ export class ClaimBonusPoints extends Workers {
                     ...(this.bot.fingerprint?.headers ?? {}),
                     Cookie: this.cookieHeader,
                     Referer: 'https://rewards.bing.com/',
-                    Origin: 'https://rewards.bing.com'
+                    Origin: 'https://rewards.bing.com',
+                    __RequestVerificationToken: this.bot.requestToken,
+                    RequestVerificationToken: this.bot.requestToken,
+                    'X-CSRF-Token': this.bot.requestToken
                 },
                 data: formData
             }

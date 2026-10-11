@@ -476,31 +476,37 @@ export class Login {
         // Multi-Tier Anti-CSRF Token Extraction
         let token = $(this.selectors.requestToken).attr('value') ?? $(this.selectors.requestTokenMeta).attr('content')
 
-        // Tingkat 2: Cek cookie sesi peramban (__RequestVerificationToken)
-        if (!token && page.context && typeof page.context().cookies === 'function') {
+        // Tingkat 2: Cek cookie sesi peramban (__RequestVerificationToken) dari context.cookies()
+        if (!token && page.context && typeof page.context === 'function') {
             try {
-                const cookies = await page.context().cookies()
-                const csrfCookie = cookies.find(
-                    c => c.name === '__RequestVerificationToken' || c.name.startsWith('__RequestVerificationToken')
-                )
-                if (csrfCookie?.value) {
-                    token = csrfCookie.value
+                const context = page.context()
+                if (context && typeof context.cookies === 'function') {
+                    const cookies = await context.cookies()
+                    const csrfCookie = cookies.find(
+                        c => c.name === '__RequestVerificationToken' || c.name.startsWith('__RequestVerificationToken')
+                    )
+                    if (csrfCookie?.value) {
+                        token = csrfCookie.value
+                        this.bot.requestToken = csrfCookie.value
+                    }
                 }
             } catch {}
         }
 
-        // Tingkat 3: Evaluasi runtime di halaman dashboard
+        // Tingkat 3: Evaluasi runtime di halaman dashboard (DOM, meta, window state, document.cookie, inline scripts)
         if (!token && typeof page.evaluate === 'function') {
             try {
                 token = await page.evaluate(() => {
                     const input = document.querySelector('input[name="__RequestVerificationToken"]') as HTMLInputElement
                     if (input?.value) return input.value
-                    const meta = document.querySelector('meta[name="__RequestVerificationToken"]') as HTMLMetaElement
+                    const meta = document.querySelector(
+                        'meta[name="__RequestVerificationToken"], meta[name="RequestVerificationToken"]'
+                    ) as HTMLMetaElement
                     if (meta?.content) return meta.content
                     if ((window as any).__RequestVerificationToken) return (window as any).__RequestVerificationToken
                     if ((window as any).dashboard?.requestVerificationToken) return (window as any).dashboard.requestVerificationToken
                     if ((window as any).rewardsAppConfig?.__RequestVerificationToken) return (window as any).rewardsAppConfig.__RequestVerificationToken
-                    const cookieMatch = document.cookie.match(/__RequestVerificationToken=([^;]+)/)
+                    const cookieMatch = document.cookie.match(/__RequestVerificationToken(?:_[^=]+)?=([^;]+)/)
                     if (cookieMatch && cookieMatch[1]) return decodeURIComponent(cookieMatch[1])
                     for (const s of Array.from(document.scripts)) {
                         const m = (s.textContent || '').match(/__RequestVerificationToken["']?\s*[:=]\s*["']([^"']+)["']/)
