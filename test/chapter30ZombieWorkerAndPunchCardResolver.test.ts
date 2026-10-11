@@ -348,6 +348,273 @@ export async function runChapter30ZombieWorkerAndPunchCardResolverTests(): Promi
         console.log('✅ Test 9 Passed: initialPoints idempotency guard locks 4085 and computes Total: +43 (Old: 4085 → New: 4128)')
     }
 
+    // Test 10: Isolated userData & detached logger context prevent state bleed on deadline timeout (miliani -> fynley)
+    {
+        const { createIsolatedUserData, executionContext } = await import('../src/index')
+        const milianiScope = AccountScope.createForTesting('miliani@gmail.com', 'run_miliani')
+        const fynleyScope = AccountScope.createForTesting('fynley@gmail.com', 'run_fynley')
+        const milianiUserData = createIsolatedUserData('miliani')
+        const fynleyUserData = createIsolatedUserData('fynley')
+
+        milianiUserData.initialPoints = 3519
+        milianiUserData.currentPoints = 3699
+
+        // Simulate deadline timeout on miliani
+        milianiScope.dispose()
+
+        // Simulate late async callback inside miliani's executionContext attempting to mutate userData after fynley started
+        await executionContext.run(
+            {
+                isMobile: false,
+                account: { email: 'miliani@gmail.com' } as any,
+                scope: milianiScope,
+                userData: milianiUserData
+            },
+            async () => {
+                const store = executionContext.getStore()
+                assert.strictEqual(store?.userData, milianiUserData)
+                assert.notStrictEqual(store?.userData, fynleyUserData)
+                // Even if a late operation mutates its bound userData, fynleyUserData remains untouched
+                store!.userData!.initialPoints = 3519
+            }
+        )
+
+        // Meanwhile fynley runs in its own isolated executionContext
+        await executionContext.run(
+            {
+                isMobile: true,
+                account: { email: 'fynley@gmail.com' } as any,
+                scope: fynleyScope,
+                userData: fynleyUserData
+            },
+            async () => {
+                const store = executionContext.getStore()
+                assert.strictEqual(store?.userData?.initialPoints, 0, 'fynley initialPoints must start clean at 0, not 3519')
+                store!.userData!.initialPoints = 4722
+                store!.userData!.currentPoints = 4912
+            }
+        )
+
+        assert.strictEqual(fynleyUserData.initialPoints, 4722)
+        assert.strictEqual(fynleyUserData.currentPoints - fynleyUserData.initialPoints, 190)
+        console.log('✅ Test 10 Passed: Isolated userData & executionContext prevent deadline timeout state bleed across accounts')
+    }
+
+    // Test 11: Fast-Bailout for HTTP 404 Punch Card URLs (no retry attempt 2/2, no safe-scroll, no server-verification)
+    {
+        const { UrlReward } = await import('../src/functions/activities/api/UrlReward')
+        const { Workers } = await import('../src/functions/Workers')
+        const warnLogs: string[] = []
+        let safeScrollCalled = false
+        let serverVerificationCalled = false
+
+        const mockBot: any = {
+            isMobile: true,
+            requestToken: 'csrf_token',
+            userData: { currentPoints: 1000, gainedPoints: 0, timezoneOffset: '60' },
+            cookies: { mobile: [], desktop: [] },
+            logger: {
+                info: () => {},
+                warn: (_m: any, tag: string, msg: string) => warnLogs.push(`[${tag}] ${msg}`),
+                error: () => {},
+                debug: () => {}
+            },
+            utils: {
+                wait: async () => {},
+                randomDelay: () => 0
+            },
+            browser: {
+                func: {
+                    getCurrentPoints: async () => {
+                        serverVerificationCalled = true
+                        return 1000
+                    }
+                }
+            }
+        }
+
+        const fakeTab: any = {
+            isClosed: () => false,
+            url: () => 'https://www.bing.com/spotlight/costumeseason',
+            on: () => {},
+            off: () => {},
+            mainFrame: () => ({}),
+            goto: async () => ({
+                status: () => 404
+            }),
+            evaluate: async () => {
+                safeScrollCalled = true
+                return false
+            },
+            close: async () => {}
+        }
+
+        const fakePage: any = {
+            isClosed: () => false,
+            url: () => 'https://rewards.bing.com/dashboard',
+            locator: () => ({
+                first: () => ({
+                    isVisible: async () => false
+                })
+            }),
+            context: () => ({
+                newPage: async () => fakeTab,
+                pages: () => [fakePage],
+                cookies: async () => []
+            })
+        }
+
+        const urlReward = new UrlReward(mockBot)
+        const stepPromo: any = {
+            offerId: 'ENID_PunchCard_Costume_Step1',
+            title: 'Costume season is here',
+            destinationUrl: 'https://www.bing.com/spotlight/costumeseason',
+            pointProgressMax: 10,
+            promotionType: 'urlreward'
+        }
+        const punchCard: any = {
+            parentPromotion: {
+                offerId: 'ENID_PunchCard_Costume_Parent',
+                title: 'Costume Punch Card',
+                pointProgressMax: 50,
+                complete: false
+            },
+            childPromotions: [stepPromo]
+        }
+
+        const res = await urlReward.doUrlReward(stepPromo, fakePage, punchCard)
+        assert.deepStrictEqual(res, { abortedBy404: true })
+        assert.strictEqual(safeScrollCalled, false, 'Must NOT run safe-scroll on HTTP 404')
+        assert.strictEqual(serverVerificationCalled, false, 'Must NOT run server-verification on HTTP 404')
+        assert.ok(
+            warnLogs.some(l =>
+                l.includes('⚠️ [PUNCHCARD-GUARD] Langkah "Costume season is here" mengembalikan HTTP 404. Melakukan fast-bailout seketika.')
+            ),
+            'Must log exact PUNCHCARD-GUARD HTTP 404 fast-bailout warning'
+        )
+
+        // Verify Workers.executePunchCardStepViaEnvelope propagates abortedBy404
+        mockBot.activities = {
+            doUrlReward: async (promo: any, pg: any, pc: any) => urlReward.doUrlReward(promo, pg, pc)
+        }
+        const workers = new Workers(mockBot)
+        const envRes = await workers.executePunchCardStepViaEnvelope(
+            {
+                context: fakePage.context,
+                url: fakePage.url,
+                locator: fakePage.locator,
+                isClosed: fakePage.isClosed
+            } as any,
+            'ENID_PunchCard_Costume_Parent',
+            stepPromo,
+            punchCard,
+            1
+        )
+        assert.strictEqual(envRes.abortedBy404, true)
+        assert.strictEqual(envRes.verified, false)
+
+        console.log('✅ Test 11 Passed: HTTP 404 Punch Card steps perform immediate fast-bailout without safe-scroll, server-verification, or retry')
+    }
+
+    // Test 12: Strict Search Point Delta Clamping prevents +87 counter jump from terminating search loop early
+    {
+        const { clampSearchPointDelta } = await import('../src/functions/activities/browser/Search')
+
+        // Case A: Counter suddenly drops from 87 missing to 0 missing in a single query (+87 jump)
+        const jumpDown = clampSearchPointDelta(87, 0, 3)
+        assert.strictEqual(jumpDown.wasClamped, true)
+        assert.strictEqual(jumpDown.gainedPoints, 3, 'Must clamp gainedPoints to +3 per query')
+        assert.strictEqual(jumpDown.remaining, 84, 'Remaining must decrease by 3 (87 -> 84), never 87 -> 0')
+
+        // Case B: Counter jumps upward from 60 missing to 90 missing mid-loop
+        const jumpUp = clampSearchPointDelta(60, 90, 3)
+        assert.strictEqual(jumpUp.wasClamped, true)
+        assert.strictEqual(jumpUp.gainedPoints, 3)
+        assert.strictEqual(jumpUp.remaining, 57)
+
+        // Case C: Normal +3 gain (87 -> 84)
+        const normalGain = clampSearchPointDelta(87, 84, 3)
+        assert.strictEqual(normalGain.wasClamped, false)
+        assert.strictEqual(normalGain.gainedPoints, 3)
+        assert.strictEqual(normalGain.remaining, 84)
+
+        // Case D: Stagnant query +0 gain (84 -> 84)
+        const stagnant = clampSearchPointDelta(84, 84, 3)
+        assert.strictEqual(stagnant.wasClamped, false)
+        assert.strictEqual(stagnant.gainedPoints, 0)
+        assert.strictEqual(stagnant.remaining, 84)
+
+        console.log('✅ Test 12 Passed: clampSearchPointDelta strictly clamps anomalous +87 counter jumps to +3 per query')
+    }
+
+    // Test 13: Multi-source CSRF token extraction from context.cookies() & header/body forwarding in ClaimBonusPoints
+    {
+        const { ClaimBonusPoints } = await import('../src/functions/activities/api/ClaimBonusPoints')
+        let capturedRequest: any = null
+
+        const mockBot: any = {
+            isMobile: true,
+            requestToken: '',
+            userData: {
+                currentPoints: 2000,
+                gainedPoints: 0,
+                geoLocale: 'ID',
+                timezoneOffset: '420'
+            },
+            cookies: { mobile: [], desktop: [] },
+            fingerprint: { headers: { 'User-Agent': 'MockMobileUA' } },
+            mainMobilePage: {
+                isClosed: () => false,
+                context: () => ({
+                    cookies: async () => [
+                        { name: '__RequestVerificationToken', value: 'cookie_csrf_token_xyz123', domain: 'rewards.bing.com' }
+                    ]
+                })
+            },
+            logger: {
+                info: () => {},
+                warn: () => {},
+                error: () => {},
+                debug: () => {}
+            },
+            utils: {
+                wait: async () => {},
+                randomDelay: () => 0
+            },
+            browser: {
+                func: {
+                    buildCookieHeader: () => '__RequestVerificationToken=cookie_csrf_token_xyz123',
+                    getCurrentPoints: async () => 2015
+                }
+            },
+            axios: {
+                request: async (req: any) => {
+                    capturedRequest = req
+                    return { status: 200, data: {} }
+                }
+            }
+        }
+
+        const claimer = new ClaimBonusPoints(mockBot)
+        await claimer.claimBonusPoints()
+
+        assert.strictEqual(mockBot.requestToken, 'cookie_csrf_token_xyz123', 'Should extract CSRF token from context.cookies()')
+        assert.ok(capturedRequest, 'Should send claimallpointsasync request')
+        assert.strictEqual(
+            capturedRequest.headers['__RequestVerificationToken'],
+            'cookie_csrf_token_xyz123',
+            'Should forward __RequestVerificationToken in request headers'
+        )
+        assert.strictEqual(
+            capturedRequest.data.get('__RequestVerificationToken'),
+            'cookie_csrf_token_xyz123',
+            'Should forward __RequestVerificationToken in form body'
+        )
+        assert.strictEqual(mockBot.userData.currentPoints, 2015)
+
+        console.log('✅ Test 13 Passed: Multi-source CSRF token extracted from context.cookies() and forwarded in headers & body')
+    }
+
     console.log('🎉 Chapter 30 Zombie Worker & Punch Card Resolver Test Suite PASSED!')
 }
 
