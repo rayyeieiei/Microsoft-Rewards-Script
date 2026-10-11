@@ -5,7 +5,12 @@ import type { AppDashboardData } from '../interface/AppDashBoardData'
 import type { PunchCardExecutionMode } from '../interface/Config'
 import { Database } from '../util/Database'
 import { resolveUrlRewardAction } from './UrlRewardActionResolver'
-import { isLocalAppUri, extractHttpUrlFromAppUri, isAppExclusiveUri } from '../runtime/BrowserOperationGuard'
+import {
+    isLocalAppUri,
+    extractHttpUrlFromAppUri,
+    isAppExclusiveUri,
+    isDocumentNotFound
+} from '../runtime/BrowserOperationGuard'
 import { ManualQuestQueue } from '../runtime/manual/ManualQuestQueue'
 import { resolveAccountIdentity } from '../runtime/identity/AccountIdentity'
 import {
@@ -1317,6 +1322,12 @@ export class Workers {
                             stepNum
                         )
 
+                        if (envelopeResult.abortedBy404) {
+                            this.bot.accountScope?.recordAttempt(offerId, targetChildOfferId, 'processed-unverified')
+                            stepsProcessed++
+                            break
+                        }
+
                         await this.bot.utils.wait(stepDelayMs)
 
                         let afterSnapshot = await stateReader.fetchPunchCardSnapshot(offerId, targetChildOfferId)
@@ -1439,6 +1450,7 @@ export class Workers {
                     const balanceBefore = Number(this.bot.userData.currentPoints ?? 0)
                     const claimActivity = card.parentPromotion as unknown as BasePromotion
                     const activityUrl = (claimActivity?.destinationUrl || '').trim()
+                    let singleStepAbortedBy404 = false
                     if (isAppExclusiveUri(activityUrl)) {
                         this.bot.logger.warn(
                             this.bot.isMobile,
@@ -1460,7 +1472,10 @@ export class Workers {
                         } else {
                             try {
                                 if (this.bot.activities?.doUrlReward) {
-                                    await this.bot.activities.doUrlReward(claimActivity, page, card)
+                                    const urlRes = await this.bot.activities.doUrlReward(claimActivity, page, card)
+                                    if (urlRes && typeof urlRes === 'object' && urlRes.abortedBy404) {
+                                        singleStepAbortedBy404 = true
+                                    }
                                 }
                             } catch (err: any) {
                                 this.bot.logger.error(
@@ -1470,6 +1485,11 @@ export class Workers {
                                 )
                             }
                         }
+                    }
+
+                    if (singleStepAbortedBy404) {
+                        this.bot.accountScope?.recordAttempt(offerId, offerId, 'processed-unverified')
+                        continue
                     }
 
                     await this.bot.utils.wait(stepDelayMs)
@@ -2239,7 +2259,7 @@ export class Workers {
         activeChild: BasePromotion,
         card: PunchCard,
         stepNum: number
-    ): Promise<{ verified: boolean; usedEnvelope: boolean }> {
+    ): Promise<{ verified: boolean; usedEnvelope: boolean; abortedBy404?: boolean }> {
         const activityUrl = (activeChild.destinationUrl || '').trim()
 
         // Fast-Skip: Langsung skip jika aktivitas mengarah ke aplikasi eksklusif (Windows Store, Xbox, dsb.)
@@ -2262,7 +2282,10 @@ export class Workers {
             )
             activeChild.destinationUrl = resolvedHttpUrl
             if (this.bot.activities?.doUrlReward) {
-                await this.bot.activities.doUrlReward(activeChild, page, card).catch(() => {})
+                const urlRes = await this.bot.activities.doUrlReward(activeChild, page, card).catch(() => undefined)
+                if (urlRes && typeof urlRes === 'object' && urlRes.abortedBy404) {
+                    return { verified: false, usedEnvelope: false, abortedBy404: true }
+                }
                 await this.bot.utils.wait(1500)
                 return { verified: true, usedEnvelope: false }
             }
@@ -2279,7 +2302,10 @@ export class Workers {
                 return { verified: false, usedEnvelope: false }
             }
             if (this.bot.activities?.doUrlReward) {
-                await this.bot.activities.doUrlReward(activeChild, page, card).catch(() => {})
+                const urlRes = await this.bot.activities.doUrlReward(activeChild, page, card).catch(() => undefined)
+                if (urlRes && typeof urlRes === 'object' && urlRes.abortedBy404) {
+                    return { verified: false, usedEnvelope: false, abortedBy404: true }
+                }
             }
             return { verified: false, usedEnvelope: false }
         }
@@ -2499,7 +2525,10 @@ export class Workers {
                 if (resolvedHttpUrl) {
                     activeChild.destinationUrl = resolvedHttpUrl
                     if (this.bot.activities?.doUrlReward) {
-                        await this.bot.activities.doUrlReward(activeChild, page, card).catch(() => {})
+                        const urlRes = await this.bot.activities.doUrlReward(activeChild, page, card).catch(() => undefined)
+                        if (urlRes && typeof urlRes === 'object' && urlRes.abortedBy404) {
+                            return { verified: false, usedEnvelope: false, abortedBy404: true }
+                        }
                         await this.bot.utils.wait(1500)
                         return { verified: true, usedEnvelope: false }
                     }
@@ -2514,12 +2543,18 @@ export class Workers {
                     return { verified: false, usedEnvelope: false }
                 }
                 if (this.bot.activities?.doUrlReward) {
-                    await this.bot.activities.doUrlReward(activeChild, page, card).catch(() => {})
+                    const urlRes = await this.bot.activities.doUrlReward(activeChild, page, card).catch(() => undefined)
+                    if (urlRes && typeof urlRes === 'object' && urlRes.abortedBy404) {
+                        return { verified: false, usedEnvelope: false, abortedBy404: true }
+                    }
                 }
                 return { verified: false, usedEnvelope: false }
             }
 
             // Langkah C s.d. F: Interaksi klik & evaluasi tab
+            let abortedBy404 = false
+            const stepTitle = activeChild.title || activeChild.name || `Step ${stepNum}`
+
             const clickAndHandleTab = async (btn: any): Promise<boolean> => {
                 let newTab: Page | null = null
                 try {
@@ -2555,12 +2590,26 @@ export class Workers {
 
                 // Langkah D: Safe scroll 2 detik pada tab baru, lalu close
                 if (newTab) {
+                    this.bot.accountScope?.trackPage(newTab)
+                    if (await isDocumentNotFound(newTab)) {
+                        this.bot.logger.warn(
+                            this.bot.isMobile,
+                            'PUNCHCARD-GUARD',
+                            `⚠️ [PUNCHCARD-GUARD] Langkah "${stepTitle}" mengembalikan HTTP 404. Melakukan fast-bailout seketika.`
+                        )
+                        try {
+                            await newTab.close().catch(() => {})
+                        } catch {}
+                        this.bot.accountScope?.untrackPage(newTab)
+                        abortedBy404 = true
+                        return false
+                    }
+
                     this.bot.logger.info(
                         this.bot.isMobile,
                         'PUNCHCARD-ENVELOPE',
                         `[ENVELOPE] New tab opened from step action. Performing 2s safe scroll...`
                     )
-                    this.bot.accountScope?.trackPage(newTab)
                     try {
                         await newTab.evaluate(() => {
                             window.scrollBy({ top: 350, behavior: 'smooth' })
@@ -2592,7 +2641,13 @@ export class Workers {
                             )
                             await this.bot.utils.wait(1000)
                         } else {
-                            await this.bot.activities.doUrlReward(activeChild, page, card).catch(() => {})
+                            const urlRes = await this.bot.activities
+                                .doUrlReward(activeChild, page, card)
+                                .catch(() => undefined)
+                            if (urlRes && typeof urlRes === 'object' && urlRes.abortedBy404) {
+                                abortedBy404 = true
+                                return false
+                            }
                         }
                     }
                 }
@@ -2632,6 +2687,9 @@ export class Workers {
                 `[ENVELOPE] Executing Native Envelope interaction for Step ${stepNum}...`
             )
             let isDomVerified = await clickAndHandleTab(activeStepButton)
+            if (abortedBy404) {
+                return { verified: false, usedEnvelope: true, abortedBy404: true }
+            }
 
             // Jika belum centang: coba 1x re-click
             if (!isDomVerified) {
@@ -2643,6 +2701,9 @@ export class Workers {
                 const retryButton = await findActiveStepButton()
                 if (retryButton) {
                     isDomVerified = await clickAndHandleTab(retryButton)
+                    if (abortedBy404) {
+                        return { verified: false, usedEnvelope: true, abortedBy404: true }
+                    }
                 }
             }
 

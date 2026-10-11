@@ -27,8 +27,54 @@ export interface BrowserOperationResult<T> {
     durationMs: number
     value?: T
     errorCode?: string
+    mainDocumentStatus?: number
     mainDocumentFailureCode?: string
     subresourceFailureCount?: number
+}
+
+export async function isDocumentNotFound(page?: Page, statusCode?: number): Promise<boolean> {
+    if (statusCode === 404 || statusCode === 410) {
+        return true
+    }
+    if (!page || typeof page.isClosed === 'function' && page.isClosed()) {
+        return false
+    }
+    try {
+        const currentUrl = typeof page.url === 'function' ? page.url().toLowerCase() : ''
+        if (currentUrl.includes('/404') || currentUrl.includes('error=404') || currentUrl.includes('pagenotfound')) {
+            return true
+        }
+        if (typeof page.evaluate === 'function') {
+            const is404Dom = await page
+                .evaluate(() => {
+                    const title = (document?.title || '').toLowerCase()
+                    if (
+                        title.includes('404') ||
+                        title.includes('page not found') ||
+                        title.includes('not found') ||
+                        title.includes('halaman tidak ditemukan')
+                    ) {
+                        return true
+                    }
+                    const h1Text = (document?.querySelector('h1, h2, .error-code, .error-title')?.textContent || '')
+                        .trim()
+                        .toLowerCase()
+                    if (
+                        h1Text === '404' ||
+                        h1Text.includes('404 not found') ||
+                        h1Text.includes('page not found') ||
+                        h1Text.includes("we can't find that page") ||
+                        h1Text.includes('halaman tidak ditemukan')
+                    ) {
+                        return true
+                    }
+                    return false
+                })
+                .catch(() => false)
+            if (is404Dom) return true
+        }
+    } catch {}
+    return false
 }
 
 export interface RunGuardedOperationOptions<T> {
@@ -215,6 +261,12 @@ export async function runGuardedOperation<T>(options: RunGuardedOperationOptions
         }, effectiveTimeoutMs)
     })
 
+    const parseMainDocStatus = (): number | undefined => {
+        if (mainDocumentStatus === 'none') return undefined
+        const parsed = Number(mainDocumentStatus)
+        return Number.isFinite(parsed) ? parsed : undefined
+    }
+
     try {
         const value = await Promise.race([
             operation(signal, effectiveTimeoutMs),
@@ -242,6 +294,7 @@ export async function runGuardedOperation<T>(options: RunGuardedOperationOptions
             status: 'completed',
             durationMs,
             value,
+            mainDocumentStatus: parseMainDocStatus(),
             mainDocumentFailureCode,
             subresourceFailureCount
         }
@@ -293,6 +346,7 @@ export async function runGuardedOperation<T>(options: RunGuardedOperationOptions
             status,
             durationMs,
             errorCode: errMessage,
+            mainDocumentStatus: parseMainDocStatus(),
             mainDocumentFailureCode,
             subresourceFailureCount
         }

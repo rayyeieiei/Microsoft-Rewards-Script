@@ -7,7 +7,8 @@ import {
     runGuardedOperation,
     performBoundedSafeScroll,
     isLocalAppUri,
-    extractHttpUrlFromAppUri
+    extractHttpUrlFromAppUri,
+    isDocumentNotFound
 } from '../../../runtime/BrowserOperationGuard'
 
 export class UrlReward extends Workers {
@@ -15,7 +16,11 @@ export class UrlReward extends Workers {
     private gainedPoints: number = 0
     private oldBalance: number = 0
 
-    public async doUrlReward(promotion: BasePromotion, page: Page, punchCard?: PunchCard) {
+    public async doUrlReward(
+        promotion: BasePromotion,
+        page: Page,
+        punchCard?: PunchCard
+    ): Promise<{ abortedBy404?: boolean } | void> {
         const URL_REWARD_TOTAL_BUDGET_MS = 70_000
         const deadlineAt = Date.now() + URL_REWARD_TOTAL_BUDGET_MS
         const remainingMs = () => Math.max(0, deadlineAt - Date.now())
@@ -280,14 +285,26 @@ export class UrlReward extends Workers {
                     logger: this.bot.logger,
                     isMobile: this.bot.isMobile,
                     operation: async (_signal, timeout) => {
-                        if (isLocalAppUri(targetUrl)) return
-                        await tab.goto(targetUrl, {
+                        if (isLocalAppUri(targetUrl)) return undefined
+                        const resp = await tab.goto(targetUrl, {
                             waitUntil: 'domcontentloaded',
                             timeout: Math.max(1000, timeout),
                             referer: 'https://rewards.bing.com/'
                         })
+                        return typeof resp?.status === 'function' ? resp.status() : undefined
                     }
                 })
+
+                const navStatusCode =
+                    typeof navResult.value === 'number' ? navResult.value : navResult.mainDocumentStatus
+                if (await isDocumentNotFound(tab, navStatusCode)) {
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'PUNCHCARD-GUARD',
+                        `⚠️ [PUNCHCARD-GUARD] Langkah "${promotion.title}" mengembalikan HTTP 404. Melakukan fast-bailout seketika.`
+                    )
+                    return { abortedBy404: true }
+                }
 
                 if (navResult.status === 'completed' && remainingMs() > 2000) {
                     await this.bot.utils.wait(Math.min(1000, remainingMs()))

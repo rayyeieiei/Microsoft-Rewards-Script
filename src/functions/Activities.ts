@@ -38,7 +38,7 @@ export default class Activities {
         await new SearchOnBing(this.bot).doSearchOnBing(promotion, page)
 
     doUrlReward = async (promotion: BasePromotion, page: Page, punchCard?: PunchCard) => {
-        await new UrlReward(this.bot).doUrlReward(promotion, page, punchCard)
+        return await new UrlReward(this.bot).doUrlReward(promotion, page, punchCard)
     }
 
     doQuiz = async (promotion: BasePromotion) => {
