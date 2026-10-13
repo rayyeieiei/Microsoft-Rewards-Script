@@ -27,11 +27,19 @@ export default class BrowserFunc {
         }
         const pts = Number(availablePoints ?? 0)
         if (!isNaN(pts) && pts > 0 && this.bot?.userData) {
-            if (!this.bot.userData.initialPoints || this.bot.userData.initialPoints <= 0) {
+            if (
+                !this.bot.userData.initialPoints ||
+                this.bot.userData.initialPoints <= 0 ||
+                (this.bot.userData.initialPoints < 50 && pts > 100)
+            ) {
                 this.bot.userData.initialPoints = pts
             }
-            // JANGAN TIMPA jika initialPoints sudah bernilai > 0 dari fase awal!
-            if (!this.bot.userData.currentPoints || this.bot.userData.currentPoints <= 0) {
+            // JANGAN TIMPA jika initialPoints sudah bernilai valid dari fase awal!
+            if (
+                !this.bot.userData.currentPoints ||
+                this.bot.userData.currentPoints <= 0 ||
+                (this.bot.userData.currentPoints < 50 && pts > 100)
+            ) {
                 this.bot.userData.currentPoints = pts
             }
         }
@@ -42,197 +50,324 @@ export default class BrowserFunc {
      * @returns {DashboardData} Object of user bing rewards dashboard data
      */
     async getDashboardData(): Promise<DashboardData> {
-        const maxAttempts = 3
+        const maxAttempts = 2
+        const hardCapMs = 15000
+        const startMs = Date.now()
+        const isExpired = () => Date.now() - startMs >= hardCapMs
 
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-            const activePage = this.bot.mainMobilePage || this.bot.mainDesktopPage
-            let liveCookies: Cookie[] = []
-            if (activePage && !activePage.isClosed()) {
-                liveCookies = await activePage.context().cookies().catch(() => [])
-            }
-            const activeCookies = liveCookies.length > 0 ? liveCookies : (this.bot.isMobile ? this.bot.cookies.mobile : this.bot.cookies.desktop) || []
+        const executeFetch = async (): Promise<DashboardData> => {
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                if (isExpired()) break
 
-            // 1. Coba via In-Page Fetch Playwright JIKA halaman sedang berada di rewards.bing.com (Prioritas utama)
-            if (activePage && !activePage.isClosed() && activePage.url().includes('rewards.bing.com')) {
-                try {
-                    // Tunggu hidrasi DOM jika kartu belum muncul
-                    await activePage.waitForSelector('section#dailyset, [data-bi-area*="DailySet"], .c-card, [class*="card"]', { timeout: 3000 }).catch(() => {})
+                const activePage = this.bot.mainMobilePage || this.bot.mainDesktopPage
+                let liveCookies: Cookie[] = []
+                if (activePage && !activePage.isClosed()) {
+                    liveCookies = await Promise.race([
+                        activePage.context().cookies().catch(() => []),
+                        new Promise<Cookie[]>(resolve => setTimeout(() => resolve([]), 3000))
+                    ])
+                }
+                const activeCookies =
+                    liveCookies.length > 0
+                        ? liveCookies
+                        : (this.bot.isMobile ? this.bot.cookies.mobile : this.bot.cookies.desktop) || []
 
-                    const inPageData = await activePage.evaluate(async () => {
-                        try {
-                            const res = await fetch('/api/getuserinfo?type=1', { credentials: 'include' }).catch(() => fetch('/api/getuserinfo', { credentials: 'include' }))
-                            const json = await res.json()
-                            return json?.dashboard || (window as any).dashboard || null
-                        } catch { return (window as any).dashboard || null }
-                    }).catch(() => null)
+                // 1. Coba via In-Page Fetch Playwright JIKA halaman sedang berada di rewards.bing.com (Prioritas utama)
+                if (activePage && !activePage.isClosed() && activePage.url().includes('rewards.bing.com')) {
+                    try {
+                        // Tunggu hidrasi DOM singkat jika bukan di sub-halaman envelope
+                        if (!activePage.url().includes('/dashboard/envelope')) {
+                            await activePage
+                                .waitForSelector('section#dailyset, [data-bi-area*="DailySet"], .c-card, [class*="card"]', {
+                                    timeout: 2000
+                                })
+                                .catch(() => {})
+                        }
 
-                    const hasAppOnlyInPage = (inPageData?.morePromotions || []).some((p: any) =>
-                        (p.title || '').toLowerCase().includes('rewards app only') ||
-                        (p.offerId || '').toLowerCase().includes('rewardsapp_offer')
-                    )
+                        const inPageData = await Promise.race([
+                            activePage
+                                .evaluate(async () => {
+                                    const winDash = (window as any).dashboard || null
+                                    const fetchWithTimeout = async (url: string, timeoutMs: number) => {
+                                        const controller = new AbortController()
+                                        const timer = setTimeout(() => controller.abort(), timeoutMs)
+                                        try {
+                                            return await fetch(url, {
+                                                credentials: 'include',
+                                                signal: controller.signal
+                                            })
+                                        } finally {
+                                            clearTimeout(timer)
+                                        }
+                                    }
+                                    try {
+                                        const res = await fetchWithTimeout('/api/getuserinfo?type=1', 2500)
+                                        if (res && res.ok) {
+                                            const json = await res.json()
+                                            if (json?.dashboard?.userStatus) {
+                                                return json.dashboard
+                                            }
+                                        }
+                                        return winDash
+                                    } catch {
+                                        return winDash
+                                    }
+                                })
+                                .catch(() => null),
+                            new Promise<null>(resolve => setTimeout(() => resolve(null), 6000))
+                        ])
 
-                    if (inPageData && inPageData.userStatus && (inPageData.dailySetPromotions || hasAppOnlyInPage || inPageData.punchCards)) {
-                        if (hasAppOnlyInPage || (inPageData.morePromotions?.length ?? 0) > 10) {
+                        const hasAppOnlyInPage = (inPageData?.morePromotions || []).some(
+                            (p: any) =>
+                                (p.title || '').toLowerCase().includes('rewards app only') ||
+                                (p.offerId || '').toLowerCase().includes('rewardsapp_offer')
+                        )
+
+                        if (
+                            inPageData &&
+                            inPageData.userStatus &&
+                            (inPageData.dailySetPromotions ||
+                                inPageData.morePromotions ||
+                                inPageData.punchCards ||
+                                hasAppOnlyInPage)
+                        ) {
                             this.lockInitialPoints(inPageData.userStatus.availablePoints)
                             return inPageData as DashboardData
                         }
+
+                        this.bot.logger.debug(
+                            this.bot.isMobile,
+                            'GET-DASHBOARD-DATA',
+                            `[GET-DASHBOARD-DATA] In-page fetch returned incomplete/null data on attempt ${attempt}/${maxAttempts}; falling back to Axios.`
+                        )
+                    } catch (err) {
+                        this.bot.logger.debug(
+                            this.bot.isMobile,
+                            'GET-DASHBOARD-DATA',
+                            `[GET-DASHBOARD-DATA] In-page fetch error on attempt ${attempt}/${maxAttempts}: ${err instanceof Error ? err.message : String(err)}`
+                        )
                     }
-                } catch {}
-            }
+                }
 
-            // 2. Coba via Axios API request dengan Desktop User-Agent agar tidak ter-strip oleh backend Microsoft
-            const apiEndpoints = [
-                'https://rewards.bing.com/api/getuserinfo?type=1',
-                'https://rewards.bing.com/api/getuserinfo'
-            ]
+                if (isExpired()) break
 
-            for (const endpoint of apiEndpoints) {
+                // 2. Coba via Axios API request dengan Desktop User-Agent agar tidak ter-strip oleh backend Microsoft
+                const apiEndpoints = ['https://rewards.bing.com/api/getuserinfo?type=1']
+
+                for (const endpoint of apiEndpoints) {
+                    if (isExpired()) break
+                    try {
+                        const request: AxiosRequestConfig = {
+                            url: endpoint,
+                            method: 'GET',
+                            timeout: 3000,
+                            ...({ 'axios-retry': { retries: 0 } } as any),
+                            headers: {
+                                ...(this.bot.fingerprint?.headers ?? {}),
+                                'User-Agent':
+                                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0',
+                                'sec-ch-ua-mobile': '?0',
+                                'sec-ch-ua-platform': '"Windows"',
+                                Cookie: this.buildCookieHeader(activeCookies, [
+                                    'bing.com',
+                                    'live.com',
+                                    'microsoftonline.com'
+                                ]),
+                                Referer: 'https://rewards.bing.com/',
+                                Origin: 'https://rewards.bing.com'
+                            }
+                        }
+
+                        const response = await this.bot.axios.request(request)
+
+                        if (response.data?.dashboard && response.data.dashboard.userStatus) {
+                            this.lockInitialPoints(response.data.dashboard.userStatus.availablePoints)
+                            return response.data.dashboard as DashboardData
+                        }
+                    } catch (error) {
+                        this.bot.logger.debug(
+                            this.bot.isMobile,
+                            'GET-DASHBOARD-DATA',
+                            `[GET-DASHBOARD-DATA] Direct API fallback (${endpoint}) failed on attempt ${attempt}/${maxAttempts}: ${error instanceof Error ? error.message : String(error)}`
+                        )
+                    }
+                }
+
+                if (isExpired()) break
+
+                // 3. Coba parsing script tag dari HTML dashboard
                 try {
                     const request: AxiosRequestConfig = {
-                        url: endpoint,
+                        url: this.bot.config.baseURL,
                         method: 'GET',
-                        timeout: 10000,
+                        timeout: 3000,
+                        ...({ 'axios-retry': { retries: 0 } } as any),
                         headers: {
                             ...(this.bot.fingerprint?.headers ?? {}),
-                            'User-Agent':
-                                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0',
-                            'sec-ch-ua-mobile': '?0',
-                            'sec-ch-ua-platform': '"Windows"',
-                            Cookie: this.buildCookieHeader(activeCookies, [
-                                'bing.com',
-                                'live.com',
-                                'microsoftonline.com'
-                            ]),
+                            Cookie: this.buildCookieHeader(activeCookies),
                             Referer: 'https://rewards.bing.com/',
                             Origin: 'https://rewards.bing.com'
                         }
                     }
 
                     const response = await this.bot.axios.request(request)
+                    const match =
+                        typeof response.data === 'string'
+                            ? response.data.match(/var\s+dashboard\s*=\s*({.*?});/s)
+                            : null
 
-                    if (response.data?.dashboard && response.data.dashboard.userStatus) {
-                        this.lockInitialPoints(response.data.dashboard.userStatus.availablePoints)
-                        return response.data.dashboard as DashboardData
+                    if (match?.[1]) {
+                        const parsed = JSON.parse(match[1]) as DashboardData
+                        if (parsed?.userStatus) {
+                            this.lockInitialPoints(parsed.userStatus.availablePoints)
+                            return parsed
+                        }
                     }
-                } catch (error) {
-                    // Ignore 404 silently on deprecated direct API endpoints
+                } catch (err) {
+                    this.bot.logger.debug(
+                        this.bot.isMobile,
+                        'GET-DASHBOARD-DATA',
+                        `[GET-DASHBOARD-DATA] HTML script fallback failed on attempt ${attempt}/${maxAttempts}: ${err instanceof Error ? err.message : String(err)}`
+                    )
+                }
+
+                if (isExpired()) break
+
+                // 4. Fallback Terakhir: Adaptasi dari Mobile App API (dengan pemetaan promosi lengkap)
+                if (this.bot.accessToken) {
+                    try {
+                        this.bot.logger.debug(
+                            this.bot.isMobile,
+                            'GET-DASHBOARD-DATA',
+                            `[GET-DASHBOARD-DATA] Attempting DAPI mobile fallback on attempt ${attempt}/${maxAttempts}...`
+                        )
+                        const appData = await this.getAppDashboardData()
+                        const mapped = this.mapAppDashboardToBrowserDashboard(appData)
+                        if (mapped) {
+                            return mapped
+                        }
+                    } catch (err) {
+                        this.bot.logger.debug(
+                            this.bot.isMobile,
+                            'GET-DASHBOARD-DATA',
+                            `[GET-DASHBOARD-DATA] DAPI fallback failed on attempt ${attempt}/${maxAttempts}: ${err instanceof Error ? err.message : String(err)}`
+                        )
+                    }
+                }
+
+                if (attempt < maxAttempts && !isExpired()) {
+                    await this.bot.utils.wait(1000)
                 }
             }
 
-            // 3. Coba parsing script tag dari HTML dashboard
-            try {
-                const request: AxiosRequestConfig = {
-                    url: this.bot.config.baseURL,
-                    method: 'GET',
-                    timeout: 5000,
-                    headers: {
-                        ...(this.bot.fingerprint?.headers ?? {}),
-                        Cookie: this.buildCookieHeader(activeCookies),
-                        Referer: 'https://rewards.bing.com/',
-                        Origin: 'https://rewards.bing.com'
-                    }
-                }
+            throw new Error('Failed to retrieve dashboard data from all endpoints after retries')
+        }
 
-                const response = await this.bot.axios.request(request)
-                const match = response.data.match(/var\s+dashboard\s*=\s*({.*?});/s)
+        let hardCapTimer: ReturnType<typeof setTimeout> | undefined
+        try {
+            return await Promise.race([
+                executeFetch(),
+                new Promise<DashboardData>((_, reject) => {
+                    hardCapTimer = setTimeout(() => {
+                        this.bot.logger.debug(
+                            this.bot.isMobile,
+                            'GET-DASHBOARD-DATA',
+                            `[GET-DASHBOARD-DATA] Hard-cap timeout (${hardCapMs}ms) reached.`
+                        )
+                        reject(new Error(`getDashboardData timed out after ${hardCapMs}ms hard-cap`))
+                    }, hardCapMs)
+                })
+            ])
+        } finally {
+            if (hardCapTimer) clearTimeout(hardCapTimer)
+        }
+    }
 
-                if (match?.[1]) {
-                    const parsed = JSON.parse(match[1]) as DashboardData
-                    if (parsed?.userStatus) {
-                        this.lockInitialPoints(parsed.userStatus.availablePoints)
-                        return parsed
-                    }
-                }
-            } catch {}
+    public mapAppDashboardToBrowserDashboard(appData?: AppDashboardData | null): DashboardData | null {
+        if (!appData?.response) return null
+        const balance = appData.response.balance ?? 0
+        this.lockInitialPoints(balance)
+        const rawPromos = appData.response.promotions ?? []
 
-            // 4. Fallback Terakhir: Adaptasi dari Mobile App API (dengan pemetaan promosi lengkap)
-            if (this.bot.accessToken) {
-                try {
-                    const appData = await this.getAppDashboardData()
-                    if (appData?.response) {
-                        const balance = appData.response.balance ?? 0
-                        this.lockInitialPoints(balance)
-                        const rawPromos = appData.response.promotions ?? []
-                        
-                        const dailySetItems: any[] = []
-                        const morePromos: any[] = []
+        const dailySetItems: any[] = []
+        const morePromos: any[] = []
 
-                        for (const p of rawPromos) {
-                            const attrs = p.attributes || {}
-                            const offerId = (attrs.offerid || p.name || '').toLowerCase()
-                            const title = attrs.title || p.name || ''
-                            const rawPointMax = attrs.pointmax || attrs.points
-                            const rawPointProgress = attrs.pointprogress
-                            
-                            const isInternalInfo = offerId.endsWith('_info') ||
-                                                   offerId.includes('user_') ||
-                                                   offerId.includes('redeem_') ||
-                                                   offerId.includes('level_') ||
-                                                   offerId.includes('streak') ||
-                                                   offerId.includes('checkin') ||
-                                                   offerId.includes('readarticle') ||
-                                                   offerId.includes('appinstall') ||
-                                                   offerId.includes('appmigration') ||
-                                                   offerId.includes('trialuser') ||
-                                                   offerId.includes('activation') ||
-                                                   offerId.includes('exempt')
+        for (const p of rawPromos) {
+            const attrs = p.attributes || {}
+            const offerId = (attrs.offerid || p.name || '').toLowerCase()
+            const title = attrs.title || p.name || ''
+            const rawPointMax = attrs.pointmax || attrs.points
+            const rawPointProgress = attrs.pointprogress
 
-                            if (isInternalInfo || !rawPointMax) {
-                                continue
-                            }
+            const isInternalInfo =
+                offerId.endsWith('_info') ||
+                offerId.includes('user_') ||
+                offerId.includes('redeem_') ||
+                offerId.includes('level_') ||
+                offerId.includes('streak') ||
+                offerId.includes('checkin') ||
+                offerId.includes('readarticle') ||
+                offerId.includes('appinstall') ||
+                offerId.includes('appmigration') ||
+                offerId.includes('trialuser') ||
+                offerId.includes('activation') ||
+                offerId.includes('exempt')
 
-                            const pointProgress = parseInt(rawPointProgress || '0', 10)
-                            const pointProgressMax = parseInt(rawPointMax, 10)
-                            if (isNaN(pointProgressMax) || pointProgressMax <= 0) continue
-
-                            const complete = attrs.complete === 'True' || attrs.complete === 'true' || pointProgress >= pointProgressMax
-                            const destinationUrl = attrs.destination_url || attrs.url || 'https://rewards.bing.com'
-                            const promotionType = attrs.type || 'urlreward'
-
-                            const promoObj = {
-                                title,
-                                destinationUrl,
-                                pointProgressMax,
-                                pointProgress,
-                                complete,
-                                offerId: attrs.offerid || p.name,
-                                promotionType
-                            }
-
-                            if (offerId.includes('dailyset') || offerId.includes('daily_set') || offerId.includes('child_offer')) {
-                                dailySetItems.push(promoObj)
-                            } else {
-                                morePromos.push(promoObj)
-                            }
-                        }
-
-                        if (dailySetItems.length > 0 || morePromos.length > 0 || balance > 0) {
-                            return {
-                                userStatus: {
-                                    availablePoints: balance,
-                                    counters: {
-                                        pcSearch: [{ pointProgress: 0, pointProgressMax: 90 }],
-                                        mobileSearch: [{ pointProgress: 0, pointProgressMax: 60 }]
-                                    }
-                                },
-                                dailySetPromotions: {
-                                    [new Date().toISOString().split('T')[0] as string]: dailySetItems
-                                },
-                                morePromotions: morePromos,
-                                promotionalItems: [],
-                                punchCards: []
-                            } as unknown as DashboardData
-                        }
-                    }
-                } catch {}
+            if (isInternalInfo || !rawPointMax) {
+                continue
             }
 
-            if (attempt < maxAttempts) {
-                await this.bot.utils.wait(2000)
+            const pointProgress = parseInt(rawPointProgress || '0', 10)
+            const pointProgressMax = parseInt(rawPointMax, 10)
+            if (isNaN(pointProgressMax) || pointProgressMax <= 0) continue
+
+            const complete =
+                attrs.complete === 'True' ||
+                attrs.complete === 'true' ||
+                pointProgress >= pointProgressMax
+            const destinationUrl =
+                attrs.destination_url || attrs.url || 'https://rewards.bing.com'
+            const promotionType = attrs.type || 'urlreward'
+
+            const promoObj = {
+                title,
+                destinationUrl,
+                pointProgressMax,
+                pointProgress,
+                complete,
+                offerId: attrs.offerid || p.name,
+                promotionType
+            }
+
+            if (
+                offerId.includes('dailyset') ||
+                offerId.includes('daily_set') ||
+                offerId.includes('child_offer')
+            ) {
+                dailySetItems.push(promoObj)
+            } else {
+                morePromos.push(promoObj)
             }
         }
 
-        throw new Error('Failed to retrieve dashboard data from all endpoints after retries')
+        if (dailySetItems.length > 0 || morePromos.length > 0 || balance > 0) {
+            return {
+                userStatus: {
+                    availablePoints: balance,
+                    counters: {
+                        pcSearch: [{ pointProgress: 0, pointProgressMax: 90 }],
+                        mobileSearch: [{ pointProgress: 0, pointProgressMax: 60 }]
+                    }
+                },
+                dailySetPromotions: {
+                    [new Date().toISOString().split('T')[0] as string]: dailySetItems
+                },
+                morePromotions: morePromos,
+                promotionalItems: [],
+                punchCards: []
+            } as unknown as DashboardData
+        }
+        return null
     }
 
     /**
@@ -244,6 +379,8 @@ export default class BrowserFunc {
             const request: AxiosRequestConfig = {
                 url: 'https://prod.rewardsplatform.microsoft.com/dapi/me?channel=SAIOS&options=613',
                 method: 'GET',
+                timeout: 6000,
+                ...({ 'axios-retry': { retries: 1 } } as any),
                 headers: {
                     Authorization: `Bearer ${this.bot.accessToken}`,
                     'User-Agent':
@@ -438,9 +575,9 @@ export default class BrowserFunc {
     /**
      * Get total earnable points with web browser
      */
-    async getBrowserEarnablePoints(): Promise<BrowserEarnablePoints> {
+    async getBrowserEarnablePoints(preloadedData?: DashboardData): Promise<BrowserEarnablePoints> {
         try {
-            const data = await this.getDashboardData()
+            const data = preloadedData ?? (await this.getDashboardData())
 
             const desktopSearchPoints =
                 data.userStatus.counters.pcSearch?.reduce(
@@ -520,7 +657,11 @@ export default class BrowserFunc {
 
             const response = await this.bot.axios.request(request)
             const userData: AppUserData = response.data
-            this.lockInitialPoints(userData?.response?.balance)
+            const appBalance = Number(userData?.response?.balance ?? 0)
+            this.lockInitialPoints(appBalance)
+            if (!isNaN(appBalance) && appBalance > 0 && this.bot?.userData) {
+                this.bot.userData.currentPoints = Math.max(this.bot.userData.currentPoints ?? 0, appBalance)
+            }
             const promotions = userData?.response?.promotions || []
             const eligibleActivities = promotions.filter(
                 x =>
@@ -604,12 +745,13 @@ export default class BrowserFunc {
         try {
             const activePage = page || this.bot.mainMobilePage || this.bot.mainDesktopPage
             if (activePage && !activePage.isClosed()) {
+                let requestContextRejected = false
                 // 1. Direct Request Context (fastest, no DOM/eval stall risk, shares context cookies)
                 try {
                     const ctx = activePage.context()
                     if (ctx && ctx.request) {
                         const res = await ctx.request.get('https://rewards.bing.com/api/getuserinfo?type=1', {
-                            timeout: 4000,
+                            timeout: 2500,
                             failOnStatusCode: false
                         })
                         if (res && typeof res.ok === 'function' && res.ok()) {
@@ -620,43 +762,47 @@ export default class BrowserFunc {
                                 this.bot.userData.currentPoints = pts
                                 return pts
                             }
+                        } else if (res && typeof res.status === 'function' && res.status() >= 400) {
+                            requestContextRejected = true
                         }
                     }
                 } catch {
                     // Fallback to in-page evaluate if request context fails
                 }
 
-                // 2. Fallback: in-page fetch dengan AbortController & Node-level timeout (6000ms)
-                const apiPoints = await Promise.race([
-                    activePage.evaluate(async () => {
-                        let timeoutId: any
-                        try {
-                            const controller = new AbortController()
-                            timeoutId = setTimeout(() => controller.abort(), 4000)
-                            const url = window.location.href.toLowerCase()
-                            if (url.includes('rewards.bing.com') || url.includes('bing.com')) {
-                                const res = await fetch('https://rewards.bing.com/api/getuserinfo?type=1', {
-                                    credentials: 'include',
-                                    signal: controller.signal
-                                })
-                                if (res.ok) {
-                                    const data = await res.json()
-                                    const pts = data?.dashboard?.userStatus?.availablePoints
-                                    if (typeof pts === 'number' && pts > 0) return pts
+                // 2. Fallback: in-page fetch dengan AbortController & Node-level timeout (3500ms) jika request context belum menolak 400
+                if (!requestContextRejected) {
+                    const apiPoints = await Promise.race([
+                        activePage.evaluate(async () => {
+                            let timeoutId: any
+                            try {
+                                const controller = new AbortController()
+                                timeoutId = setTimeout(() => controller.abort(), 2500)
+                                const url = window.location.href.toLowerCase()
+                                if (url.includes('rewards.bing.com') || url.includes('bing.com')) {
+                                    const res = await fetch('https://rewards.bing.com/api/getuserinfo?type=1', {
+                                        credentials: 'include',
+                                        signal: controller.signal
+                                    })
+                                    if (res.ok) {
+                                        const data = await res.json()
+                                        const pts = data?.dashboard?.userStatus?.availablePoints
+                                        if (typeof pts === 'number' && pts > 0) return pts
+                                    }
                                 }
+                            } catch {} finally {
+                                if (timeoutId) clearTimeout(timeoutId)
                             }
-                        } catch {} finally {
-                            if (timeoutId) clearTimeout(timeoutId)
-                        }
-                        return null
-                    }),
-                    new Promise<null>(resolve => setTimeout(() => resolve(null), 6000))
-                ]).catch(() => null)
+                            return null
+                        }),
+                        new Promise<null>(resolve => setTimeout(() => resolve(null), 3500))
+                    ]).catch(() => null)
 
-                if (typeof apiPoints === 'number' && apiPoints > 0) {
-                    this.lockInitialPoints(apiPoints)
-                    this.bot.userData.currentPoints = apiPoints
-                    return apiPoints
+                    if (typeof apiPoints === 'number' && apiPoints > 0) {
+                        this.lockInitialPoints(apiPoints)
+                        this.bot.userData.currentPoints = apiPoints
+                        return apiPoints
+                    }
                 }
 
                 // 3. Ekstrak langsung dari DOM dengan Node-level timeout (3000ms)
@@ -670,16 +816,26 @@ export default class BrowserFunc {
                             return isNaN(num) || num <= 0 ? null : num
                         }
 
+                        const dashPoints = (window as any).dashboard?.userStatus?.availablePoints
+
                         // 1. Kartu dashboard resmi dengan teks 'Available points' / 'Poin yang tersedia'
                         const allCards = Array.from(document.querySelectorAll('div, section, .card, .p-card, .c-card, [class*="card"]'))
                         for (const el of allCards) {
                             const txt = (el.textContent || '').trim()
                             if ((txt.includes('Available points') || txt.includes('Poin yang tersedia')) && !txt.includes('Ready to claim') && txt.length < 150) {
                                 if (txt.startsWith('+')) continue
-                                const numbers = txt.replace(/Available points|Poin yang tersedia|Redeem|>|,/gi, ' ').match(/\b(\d+)\b/g)
+                                const normalizedTxt = txt.replace(/(\d)[,.](?=\d{3}\b)/g, '$1')
+                                const numbers = normalizedTxt
+                                    .replace(/Available points|Poin yang tersedia|Redeem|>/gi, ' ')
+                                    .match(/\b(\d+)\b/g)
                                 if (numbers && numbers.length > 0) {
                                     const val = parseInt(numbers[0], 10)
-                                    if (val > 0) return val
+                                    if (val > 0) {
+                                        if (val < 50 && typeof dashPoints === 'number' && dashPoints > 100) {
+                                            return dashPoints
+                                        }
+                                        return val
+                                    }
                                 }
                             }
                         }
@@ -705,7 +861,6 @@ export default class BrowserFunc {
                         }
 
                         // 3. Fallback ke window.dashboard jika di SSR awal
-                        const dashPoints = (window as any).dashboard?.userStatus?.availablePoints
                         if (typeof dashPoints === 'number' && dashPoints > 0) return dashPoints
 
                         return null
