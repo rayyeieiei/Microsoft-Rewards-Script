@@ -615,6 +615,271 @@ export async function runChapter30ZombieWorkerAndPunchCardResolverTests(): Promi
         console.log('✅ Test 13 Passed: Multi-source CSRF token extracted from context.cookies() and forwarded in headers & body')
     }
 
+    // Test 14: Post-Read-to-Earn getDashboardData fast return (morePromotions <= 10), getBrowserEarnablePoints preloadedData, and Punch Card single-pass delegation
+    {
+        const BrowserFunc = (await import('../src/browser/BrowserFunc')).default
+        const { Workers } = await import('../src/functions/Workers')
+        let axiosCalled = 0
+
+        const mockDashboard: any = {
+            userStatus: {
+                availablePoints: 4125,
+                counters: {
+                    pcSearch: [{ pointProgress: 30, pointProgressMax: 90 }],
+                    mobileSearch: [{ pointProgress: 0, pointProgressMax: 60 }]
+                }
+            },
+            dailySetPromotions: {
+                '01/01/2026': [{ pointProgress: 0, pointProgressMax: 30 }]
+            },
+            morePromotions: [
+                { promotionType: 'urlreward', pointProgress: 0, pointProgressMax: 10, exclusiveLockedFeatureStatus: 'unlocked' },
+                { promotionType: 'urlreward', pointProgress: 0, pointProgressMax: 10, exclusiveLockedFeatureStatus: 'unlocked' }
+            ],
+            punchCards: []
+        }
+
+        const mockBot: any = {
+            isMobile: true,
+            userData: { initialPoints: 4085, currentPoints: 4125, gainedPoints: 40 },
+            cookies: { mobile: [], desktop: [] },
+            config: { baseURL: 'https://rewards.bing.com', punchCardExecution: { mode: 'auto', maxChildrenPerRun: 8, stepDelayMs: 10 } },
+            mainMobilePage: {
+                isClosed: () => false,
+                url: () => 'https://rewards.bing.com/',
+                context: () => ({ cookies: async () => [] }),
+                waitForSelector: async () => {},
+                evaluate: async () => mockDashboard
+            },
+            logger: {
+                info: () => {},
+                warn: () => {},
+                error: () => {},
+                debug: () => {}
+            },
+            utils: {
+                wait: async () => {},
+                getFormattedDate: () => '01/01/2026'
+            },
+            axios: {
+                request: async () => {
+                    axiosCalled++
+                    throw new Error('Axios should not be called when inPageData is valid')
+                }
+            }
+        }
+
+        const bf = new BrowserFunc(mockBot)
+        const dashData = await bf.getDashboardData()
+        assert.strictEqual(axiosCalled, 0, 'getDashboardData must return inPageData immediately even when morePromotions.length <= 10 without falling back to Axios')
+        assert.strictEqual(dashData.userStatus.availablePoints, 4125)
+
+        // Verify getBrowserEarnablePoints uses preloadedData without calling getDashboardData again
+        let getDashboardDataCalls = 0
+        bf.getDashboardData = async () => {
+            getDashboardDataCalls++
+            return mockDashboard
+        }
+        const earnable = await bf.getBrowserEarnablePoints(dashData)
+        assert.strictEqual(getDashboardDataCalls, 0, 'getBrowserEarnablePoints(preloadedData) must not call getDashboardData()')
+        assert.strictEqual(earnable.desktopSearchPoints, 60)
+        assert.strictEqual(earnable.mobileSearchPoints, 60)
+        assert.strictEqual(earnable.dailySetPoints, 30)
+        assert.strictEqual(earnable.morePromotionsPoints, 20)
+
+        // Verify Punch Card envelope step delegated to doUrlReward does NOT re-click or repeat in attempt 2/2
+        let urlRewardCalls = 0
+        let snapshotCalls = 0
+        const mockEnvelopePage: any = {
+            url: () => 'https://rewards.bing.com/dashboard/envelope?id=pc_parent_1',
+            goto: async () => {},
+            locator: () => ({
+                count: async () => 1,
+                nth: () => ({
+                    isVisible: async () => true,
+                    click: async () => {},
+                    evaluate: async () => {}
+                })
+            }),
+            context: () => ({
+                waitForEvent: async () => null // no popup tab -> falls back to doUrlReward
+            }),
+            reload: async () => {},
+            evaluate: async () => ({ hasCheckmark: false, completedCount: 0 })
+        }
+
+        const mockWorkers = new Workers({
+            ...mockBot,
+            activities: {
+                doUrlReward: async () => {
+                    urlRewardCalls++
+                    return { abortedBy404: false }
+                }
+            }
+        })
+
+        const testCard: any = {
+            name: 'Test Card',
+            parentPromotion: { offerId: 'pc_parent_1', title: 'Test Card', complete: false },
+            childPromotions: [
+                { offerId: 'child_1', title: 'Delegated Step', destinationUrl: 'https://www.bing.com/search?q=test', complete: false }
+            ]
+        }
+
+        await mockWorkers.doPunchCards(
+            { punchCards: [testCard] } as any,
+            mockEnvelopePage,
+            {
+                fetchPunchCardSnapshot: async () => {
+                    snapshotCalls++
+                    return {
+                        parentOfferId: 'pc_parent_1',
+                        childOfferId: 'child_1',
+                        completedChildren: 0,
+                        totalChildren: 1,
+                        actionableNow: 1,
+                        locked: 0,
+                        futureDated: 0,
+                        parentComplete: false,
+                        childComplete: false
+                    }
+                }
+            }
+        )
+
+        assert.strictEqual(urlRewardCalls, 1, 'Step delegated to doUrlReward must execute exactly 1 time (no internal 1x re-click and no attempt 2/2 repeat)')
+        assert.strictEqual(snapshotCalls, 1, 'Server snapshot must be fetched only 1 time per step (no duplicate retrySnapshot)')
+
+        console.log('✅ Test 14 Passed: Post-Read-to-Earn getDashboardData fast return, preloadedData reuse, and single-pass Punch Card verification verified')
+    }
+
+    // Test 15: Live Run Remediation: Thousand-separator DOM balance (7,177 -> 7177), lockInitialPoints <50 recovery, Punch Card +3 delta verification, & Keep Earning reconciliation
+    {
+        const BrowserFunc = (await import('../src/browser/BrowserFunc')).default
+        const { Workers } = await import('../src/functions/Workers')
+
+        // 15a: lockInitialPoints overwrites bogus <50 DOM value (e.g. 7) with authoritative DAPI balance (7177)
+        const mockBot15: any = {
+            isMobile: true,
+            userData: { initialPoints: 7, currentPoints: 7, gainedPoints: 0 },
+            cookies: { mobile: [], desktop: [] },
+            config: { baseURL: 'https://rewards.bing.com', punchCardExecution: { mode: 'auto', maxChildExecutionsPerRun: 8, stepDelayMs: 10 } },
+            logger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} },
+            utils: { wait: async () => {}, randomDelay: () => 0 }
+        }
+        const bf15 = new BrowserFunc(mockBot15)
+        bf15.lockInitialPoints(7177)
+        assert.strictEqual(mockBot15.userData.initialPoints, 7177, 'lockInitialPoints must overwrite bogus <50 DOM value (7) with 7177')
+        assert.strictEqual(mockBot15.userData.currentPoints, 7177, 'lockInitialPoints must overwrite bogus <50 currentPoints (7) with 7177')
+
+        // 15b: Thousand-separator regex parses "Available points 7,177" as 7177 (not 7)
+        const sampleCardText = 'Available points 7,177 Redeem >'
+        const normalizedTxt = sampleCardText.replace(/(\d)[,.](?=\d{3}\b)/g, '$1')
+        const numbers = normalizedTxt.replace(/Available points|Poin yang tersedia|Redeem|>/gi, ' ').match(/\b(\d+)\b/g)
+        assert.strictEqual(parseInt(numbers?.[0] || '0', 10), 7177, 'Formatted thousand-separator balance "7,177" must parse as 7177')
+
+        // 15c: Punch Card step that increases balance by +3 is verified complete on Attempt 1 even if afterSnapshot is null
+        const punchLogs: string[] = []
+        const mockPunchBot: any = {
+            ...mockBot15,
+            userData: { initialPoints: 3839, currentPoints: 3839, gainedPoints: 0 },
+            logger: {
+                info: (_m: any, _t: string, msg: string) => punchLogs.push(msg),
+                warn: (_m: any, _t: string, msg: string) => punchLogs.push(`WARN:${msg}`),
+                error: () => {},
+                debug: () => {}
+            },
+            activities: {
+                doUrlReward: async () => {
+                    mockPunchBot.userData.currentPoints = 3842 // +3 delta!
+                    return { abortedBy404: false }
+                }
+            }
+        }
+        const punchWorkers = new Workers(mockPunchBot)
+        const costumeCard: any = {
+            name: 'October Monthly Bonus',
+            parentPromotion: { offerId: 'oct_pc', title: 'October Monthly Bonus', complete: false },
+            childPromotions: [
+                { offerId: 'costume_1', title: 'Costume season is here', destinationUrl: 'https://www.bing.com/search?q=costume', complete: false }
+            ]
+        }
+        const dummyEnvPage: any = {
+            isClosed: () => false,
+            url: () => 'https://rewards.bing.com/dashboard/envelope?id=oct_pc',
+            goto: async () => {},
+            waitForLoadState: async () => {},
+            waitForSelector: async () => null,
+            frames: () => [],
+            locator: () => ({ count: async () => 0, first: () => ({ isVisible: async () => false }) })
+        }
+        await punchWorkers.doPunchCards(
+            { punchCards: [costumeCard] } as any,
+            dummyEnvPage,
+            { fetchPunchCardSnapshot: async () => null }
+        )
+        assert.ok(
+            punchLogs.some(l => l.includes('Step "Costume season is here" verified complete!') && l.includes('observedDelta=+3')),
+            'Punch card step with +3 balance delta must be marked verified complete immediately'
+        )
+        assert.strictEqual(
+            punchLogs.some(l => l.includes('remained unverified')),
+            false,
+            'Punch card step with +3 balance delta must NOT log remained unverified'
+        )
+
+        // 15d: Keep Earning batch reconciliation marks completed & verifiedOffersInSession cards as verified-complete
+        const keepLogs: string[] = []
+        const mockKeepBot: any = {
+            ...mockBot15,
+            userData: { initialPoints: 5575, currentPoints: 5575, gainedPoints: 0 },
+            logger: {
+                info: (_m: any, _t: string, msg: string) => keepLogs.push(msg),
+                warn: () => {},
+                error: () => {},
+                debug: () => {}
+            },
+            browser: {
+                func: {
+                    getDashboardData: async () => ({
+                        userStatus: { availablePoints: 5590 },
+                        morePromotions: [
+                            { offerId: 'promo_1', title: 'Find recipes quickly', pointProgressMax: 15, pointProgress: 15, complete: true }
+                        ]
+                    }),
+                    getCurrentPoints: async () => 5590
+                }
+            },
+            activities: {
+                doUrlReward: async (act: any) => {
+                    mockKeepBot.userData.currentPoints = 5590
+                    keepWorkers.verifiedOffersInSession.add(act.offerId)
+                }
+            }
+        }
+        const keepWorkers = new Workers(mockKeepBot)
+        mockKeepBot.workers = keepWorkers
+        const dummyKeepPage: any = {
+            isClosed: () => false,
+            url: () => 'https://rewards.bing.com',
+            evaluate: async () => ({ uncompletedCards: [], completedTitles: [] })
+        }
+        await keepWorkers.doMorePromotions(
+            {
+                morePromotions: [
+                    { offerId: 'promo_1', title: 'Find recipes quickly', pointProgressMax: 15, pointProgress: 0, complete: false, promotionType: 'urlreward' }
+                ]
+            } as any,
+            dummyKeepPage
+        )
+        assert.ok(
+            keepLogs.some(l => l.includes('verified=1/1')),
+            `Keep earning reconciliation must report verified=1/1 instead of 0/1: ${JSON.stringify(keepLogs)}`
+        )
+
+        console.log('✅ Test 15 Passed: Thousand-separator DOM balance, lockInitialPoints <50 recovery, Punch Card +3 delta verification, & Keep Earning reconciliation verified')
+    }
+
     console.log('🎉 Chapter 30 Zombie Worker & Punch Card Resolver Test Suite PASSED!')
 }
 
