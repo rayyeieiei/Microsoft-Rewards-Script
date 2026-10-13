@@ -2344,30 +2344,61 @@ export class MicrosoftRewardsBot {
                 // =========================================================================
                 // PHASE 3: WEB DASHBOARD & PROMOTIONS PIPELINE
                 // =========================================================================
-                // Pastikan browser owner page tetap sehat di Dashboard Rewards & sinkronisasi cookies aktif
-                if (this.mainMobilePage.isClosed()) {
-                    await recoverOwnerPage({
-                        bot: this,
-                        oldPage: this.mainMobilePage,
-                        isMobile: true,
-                        accountScope: accountEmail
-                    })
-                } else {
-                    const currentUrl = this.mainMobilePage.url()
-                    if (!currentUrl.includes('rewards.bing.com/dashboard') && !currentUrl.includes('rewards.bing.com')) {
-                        await this.mainMobilePage
-                            .goto(this.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 15000 })
-                            .catch(() => {})
-                    }
-                }
-                await this.utils.wait(2000)
+                // Pastikan browser owner page tetap sehat di Dashboard Rewards & sinkronisasi cookies aktif (hard-cap 15s)
+                let postDapiTimer: ReturnType<typeof setTimeout> | undefined
+                try {
+                    await Promise.race([
+                        (async () => {
+                            if (this.mainMobilePage.isClosed()) {
+                                await recoverOwnerPage({
+                                    bot: this,
+                                    oldPage: this.mainMobilePage,
+                                    isMobile: true,
+                                    accountScope: accountEmail
+                                })
+                            } else {
+                                const currentUrl = this.mainMobilePage.url()
+                                if (
+                                    !currentUrl.includes('rewards.bing.com/dashboard') &&
+                                    !currentUrl.includes('rewards.bing.com')
+                                ) {
+                                    await this.mainMobilePage
+                                        .goto(this.config.baseURL, {
+                                            waitUntil: 'domcontentloaded',
+                                            timeout: 10000
+                                        })
+                                        .catch(() => {})
+                                }
+                            }
+                            await this.utils.wait(2000)
 
-                this.cookies.mobile = await initialContext.cookies()
+                            const freshMobileCookies = await initialContext.cookies().catch(() => [])
+                            if (freshMobileCookies.length > 0) {
+                                this.cookies.mobile = freshMobileCookies
+                            }
+                        })(),
+                        new Promise<void>(resolve => {
+                            postDapiTimer = setTimeout(() => {
+                                this.logger.debug(
+                                    'main',
+                                    'PHASE-3-SYNC',
+                                    `[PHASE-3-SYNC] Post-DAPI navigation/cookie sync reached 15s hard-cap; continuing with cached cookies.`
+                                )
+                                resolve()
+                            }, 15000)
+                        })
+                    ])
+                } finally {
+                    if (postDapiTimer) clearTimeout(postDapiTimer)
+                }
                 this.fingerprint = mobileSession.fingerprint
 
                 let appData: AppDashboardData | null = null
                 try {
-                    appData = await this.browser.func.getAppDashboardData()
+                    appData = await Promise.race([
+                        this.browser.func.getAppDashboardData(),
+                        new Promise<null>(resolve => setTimeout(() => resolve(null), 10000))
+                    ])
                 } catch {}
 
                 const fallbackGeo = this.resolveFallbackGeoLocale(account)
@@ -2375,12 +2406,27 @@ export class MicrosoftRewardsBot {
                 this.userData.geoLocale =
                     account.geoLocale === 'auto' ? detectedCountry : fallbackGeo
 
-                const data: DashboardData = await this.browser.func.getDashboardData()
+                const data: DashboardData = await this.browser.func.getDashboardData().catch(err => {
+                    const fallbackDashboard = this.browser.func.mapAppDashboardToBrowserDashboard(appData)
+                    if (fallbackDashboard) {
+                        this.logger.warn(
+                            'main',
+                            'GET-DASHBOARD-DATA',
+                            `[GET-DASHBOARD-DATA] Primary dashboard fetch failed (${err instanceof Error ? err.message : String(err)}); using pre-fetched DAPI dashboard data.`
+                        )
+                        return fallbackDashboard
+                    }
+                    throw err
+                })
 
-                if (!this.userData.initialPoints || this.userData.initialPoints <= 0) {
+                if (
+                    !this.userData.initialPoints ||
+                    this.userData.initialPoints <= 0 ||
+                    (this.userData.initialPoints < 50 && data.userStatus.availablePoints > 100)
+                ) {
                     this.userData.initialPoints = data.userStatus.availablePoints
                 }
-                // JANGAN TIMPA jika initialPoints sudah bernilai > 0 dari fase awal!
+                // JANGAN TIMPA jika initialPoints sudah bernilai valid dari fase awal!
                 if (typeof data.userStatus?.availablePoints === 'number' && data.userStatus.availablePoints > 0) {
                     this.userData.currentPoints = Math.max(
                         this.userData.currentPoints ?? 0,
@@ -2408,7 +2454,7 @@ export class MicrosoftRewardsBot {
                     status: 'Processing Tasks'
                 })
 
-                const browserEarnable = await this.browser.func.getBrowserEarnablePoints()
+                const browserEarnable = await this.browser.func.getBrowserEarnablePoints(data)
                 this.logger.info(
                     'main',
                     'POINTS',
