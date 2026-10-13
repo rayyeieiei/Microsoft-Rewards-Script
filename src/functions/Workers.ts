@@ -25,6 +25,7 @@ import {
 export class Workers {
     public bot: MicrosoftRewardsBot
     public completedOffersInSession: Set<string> = new Set<string>()
+    public verifiedOffersInSession: Set<string> = new Set<string>()
 
     constructor(bot: MicrosoftRewardsBot) {
         this.bot = bot
@@ -474,11 +475,16 @@ export class Workers {
                         (f.offerId === result.offerId ||
                             (f.title && f.title.toLowerCase().trim() === result.title.toLowerCase().trim()))
                 )
+                const isVerifiedInSession = Boolean(
+                    (result.offerId && this.verifiedOffersInSession.has(result.offerId)) ||
+                    (result.title && this.verifiedOffersInSession.has(result.title.toLowerCase().trim()))
+                )
                 const isServerComplete = Boolean(
-                    freshMatch &&
-                    (freshMatch.complete === true ||
-                        (freshMatch.pointProgressMax > 0 &&
-                            (freshMatch.pointProgress ?? 0) >= freshMatch.pointProgressMax))
+                    isVerifiedInSession ||
+                    (freshMatch &&
+                        (freshMatch.complete === true ||
+                            (freshMatch.pointProgressMax > 0 &&
+                                (freshMatch.pointProgress ?? 0) >= freshMatch.pointProgressMax)))
                 )
 
                 if (isServerComplete) {
@@ -895,8 +901,17 @@ export class Workers {
             (await this.bot.browser.func.getCurrentPoints().catch(() => startBonusBalance))
         const bonusGained = Math.max(0, updatedBonusBalance - startBonusBalance)
 
-        // 4. Reconcile seluruh result berdasarkan exact offerId
-        const allFreshPromos = refreshedData ? this.extractAllPromotions(refreshedData) : []
+        // 4. Reconcile seluruh result berdasarkan exact offerId (sertakan juga item yang sudah complete=true!)
+        const allFreshPromos: BasePromotion[] = refreshedData
+            ? ([
+                  ...(refreshedData.morePromotions ?? []),
+                  ...(refreshedData.morePromotionsWithoutPromotionalItems ?? []),
+                  ...(refreshedData.promotionalItems ?? []),
+                  ...(refreshedData.promotionalItem ? [refreshedData.promotionalItem] : []),
+                  ...(refreshedData.componentImpressionPromotions ?? []),
+                  ...(refreshedData.punchCards ?? []).flatMap(pc => pc.childPromotions ?? [])
+              ].filter(Boolean) as BasePromotion[])
+            : []
 
         for (const [key, result] of executionMap.entries()) {
             const freshMatch = allFreshPromos.find(
@@ -905,10 +920,15 @@ export class Workers {
                     (f.offerId === result.offerId ||
                         (f.title && f.title.toLowerCase().trim() === result.title.toLowerCase().trim()))
             )
+            const isVerifiedInSession = Boolean(
+                (result.offerId && this.verifiedOffersInSession.has(result.offerId)) ||
+                (result.title && this.verifiedOffersInSession.has(result.title.toLowerCase().trim()))
+            )
             const isServerComplete = Boolean(
-                freshMatch &&
-                (freshMatch.complete === true ||
-                    (freshMatch.pointProgressMax > 0 && (freshMatch.pointProgress ?? 0) >= freshMatch.pointProgressMax))
+                isVerifiedInSession ||
+                (freshMatch &&
+                    (freshMatch.complete === true ||
+                        (freshMatch.pointProgressMax > 0 && (freshMatch.pointProgress ?? 0) >= freshMatch.pointProgressMax)))
             )
 
             if (isServerComplete) {
@@ -1037,8 +1057,12 @@ export class Workers {
             return
         }
 
+        const balanceBefore = Number(this.bot.userData.currentPoints ?? 0)
         await this.bot.activities.doClaimBonusPoints()
-        this.bot.logger.info(this.bot.isMobile, 'CLAIM-BONUS-POINTS', `🎉 Star Bonus points claimed!`, 'green')
+        const balanceAfter = Number(this.bot.userData.currentPoints ?? 0)
+        if (this.bot.requestToken && balanceAfter > balanceBefore) {
+            this.bot.logger.info(this.bot.isMobile, 'CLAIM-BONUS-POINTS', `🎉 Star Bonus points claimed!`, 'green')
+        }
     }
 
     private punchCardStateReader?: PunchCardStateReader
@@ -1328,33 +1352,21 @@ export class Workers {
                             break
                         }
 
-                        await this.bot.utils.wait(stepDelayMs)
+                        await this.bot.utils.wait(Math.min(stepDelayMs, 1500))
 
-                        let afterSnapshot = await stateReader.fetchPunchCardSnapshot(offerId, targetChildOfferId)
+                        const afterSnapshot = await stateReader.fetchPunchCardSnapshot(offerId, targetChildOfferId)
 
-                        let isVerified = Boolean(
+                        const balanceAfter = Number(this.bot.userData.currentPoints ?? 0)
+                        const observedDelta = Math.max(0, balanceAfter - balanceBefore)
+
+                        const isVerified = Boolean(
                             envelopeResult.verified ||
+                            observedDelta > 0 ||
                             (afterSnapshot &&
                                 (afterSnapshot.childComplete === true ||
                                     afterSnapshot.completedChildren > currentSnapshot.completedChildren ||
                                     afterSnapshot.parentComplete === true))
                         )
-
-                        if (!isVerified) {
-                            await this.bot.utils.wait(2000)
-                            const retrySnapshot = await stateReader.fetchPunchCardSnapshot(offerId, targetChildOfferId)
-                            if (retrySnapshot) {
-                                afterSnapshot = retrySnapshot
-                                isVerified = Boolean(
-                                    afterSnapshot.childComplete === true ||
-                                        afterSnapshot.completedChildren > currentSnapshot.completedChildren ||
-                                        afterSnapshot.parentComplete === true
-                                )
-                            }
-                        }
-
-                        const balanceAfter = Number(this.bot.userData.currentPoints ?? 0)
-                        const observedDelta = Math.max(0, balanceAfter - balanceBefore)
 
                         if (isVerified) {
                             this.bot.logger.info(
@@ -1426,7 +1438,7 @@ export class Workers {
                             this.bot.accountScope?.recordAttempt(offerId, targetChildOfferId, 'processed-unverified')
                             stepsProcessed++
 
-                            if (attempts >= 2) {
+                            if (envelopeResult.delegatedToUrlReward || attempts >= 2) {
                                 this.bot.logger.warn(
                                     this.bot.isMobile,
                                     'PUNCHCARD',
@@ -2259,7 +2271,7 @@ export class Workers {
         activeChild: BasePromotion,
         card: PunchCard,
         stepNum: number
-    ): Promise<{ verified: boolean; usedEnvelope: boolean; abortedBy404?: boolean }> {
+    ): Promise<{ verified: boolean; usedEnvelope: boolean; abortedBy404?: boolean; delegatedToUrlReward?: boolean }> {
         const activityUrl = (activeChild.destinationUrl || '').trim()
 
         // Fast-Skip: Langsung skip jika aktivitas mengarah ke aplikasi eksklusif (Windows Store, Xbox, dsb.)
@@ -2545,14 +2557,16 @@ export class Workers {
                 if (this.bot.activities?.doUrlReward) {
                     const urlRes = await this.bot.activities.doUrlReward(activeChild, page, card).catch(() => undefined)
                     if (urlRes && typeof urlRes === 'object' && urlRes.abortedBy404) {
-                        return { verified: false, usedEnvelope: false, abortedBy404: true }
+                        return { verified: false, usedEnvelope: false, abortedBy404: true, delegatedToUrlReward: true }
                     }
+                    return { verified: false, usedEnvelope: false, delegatedToUrlReward: true }
                 }
                 return { verified: false, usedEnvelope: false }
             }
 
             // Langkah C s.d. F: Interaksi klik & evaluasi tab
             let abortedBy404 = false
+            let delegatedToUrlReward = false
             const stepTitle = activeChild.title || activeChild.name || `Step ${stepNum}`
 
             const clickAndHandleTab = async (btn: any): Promise<boolean> => {
@@ -2641,6 +2655,7 @@ export class Workers {
                             )
                             await this.bot.utils.wait(1000)
                         } else {
+                            delegatedToUrlReward = true
                             const urlRes = await this.bot.activities
                                 .doUrlReward(activeChild, page, card)
                                 .catch(() => undefined)
@@ -2688,11 +2703,11 @@ export class Workers {
             )
             let isDomVerified = await clickAndHandleTab(activeStepButton)
             if (abortedBy404) {
-                return { verified: false, usedEnvelope: true, abortedBy404: true }
+                return { verified: false, usedEnvelope: true, abortedBy404: true, delegatedToUrlReward }
             }
 
-            // Jika belum centang: coba 1x re-click
-            if (!isDomVerified) {
+            // Jika belum centang DAN belum didelegasikan ke doUrlReward: coba 1x re-click
+            if (!isDomVerified && !delegatedToUrlReward) {
                 this.bot.logger.warn(
                     this.bot.isMobile,
                     'PUNCHCARD-ENVELOPE',
@@ -2702,12 +2717,12 @@ export class Workers {
                 if (retryButton) {
                     isDomVerified = await clickAndHandleTab(retryButton)
                     if (abortedBy404) {
-                        return { verified: false, usedEnvelope: true, abortedBy404: true }
+                        return { verified: false, usedEnvelope: true, abortedBy404: true, delegatedToUrlReward }
                     }
                 }
             }
 
-            return { verified: isDomVerified, usedEnvelope: true }
+            return { verified: isDomVerified, usedEnvelope: true, delegatedToUrlReward }
         } catch (err: any) {
             this.bot.logger.warn(
                 this.bot.isMobile,
@@ -2916,13 +2931,22 @@ export class ProductionPunchCardStateReader implements PunchCardStateReader {
         targetChildOfferId?: string
     ): Promise<PunchCardServerSnapshot | null> {
         if (!this.browserFunc?.getDashboardData) return null
+        let snapshotTimer: ReturnType<typeof setTimeout> | undefined
         try {
-            const freshData = await this.browserFunc.getDashboardData()
+            const freshData = await Promise.race([
+                this.browserFunc.getDashboardData(),
+                new Promise<null>(resolve => {
+                    snapshotTimer = setTimeout(() => resolve(null), 10000)
+                })
+            ])
+            if (!freshData) return null
             const matchingPc = findMatchingPunchCard(freshData, parentOfferId)
             if (!matchingPc) return null
             return createPunchCardSnapshot(matchingPc, targetChildOfferId)
         } catch {
             return null
+        } finally {
+            if (snapshotTimer) clearTimeout(snapshotTimer)
         }
     }
 }

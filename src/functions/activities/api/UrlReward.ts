@@ -199,9 +199,15 @@ export class UrlReward extends Workers {
                                 'URL-REWARD',
                                 `Card "${promotion.title}" is already completed!`
                             )
-                            if (promotion.offerId) this.bot.workers.completedOffersInSession.add(promotion.offerId)
-                            if (promotion.title)
-                                this.bot.workers.completedOffersInSession.add(promotion.title.toLowerCase().trim())
+                            if (promotion.offerId) {
+                                this.bot.workers.completedOffersInSession.add(promotion.offerId)
+                                this.bot.workers.verifiedOffersInSession?.add(promotion.offerId)
+                            }
+                            if (promotion.title) {
+                                const normalizedTitle = promotion.title.toLowerCase().trim()
+                                this.bot.workers.completedOffersInSession.add(normalizedTitle)
+                                this.bot.workers.verifiedOffersInSession?.add(normalizedTitle)
+                            }
                             return
                         }
 
@@ -592,6 +598,8 @@ export class UrlReward extends Workers {
 
         if (this.gainedPoints > 0) {
             this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + this.gainedPoints
+            if (offerId) this.bot.workers?.verifiedOffersInSession?.add(offerId)
+            if (title) this.bot.workers?.verifiedOffersInSession?.add(title.toLowerCase().trim())
             void Database.getInstance().recordActivity(
                 this.bot.activeAccount?.email || '',
                 isDailySet ? 'DAILY_SET' : 'PROMOTIONS',
