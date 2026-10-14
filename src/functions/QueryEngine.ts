@@ -6,6 +6,30 @@ import type { MicrosoftRewardsBot } from '../index'
 import { QueryEngine } from '../interface/Config'
 
 export class QueryCore {
+    private static globalUsedQueries: Set<string> = new Set<string>()
+
+    public static recordUsedQuery(query: string): void {
+        if (!query) return
+        const norm = query.trim().replace(/\s+/g, ' ').toLowerCase()
+        if (norm) {
+            QueryCore.globalUsedQueries.add(norm)
+        }
+    }
+
+    public static isQueryUsedGlobally(query: string): boolean {
+        if (!query) return false
+        const norm = query.trim().replace(/\s+/g, ' ').toLowerCase()
+        return QueryCore.globalUsedQueries.has(norm)
+    }
+
+    public static getGlobalUsedQueriesCount(): number {
+        return QueryCore.globalUsedQueries.size
+    }
+
+    public static clearGlobalUsedQueries(): void {
+        QueryCore.globalUsedQueries.clear()
+    }
+
     constructor(private bot: MicrosoftRewardsBot) {}
 
     async queryManager(
@@ -119,6 +143,15 @@ export class QueryCore {
             }
 
             finalQueries = this.normalizeAndDedupe(finalQueries)
+            const beforeGlobalFilter = finalQueries.length
+            finalQueries = finalQueries.filter(q => !QueryCore.isQueryUsedGlobally(q))
+            if (beforeGlobalFilter !== finalQueries.length) {
+                this.bot.logger.debug(
+                    this.bot.isMobile,
+                    'QUERY-MANAGER',
+                    `Cross-account query deduplication: filtered ${beforeGlobalFilter - finalQueries.length} already-used queries | remaining=${finalQueries.length}`
+                )
+            }
             this.bot.logger.debug(
                 this.bot.isMobile,
                 'QUERY-MANAGER',
