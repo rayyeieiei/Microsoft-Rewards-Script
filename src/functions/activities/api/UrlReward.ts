@@ -285,7 +285,7 @@ export class UrlReward extends Workers {
             try {
                 const navResult = await runGuardedOperation({
                     stage: 'activity-navigation',
-                    timeoutMs: 20000,
+                    timeoutMs: 30000,
                     remainingBudgetMs: remainingMs(),
                     page: tab,
                     logger: this.bot.logger,

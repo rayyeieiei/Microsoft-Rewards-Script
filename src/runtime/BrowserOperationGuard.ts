@@ -532,7 +532,7 @@ export async function createManagedPage(options: ManagedPageOptions): Promise<Pa
         purpose,
         isMobile = false,
         defaultTimeoutMs = 15_000,
-        defaultNavTimeoutMs = 20_000
+        defaultNavTimeoutMs = 30_000
     } = options
 
     const page = await context.newPage()

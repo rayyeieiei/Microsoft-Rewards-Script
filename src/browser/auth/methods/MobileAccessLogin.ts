@@ -294,37 +294,54 @@ export class MobileAccessLogin {
             this.bot.logger.debug(this.bot.isMobile, 'LOGIN-APP', 'Exchanging OAuth code for access token')
 
             let response
-            try {
-                response = await this.bot.axios.request({
-                    url: this.tokenUrl,
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/x-www-form-urlencoded',
-                        'User-Agent': UserAgentManager.DEFAULT_MOBILE_UA,
-                        'Origin': 'https://login.live.com',
-                        'Referer': 'https://login.live.com/',
-                        'Authorization': undefined
-                    },
-                    data: data.toString(),
-                    // @ts-ignore
-                    'axios-retry': { retries: 0 }
-                })
-            } catch (tokenExchangeError) {
-                if (axios.isAxiosError(tokenExchangeError) && tokenExchangeError.response) {
-                    const status = tokenExchangeError.response.status
-                    if (status === 400 || status === 401) {
-                        const errorDetails =
-                            typeof tokenExchangeError.response.data === 'object'
-                                ? JSON.stringify(tokenExchangeError.response.data)
-                                : String(tokenExchangeError.response.data)
-                        this.bot.logger.error(
+            const maxTokenExchangeAttempts = 2
+
+            for (let attempt = 1; attempt <= maxTokenExchangeAttempts; attempt++) {
+                try {
+                    response = await this.bot.axios.request({
+                        url: this.tokenUrl,
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded',
+                            'User-Agent': UserAgentManager.DEFAULT_MOBILE_UA,
+                            'Origin': 'https://login.live.com',
+                            'Referer': 'https://login.live.com/',
+                            'Authorization': undefined
+                        },
+                        data: data.toString(),
+                        timeout: 12000,
+                        // @ts-ignore
+                        'axios-retry': { retries: 0 }
+                    })
+                    break
+                } catch (tokenExchangeError) {
+                    if (axios.isAxiosError(tokenExchangeError) && tokenExchangeError.response) {
+                        const status = tokenExchangeError.response.status
+                        if (status === 400 || status === 401) {
+                            const errorDetails =
+                                typeof tokenExchangeError.response.data === 'object'
+                                    ? JSON.stringify(tokenExchangeError.response.data)
+                                    : String(tokenExchangeError.response.data)
+                            this.bot.logger.error(
+                                this.bot.isMobile,
+                                'LOGIN-APP',
+                                `[OAUTH-BURNED-CODE] Token endpoint rejected authorization code with HTTP ${status}: ${errorDetails}. Kode otorisasi bersifat single-use dan telah hangus; menghentikan proses tanpa retry.`
+                            )
+                            throw tokenExchangeError
+                        }
+                    }
+
+                    if (attempt < maxTokenExchangeAttempts) {
+                        this.bot.logger.warn(
                             this.bot.isMobile,
                             'LOGIN-APP',
-                            `[OAUTH-BURNED-CODE] Token endpoint rejected authorization code with HTTP ${status}: ${errorDetails}. Kode otorisasi bersifat single-use dan telah hangus; menghentikan proses tanpa retry.`
+                            `[OAUTH-TIMEOUT-RETRY] Penukaran token OAuth mengalami network timeout / socket hang pada percobaan ${attempt}/${maxTokenExchangeAttempts}. Menunggu 1500ms untuk retry 1x...`
                         )
+                        await this.bot.utils.wait(1500)
+                    } else {
+                        throw tokenExchangeError
                     }
                 }
-                throw tokenExchangeError
             }
 
             const token = (response?.data?.access_token as string) ?? ''
