@@ -26,6 +26,40 @@ export class Workers {
     public bot: MicrosoftRewardsBot
     public completedOffersInSession: Set<string> = new Set<string>()
     public verifiedOffersInSession: Set<string> = new Set<string>()
+    private static brokenPunchCardStepIds = new Set<string>()
+
+    public static recordBrokenPunchCardStep(idOrTitle: string): void {
+        if (!idOrTitle) return
+        const trimmed = idOrTitle.trim()
+        if (!trimmed) return
+        const lower = trimmed.toLowerCase()
+        if (/^step\s*\d+$/i.test(lower) || lower === 'daily step' || lower === 'step') {
+            return
+        }
+        Workers.brokenPunchCardStepIds.add(trimmed)
+        Workers.brokenPunchCardStepIds.add(lower)
+    }
+
+    public static isPunchCardStepBroken(idOrTitle: string): boolean {
+        if (!idOrTitle) return false
+        const trimmed = idOrTitle.trim()
+        const lower = trimmed.toLowerCase()
+        if (/^step\s*\d+$/i.test(lower) || lower === 'daily step' || lower === 'step') {
+            return false
+        }
+        return (
+            Workers.brokenPunchCardStepIds.has(trimmed) ||
+            Workers.brokenPunchCardStepIds.has(lower)
+        )
+    }
+
+    public static getBrokenPunchCardStepsCount(): number {
+        return Workers.brokenPunchCardStepIds.size
+    }
+
+    public static clearBrokenPunchCardSteps(): void {
+        Workers.brokenPunchCardStepIds.clear()
+    }
 
     constructor(bot: MicrosoftRewardsBot) {
         this.bot = bot
@@ -1321,6 +1355,23 @@ export class Workers {
                         }
 
                         const stepTitle = activeChild.title || activeChild.name || `Step ${stepsProcessed + 1}`
+
+                        // Session Blacklist Check: Lewati langkah yang sudah terbukti gagal di akun sebelumnya dalam sesi ini
+                        if (
+                            (targetChildOfferId && Workers.isPunchCardStepBroken(targetChildOfferId)) ||
+                            (stepTitle && Workers.isPunchCardStepBroken(stepTitle))
+                        ) {
+                            this.bot.logger.warn(
+                                this.bot.isMobile,
+                                'PUNCHCARD-SESSION-SKIP',
+                                `⚠️ [SESSION-BLACKLIST] Melewati langkah "${stepTitle}" (${targetChildOfferId}) yang telah terbukti gagal di akun sebelumnya dalam sesi ini.`
+                            )
+                            if (targetChildOfferId) this.completedOffersInSession.add(targetChildOfferId)
+                            this.bot.accountScope?.recordAttempt(offerId, targetChildOfferId, 'execution-unavailable')
+                            stepsProcessed++
+                            continue
+                        }
+
                         const currentTaskCounts = this.getPunchCardTaskCounts(card)
                         const stepNum = currentTaskCounts.completed + 1
                         const taskTag = `(${stepNum}/${currentTaskCounts.total} Tasks)`
@@ -1348,6 +1399,8 @@ export class Workers {
 
                         if (envelopeResult.abortedBy404) {
                             this.bot.accountScope?.recordAttempt(offerId, targetChildOfferId, 'processed-unverified')
+                            if (targetChildOfferId) Workers.recordBrokenPunchCardStep(targetChildOfferId)
+                            if (stepTitle) Workers.recordBrokenPunchCardStep(stepTitle)
                             stepsProcessed++
                             break
                         }
@@ -1445,6 +1498,8 @@ export class Workers {
                                     `[PUNCHCARD] Circuit breaker triggered after ${attempts} consecutive unverified attempts on "${stepTitle}". Stopping card loop.`,
                                     'yellow'
                                 )
+                                if (targetChildOfferId) Workers.recordBrokenPunchCardStep(targetChildOfferId)
+                                if (stepTitle) Workers.recordBrokenPunchCardStep(stepTitle)
                                 break
                             }
                         }
