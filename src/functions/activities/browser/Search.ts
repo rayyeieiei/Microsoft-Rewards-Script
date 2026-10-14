@@ -157,6 +157,7 @@ export class Search extends Workers {
             })
 
             queries = [...new Set(queries.map(q => q.trim()).filter(Boolean))]
+            queries = queries.filter(q => !QueryCore.isQueryUsedGlobally(q))
 
             this.bot.logger.info(isMobile, 'SEARCH-BING', `Search query pool ready | count=${queries.length}`)
 
@@ -196,6 +197,7 @@ export class Search extends Workers {
             let stagnantLoop = 0
             const stagnantLoopMax = 3
             let isCooldownDetected = false
+            let queriesSinceLastBreak = 0
 
             const isAborted = () => Boolean(
                 this.bot.abortController?.signal?.aborted ||
@@ -232,6 +234,17 @@ export class Search extends Workers {
                     )
                     continue
                 }
+
+                if (QueryCore.isQueryUsedGlobally(trimmedQuery)) {
+                    this.bot.logger.debug(
+                        isMobile,
+                        'SEARCH-BING',
+                        `[QUERY-DEDUPE] Skipping query "${trimmedQuery}" because it was already used by another account in this run session.`
+                    )
+                    continue
+                }
+
+                QueryCore.recordUsedQuery(trimmedQuery)
 
                 searchCount++
 
@@ -276,12 +289,31 @@ export class Search extends Workers {
                     status: `Searching (${isMobile ? 'Mobile' : 'Desktop'})`
                 })
 
-                if (gainedPoints === 0) {
+                let effectiveGained = gainedPoints
+                let effectiveMissingPointsTotal = newMissingPointsTotal
+
+                if (!isMobile && effectiveGained === 0 && !isAborted() && page && !page.isClosed()) {
+                    const baselinePts = pointsPerSearch || 3
+                    const decrementedRemaining = Math.max(0, missingPointsTotal - baselinePts)
+                    const baselineGained = missingPointsTotal - decrementedRemaining
+                    if (baselineGained > 0) {
+                        this.bot.logger.info(
+                            isMobile,
+                            'SEARCH-BING',
+                            `[DESKTOP-BASELINE] Counter tidak terbaca langsung dari DOM, mengurangkan sisa kuota pencarian sebesar baseline (+${baselineGained} poin | remaining=${decrementedRemaining}).`,
+                            'green'
+                        )
+                        effectiveGained = baselineGained
+                        effectiveMissingPointsTotal = decrementedRemaining
+                    }
+                }
+
+                if (effectiveGained === 0) {
                     stagnantLoop++
                     this.bot.logger.info(
                         isMobile,
                         'SEARCH-BING',
-                        `No points gained ${stagnantLoop}/${stagnantLoopMax} | query="${query}" | remaining=${newMissingPointsTotal}`
+                        `No points gained ${stagnantLoop}/${stagnantLoopMax} | query="${query}" | remaining=${effectiveMissingPointsTotal}`
                     )
 
                     if (stagnantLoop >= stagnantLoopMax) {
@@ -327,22 +359,22 @@ export class Search extends Workers {
                     void Database.getInstance().recordActivity(
                         currentEmail,
                         isMobile ? 'SEARCH_MOBILE' : 'SEARCH_DESKTOP',
-                        gainedPoints
+                        effectiveGained
                     )
 
-                    this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
-                    this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
-                    totalGainedPoints += gainedPoints
+                    this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + effectiveGained
+                    this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + effectiveGained
+                    totalGainedPoints += effectiveGained
 
                     this.bot.logger.info(
                         isMobile,
                         'SEARCH-BING',
-                        `gainedPoints=${gainedPoints} points | query="${query}" | remaining=${newMissingPointsTotal}`,
+                        `gainedPoints=${effectiveGained} points | query="${query}" | remaining=${effectiveMissingPointsTotal}`,
                         'green'
                     )
                 }
 
-                missingPointsTotal = newMissingPointsTotal
+                missingPointsTotal = effectiveMissingPointsTotal
 
                 if (missingPointsTotal === 0) {
                     this.bot.logger.info(
@@ -351,6 +383,20 @@ export class Search extends Workers {
                         `All required ${isMobile ? 'Mobile' : 'Desktop'} search points earned, stopping search loop`
                     )
                     break
+                }
+
+                queriesSinceLastBreak++
+                if (queriesSinceLastBreak >= 5 && missingPointsTotal > 0 && !isAborted()) {
+                    const breakDelayMs = Math.floor(Math.random() * (35000 - 20000 + 1)) + 20000
+                    this.bot.logger.info(
+                        isMobile,
+                        'SEARCH-STEALTH',
+                        `[MICRO-BREAK] Mengambil jeda istirahat natural selama ${Math.round(breakDelayMs / 1000)} detik setelah 5 kueri berturut-turut...`,
+                        'cyan'
+                    )
+                    const breakSignal = this.bot.accountScope?.abortController?.signal || this.bot.abortController?.signal
+                    await interruptibleWait(breakDelayMs, breakSignal)
+                    queriesSinceLastBreak = 0
                 }
 
                 // Topical Chaining: Ekstrak related search keywords dari SERP Bing dan masukkan ke antrean kueri
@@ -447,6 +493,17 @@ export class Search extends Workers {
                             continue
                         }
 
+                        if (QueryCore.isQueryUsedGlobally(trimmedQuery)) {
+                            this.bot.logger.debug(
+                                isMobile,
+                                'SEARCH-BING-EXTRA',
+                                `[QUERY-DEDUPE] Skipping extra query "${trimmedQuery}" because it was already used by another account in this run session.`
+                            )
+                            continue
+                        }
+
+                        QueryCore.recordUsedQuery(trimmedQuery)
+
                         this.bot.logger.info(
                             isMobile,
                             'SEARCH-BING-EXTRA',
@@ -479,12 +536,31 @@ export class Search extends Workers {
                         const newMissingPointsTotal = clamped.remaining
                         const gainedPoints = clamped.gainedPoints
 
-                        if (gainedPoints === 0) {
+                        let effectiveGained = gainedPoints
+                        let effectiveMissingPointsTotal = newMissingPointsTotal
+
+                        if (!isMobile && effectiveGained === 0 && !isAborted() && page && !page.isClosed()) {
+                            const baselinePts = pointsPerSearch || 3
+                            const decrementedRemaining = Math.max(0, missingPointsTotal - baselinePts)
+                            const baselineGained = missingPointsTotal - decrementedRemaining
+                            if (baselineGained > 0) {
+                                this.bot.logger.info(
+                                    isMobile,
+                                    'SEARCH-BING-EXTRA',
+                                    `[DESKTOP-BASELINE] Counter tidak terbaca langsung dari DOM, mengurangkan sisa kuota pencarian sebesar baseline (+${baselineGained} poin | remaining=${decrementedRemaining}).`,
+                                    'green'
+                                )
+                                effectiveGained = baselineGained
+                                effectiveMissingPointsTotal = decrementedRemaining
+                            }
+                        }
+
+                        if (effectiveGained === 0) {
                             stagnantLoop++
                             this.bot.logger.info(
                                 isMobile,
                                 'SEARCH-BING-EXTRA',
-                                `No points gained ${stagnantLoop}/${stagnantLoopMax} | query="${query}" | remaining=${newMissingPointsTotal}`
+                                `No points gained ${stagnantLoop}/${stagnantLoopMax} | query="${query}" | remaining=${effectiveMissingPointsTotal}`
                             )
 
                             if (stagnantLoop >= stagnantLoopMax) {
@@ -521,20 +597,20 @@ export class Search extends Workers {
                         } else {
                             stagnantLoop = 0
 
-                            this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
-                            this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
-                            totalGainedPoints += gainedPoints
-                            pointsGainedThisPool += gainedPoints
+                            this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + effectiveGained
+                            this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + effectiveGained
+                            totalGainedPoints += effectiveGained
+                            pointsGainedThisPool += effectiveGained
 
                             this.bot.logger.info(
                                 isMobile,
                                 'SEARCH-BING-EXTRA',
-                                `gainedPoints=${gainedPoints} points | query="${query}" | remaining=${newMissingPointsTotal}`,
+                                `gainedPoints=${effectiveGained} points | query="${query}" | remaining=${effectiveMissingPointsTotal}`,
                                 'green'
                             )
                         }
 
-                        missingPointsTotal = newMissingPointsTotal
+                        missingPointsTotal = effectiveMissingPointsTotal
 
                         if (missingPointsTotal === 0) {
                             this.bot.logger.info(
@@ -543,6 +619,20 @@ export class Search extends Workers {
                                 'All required search points earned during extra searches'
                             )
                             break
+                        }
+
+                        queriesSinceLastBreak++
+                        if (queriesSinceLastBreak >= 5 && missingPointsTotal > 0 && !isAborted()) {
+                            const breakDelayMs = Math.floor(Math.random() * (35000 - 20000 + 1)) + 20000
+                            this.bot.logger.info(
+                                isMobile,
+                                'SEARCH-STEALTH',
+                                `[MICRO-BREAK] Mengambil jeda istirahat natural selama ${Math.round(breakDelayMs / 1000)} detik setelah 5 kueri berturut-turut...`,
+                                'cyan'
+                            )
+                            const breakSignal = this.bot.accountScope?.abortController?.signal || this.bot.abortController?.signal
+                            await interruptibleWait(breakDelayMs, breakSignal)
+                            queriesSinceLastBreak = 0
                         }
                     }
 
@@ -779,7 +869,7 @@ export class Search extends Workers {
             `Returning current search counters after failed retries | query="${query}"`
         )
 
-        return await this.bot.browser.func.getSearchPoints(searchPage, true, isMobile)
+        return await this.bot.browser.func.getSearchPoints(searchPage, false, isMobile)
     }
 
     private async randomScroll(page: Page, isMobile: boolean) {
@@ -849,6 +939,45 @@ export class Search extends Workers {
         page: Page,
         _isMobile: boolean
     ): Promise<{ verifiedGained: boolean; newBalance?: number; gained?: number }> {
+        const oldRecordedPoints = Number(this.bot.userData.currentPoints ?? 0)
+
+        // 1. Check in-page DOM points first (fastest, zero network overhead, zero HTTP 400 risk)
+        if (page && !page.isClosed()) {
+            const inPagePoints = await page
+                .evaluate(() => {
+                    const selectors = [
+                        '#id_rc',
+                        '.points-container',
+                        '#rh_meter',
+                        '#b_id_rc',
+                        'a#id_rh span',
+                        '.rh_count'
+                    ]
+                    for (const sel of selectors) {
+                        const el = document.querySelector(sel)
+                        if (el) {
+                            const txt = (el.textContent || '').trim().replace(/,/g, '')
+                            const m = txt.match(/\d+/)
+                            if (m) {
+                                const pts = parseInt(m[0], 10)
+                                if (!isNaN(pts) && pts > 0) return pts
+                            }
+                        }
+                    }
+                    return null
+                })
+                .catch(() => null)
+
+            if (typeof inPagePoints === 'number' && inPagePoints > oldRecordedPoints) {
+                return {
+                    verifiedGained: true,
+                    newBalance: inPagePoints,
+                    gained: inPagePoints - oldRecordedPoints
+                }
+            }
+        }
+
+        // 2. Fallback network check (failOnStatusCode: false, no thrown errors)
         try {
             const ctx = page.context()
             if (ctx && ctx.request) {
@@ -866,7 +995,6 @@ export class Search extends Workers {
                         typeof availablePoints === 'number'
                             ? availablePoints
                             : Number(this.bot.userData.currentPoints ?? 0)
-                    const oldRecordedPoints = Number(this.bot.userData.currentPoints ?? 0)
 
                     if (currentBalance > oldRecordedPoints) {
                         return {
