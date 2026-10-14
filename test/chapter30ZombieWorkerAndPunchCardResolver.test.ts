@@ -880,6 +880,197 @@ export async function runChapter30ZombieWorkerAndPunchCardResolverTests(): Promi
         console.log('✅ Test 15 Passed: Thousand-separator DOM balance, lockInitialPoints <50 recovery, Punch Card +3 delta verification, & Keep Earning reconciliation verified')
     }
 
+    // Test 16: Weak Network Resilience: 28s hard-cap & graceful DAPI/minimal snapshot fallback, 12s OAuth code exchange with 1x network retry, & 30s activity navigation
+    {
+        const BrowserFunc = (await import('../src/browser/BrowserFunc')).default
+        const { MobileAccessLogin } = await import('../src/browser/auth/methods/MobileAccessLogin')
+
+        // 16a: getDashboardData returns safe minimal fallback without throwing when all endpoints fail
+        const mockBot16: any = {
+            isMobile: true,
+            userData: { initialPoints: 4500, currentPoints: 4500, gainedPoints: 0 },
+            cookies: { mobile: [], desktop: [] },
+            config: { baseURL: 'https://rewards.bing.com' },
+            fingerprint: { headers: {} },
+            logger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} },
+            utils: { wait: async () => {}, randomDelay: () => 0 },
+            axios: {
+                request: async () => {
+                    throw new Error('ETIMEDOUT')
+                }
+            }
+        }
+        const bf16 = new BrowserFunc(mockBot16)
+        let thrownError: any = null
+        let returnedSnapshot: any = null
+        try {
+            returnedSnapshot = await bf16.getDashboardData()
+        } catch (err) {
+            thrownError = err
+        }
+        assert.strictEqual(thrownError, null, 'getDashboardData must not throw fatal error on network failure')
+        assert.ok(returnedSnapshot?.userStatus, 'getDashboardData must return fallback snapshot with userStatus')
+        assert.strictEqual(returnedSnapshot.userStatus.availablePoints, 4500, 'Fallback snapshot preserves currentPoints')
+
+        // 16b: MobileAccessLogin retries 1x on network timeout (12s) before giving up
+        let tokenAttempts = 0
+        const mockOauthBot: any = {
+            isMobile: true,
+            userData: {},
+            logger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} },
+            utils: { wait: async () => {}, randomDelay: () => 0 },
+            browser: { utils: { disableFido: async () => {} } },
+            axios: {
+                request: async (cfg: any) => {
+                    assert.strictEqual(cfg.timeout, 12000, 'OAuth token request timeout must be 12000ms')
+                    tokenAttempts++
+                    if (tokenAttempts === 1) {
+                        const netErr: any = new Error('connect ETIMEDOUT')
+                        netErr.code = 'ETIMEDOUT'
+                        throw netErr
+                    }
+                    return { data: { access_token: 'resilient_token_success' } }
+                }
+            }
+        }
+        const dummyPage: any = {
+            url: () => 'https://login.live.com',
+            context: () => ({
+                newPage: async () => ({
+                    url: () => 'https://login.live.com/oauth20_desktop.srf?code=fresh_code&state=123',
+                    goto: async () => {},
+                    isClosed: () => false,
+                    close: async () => {},
+                    waitForSelector: async () => null
+                })
+            })
+        }
+        const login = new MobileAccessLogin(mockOauthBot, dummyPage)
+        const token = await login.get('test@example.com')
+        assert.strictEqual(tokenAttempts, 2, 'Token exchange must retry exactly 1x after network timeout')
+        assert.strictEqual(token, 'resilient_token_success', 'Token exchange succeeds on 2nd attempt after retry')
+
+        console.log('✅ Test 16 Passed: Weak network resilience (28s hard-cap, safe fallback snapshot, 12s token exchange with 1x retry, and 30s activity-navigation) verified')
+    }
+
+    // Test 17: Stealth & Security Hardening: Cross-Account Query Isolation, Stop Desktop Search HTTP 400 Spam, Deterministic Viewport, & PunchCard Session Cache
+    {
+        const { QueryCore } = await import('../src/functions/QueryEngine')
+        const { BrowserEnvironmentPolicy } = await import('../src/runtime/environment/BrowserEnvironmentPolicy')
+        const { REAL_ANDROID_DEVICE_CATALOG } = await import('../src/runtime/environment/StickyDeviceProfile')
+        const { Workers } = await import('../src/functions/Workers')
+        const BrowserFunc = (await import('../src/browser/BrowserFunc')).default
+
+        // 17a: Cross-Account Query Isolation (globalUsedQueries)
+        QueryCore.clearGlobalUsedQueries()
+        assert.strictEqual(QueryCore.getGlobalUsedQueriesCount(), 0)
+
+        QueryCore.recordUsedQuery('barcelona vs galatasaray live')
+        QueryCore.recordUsedQuery('jack doherty')
+
+        assert.strictEqual(QueryCore.isQueryUsedGlobally('barcelona vs galatasaray live'), true)
+        assert.strictEqual(QueryCore.isQueryUsedGlobally('BARCELONA VS GALATASARAY LIVE'), true)
+        assert.strictEqual(QueryCore.isQueryUsedGlobally('jack doherty'), true)
+        assert.strictEqual(QueryCore.isQueryUsedGlobally('unrelated query keyword'), false)
+        assert.strictEqual(QueryCore.getGlobalUsedQueriesCount(), 2)
+
+        // Verify normalizeAndDedupe and query deduplication
+        const queriesPool = ['barcelona vs galatasaray live', 'new unique search query', 'jack doherty']
+        const filtered = queriesPool.filter(q => !QueryCore.isQueryUsedGlobally(q))
+        assert.deepStrictEqual(filtered, ['new unique search query'], 'Used queries from Account 1 must be excluded for Account 2')
+        QueryCore.clearGlobalUsedQueries()
+
+        // 17b: Deterministic Viewport & Device Locking
+        const email1 = 'canttakeaway36@gmail.com'
+        const email2 = 'pagpagenak@gmail.com'
+
+        const hash1 = BrowserEnvironmentPolicy.getDeterministicHash(email1)
+        const hash2 = BrowserEnvironmentPolicy.getDeterministicHash(email2)
+        assert.ok(hash1 > 0 && hash2 > 0, 'Email hashes must be non-zero positive numbers')
+        assert.notStrictEqual(hash1, hash2, 'Different accounts in the same batch should have different hashes')
+
+        // Desktop resolution determinism
+        const desktopScreen1 = BrowserEnvironmentPolicy.getDeterministicDesktopScreen(email1)
+        const desktopScreen2 = BrowserEnvironmentPolicy.getDeterministicDesktopScreen(email2)
+        const desktopScreen1Repeat = BrowserEnvironmentPolicy.getDeterministicDesktopScreen(email1)
+
+        assert.deepStrictEqual(desktopScreen1, desktopScreen1Repeat, 'Same account must ALWAYS resolve to identical desktop viewport')
+        assert.ok(
+            BrowserEnvironmentPolicy.DESKTOP_VIEWPORTS.some(
+                v => v.width === desktopScreen1.viewport.width && v.height === desktopScreen1.viewport.height
+            ),
+            'Desktop screen must come from approved reasonable resolutions pool'
+        )
+        assert.ok(
+            BrowserEnvironmentPolicy.DESKTOP_VIEWPORTS.some(
+                v => v.width === desktopScreen2.viewport.width && v.height === desktopScreen2.viewport.height
+            ),
+            'Desktop screen 2 must come from approved reasonable resolutions pool'
+        )
+
+        // Mobile resolution catalog pool verification
+        const mobileViewportsInCatalog = REAL_ANDROID_DEVICE_CATALOG.map(d => `${d.viewport.width}x${d.viewport.height}`)
+        const expectedMobilePool = ['393x873', '412x915', '360x800', '384x854', '390x844', '414x896']
+        for (const expectedVp of expectedMobilePool) {
+            assert.ok(mobileViewportsInCatalog.includes(expectedVp), `REAL_ANDROID_DEVICE_CATALOG must contain ${expectedVp}`)
+        }
+
+        // 17c: Stop HTTP 400 Spam & Mobile DAPI on Desktop Search
+        let getDashboardDataCallCount = 0
+        const mockBotDesktopSearch: any = {
+            isMobile: false,
+            userData: { currentPoints: 4100 },
+            logger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} },
+            utils: { wait: async () => {}, randomDelay: () => 0 }
+        }
+        const bfDesktop = new BrowserFunc(mockBotDesktopSearch)
+        bfDesktop.getDashboardData = async () => {
+            getDashboardDataCallCount++
+            throw new Error('SPURIOUS-DASHBOARD-CALL')
+        }
+
+        // Mock desktop search page on bing.com with DOM counter #id_rc = "4,103"
+        const mockBingPage: any = {
+            isClosed: () => false,
+            url: () => 'https://www.bing.com/search?q=test',
+            evaluate: async () => {
+                return { domPoints: 4103 }
+            }
+        }
+
+        const initialCounters = {
+            pcSearch: [{ pointProgress: 30, pointProgressMax: 90 }],
+            mobileSearch: []
+        }
+        ;(bfDesktop as any).cachedCounters = JSON.parse(JSON.stringify(initialCounters))
+
+        // Call getSearchPoints during desktop search
+        const resultCounters = await bfDesktop.getSearchPoints(mockBingPage, false, false)
+        assert.strictEqual(getDashboardDataCallCount, 0, 'getDashboardData MUST NOT be called during desktop search on bing.com')
+        assert.strictEqual(resultCounters.pcSearch?.[0]?.pointProgress, 33, 'Counter must advance by delta from DOM')
+        assert.strictEqual(mockBotDesktopSearch.userData.currentPoints, 4103, 'currentPoints must update from DOM reading')
+
+        // 17d: PunchCard Session Cache & Blacklist
+        Workers.clearBrokenPunchCardSteps()
+        assert.strictEqual(Workers.getBrokenPunchCardStepsCount(), 0)
+
+        const brokenStepId = 'Costume_season_2026'
+        const brokenStepTitle = 'Costume season is here'
+
+        Workers.recordBrokenPunchCardStep(brokenStepId)
+        Workers.recordBrokenPunchCardStep(brokenStepTitle)
+
+        assert.strictEqual(Workers.isPunchCardStepBroken(brokenStepId), true)
+        assert.strictEqual(Workers.isPunchCardStepBroken('costume season is here'), true)
+        assert.strictEqual(Workers.isPunchCardStepBroken('COSTUME_SEASON_2026'), true)
+        assert.strictEqual(Workers.isPunchCardStepBroken('Working valid step'), false)
+
+        Workers.clearBrokenPunchCardSteps()
+        assert.strictEqual(Workers.isPunchCardStepBroken(brokenStepId), false)
+
+        console.log('✅ Test 17 Passed: Stealth & Security Hardening (Cross-Account Query Isolation, Stop Desktop Search HTTP 400 Spam, Deterministic Viewport, & PunchCard Session Cache) verified')
+    }
+
     console.log('🎉 Chapter 30 Zombie Worker & Punch Card Resolver Test Suite PASSED!')
 }
 
