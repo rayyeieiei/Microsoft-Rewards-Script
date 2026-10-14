@@ -51,9 +51,25 @@ export default class BrowserFunc {
      */
     async getDashboardData(): Promise<DashboardData> {
         const maxAttempts = 2
-        const hardCapMs = 15000
+        const hardCapMs = 28000
         const startMs = Date.now()
         const isExpired = () => Date.now() - startMs >= hardCapMs
+
+        const createFallbackSnapshot = (): DashboardData => ({
+            userStatus: {
+                availablePoints: Number(this.bot.userData?.currentPoints ?? this.bot.userData?.initialPoints ?? 0),
+                counters: {
+                    pcSearch: [{ pointProgress: 0, pointProgressMax: 90 }],
+                    mobileSearch: [{ pointProgress: 0, pointProgressMax: 60 }]
+                }
+            },
+            dailySetPromotions: {
+                [new Date().toISOString().split('T')[0] as string]: []
+            },
+            morePromotions: [],
+            promotionalItems: [],
+            punchCards: []
+        } as unknown as DashboardData)
 
         const executeFetch = async (): Promise<DashboardData> => {
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -101,7 +117,7 @@ export default class BrowserFunc {
                                         }
                                     }
                                     try {
-                                        const res = await fetchWithTimeout('/api/getuserinfo?type=1', 2500)
+                                        const res = await fetchWithTimeout('/api/getuserinfo?type=1', 8000)
                                         if (res && res.ok) {
                                             const json = await res.json()
                                             if (json?.dashboard?.userStatus) {
@@ -114,7 +130,7 @@ export default class BrowserFunc {
                                     }
                                 })
                                 .catch(() => null),
-                            new Promise<null>(resolve => setTimeout(() => resolve(null), 6000))
+                            new Promise<null>(resolve => setTimeout(() => resolve(null), 9500))
                         ])
 
                         const hasAppOnlyInPage = (inPageData?.morePromotions || []).some(
@@ -152,7 +168,10 @@ export default class BrowserFunc {
                 if (isExpired()) break
 
                 // 2. Coba via Axios API request dengan Desktop User-Agent agar tidak ter-strip oleh backend Microsoft
-                const apiEndpoints = ['https://rewards.bing.com/api/getuserinfo?type=1']
+                const apiEndpoints = [
+                    'https://rewards.bing.com/api/getuserinfo?type=1',
+                    'https://rewards.bing.com/api/getuserinfo'
+                ]
 
                 for (const endpoint of apiEndpoints) {
                     if (isExpired()) break
@@ -160,7 +179,7 @@ export default class BrowserFunc {
                         const request: AxiosRequestConfig = {
                             url: endpoint,
                             method: 'GET',
-                            timeout: 3000,
+                            timeout: 10000,
                             ...({ 'axios-retry': { retries: 0 } } as any),
                             headers: {
                                 ...(this.bot.fingerprint?.headers ?? {}),
@@ -200,7 +219,7 @@ export default class BrowserFunc {
                     const request: AxiosRequestConfig = {
                         url: this.bot.config.baseURL,
                         method: 'GET',
-                        timeout: 3000,
+                        timeout: 10000,
                         ...({ 'axios-retry': { retries: 0 } } as any),
                         headers: {
                             ...(this.bot.fingerprint?.headers ?? {}),
@@ -260,21 +279,42 @@ export default class BrowserFunc {
                 }
             }
 
-            throw new Error('Failed to retrieve dashboard data from all endpoints after retries')
+            // Fallback aman: jika semua endpoint web gagal, kembalikan DAPI atau snapshot dasar tanpa throw fatal
+            if (this.bot.accessToken) {
+                try {
+                    const appData = await this.getAppDashboardData().catch(() => null)
+                    const mapped = this.mapAppDashboardToBrowserDashboard(appData)
+                    if (mapped) return mapped
+                } catch {}
+            }
+
+            this.bot.logger.warn(
+                this.bot.isMobile,
+                'GET-DASHBOARD-DATA',
+                '[GET-DASHBOARD-DATA] All endpoints exhausted; returning safe minimal dashboard snapshot.'
+            )
+            return createFallbackSnapshot()
         }
 
         let hardCapTimer: ReturnType<typeof setTimeout> | undefined
         try {
             return await Promise.race([
                 executeFetch(),
-                new Promise<DashboardData>((_, reject) => {
-                    hardCapTimer = setTimeout(() => {
-                        this.bot.logger.debug(
+                new Promise<DashboardData>(resolve => {
+                    hardCapTimer = setTimeout(async () => {
+                        this.bot.logger.warn(
                             this.bot.isMobile,
                             'GET-DASHBOARD-DATA',
-                            `[GET-DASHBOARD-DATA] Hard-cap timeout (${hardCapMs}ms) reached.`
+                            `[GET-DASHBOARD-DATA] Hard-cap timeout (${hardCapMs}ms) reached; recovering with DAPI / fallback dashboard snapshot.`
                         )
-                        reject(new Error(`getDashboardData timed out after ${hardCapMs}ms hard-cap`))
+                        if (this.bot.accessToken) {
+                            try {
+                                const appData = await this.getAppDashboardData().catch(() => null)
+                                const mapped = this.mapAppDashboardToBrowserDashboard(appData)
+                                if (mapped) return resolve(mapped)
+                            } catch {}
+                        }
+                        resolve(createFallbackSnapshot())
                     }, hardCapMs)
                 })
             ])
@@ -485,14 +525,55 @@ export default class BrowserFunc {
         if (page && !page.isClosed() && page.url().includes('bing.com')) {
             const inPageData = await page.evaluate(() => {
                 const dash = (window as any).dashboard || (window as any).rewardsUser
-                if (dash?.userStatus?.counters) return dash.userStatus.counters
+                if (dash?.userStatus?.counters) return { counters: dash.userStatus.counters }
+
+                // Check Bing rewards header counter in DOM (#id_rc, .points-container, #rh_meter, etc.)
+                const selectors = [
+                    '#id_rc',
+                    '.points-container',
+                    '#rh_meter',
+                    '#b_id_rc',
+                    'a#id_rh span',
+                    '.rh_count',
+                    '[data-tag="rewards-counter"]'
+                ]
+                for (const sel of selectors) {
+                    const el = document.querySelector(sel)
+                    if (el) {
+                        const txt = (el.textContent || '').trim().replace(/,/g, '')
+                        const m = txt.match(/\d+/)
+                        if (m) {
+                            const pts = parseInt(m[0], 10)
+                            if (!isNaN(pts) && pts > 0) {
+                                return { domPoints: pts }
+                            }
+                        }
+                    }
+                }
                 return null
             }).catch(() => null)
 
-            if (inPageData) {
-                this.cachedCounters = inPageData
+            if (inPageData?.counters) {
+                this.cachedCounters = inPageData.counters
                 this.syncCounter = 0
-                return inPageData
+                return inPageData.counters
+            }
+
+            if (inPageData?.domPoints && this.cachedCounters) {
+                const newBalance = inPageData.domPoints
+                const oldBalance = Number(this.bot.userData.currentPoints ?? 0)
+                if (newBalance > oldBalance) {
+                    const gained = newBalance - oldBalance
+                    const targetList = isMobile ? this.cachedCounters.mobileSearch : this.cachedCounters.pcSearch
+                    if (targetList && targetList[0]) {
+                        targetList[0].pointProgress = Math.min(
+                            targetList[0].pointProgressMax,
+                            (targetList[0].pointProgress || 0) + gained
+                        )
+                    }
+                    this.bot.userData.currentPoints = newBalance
+                }
+                return this.cachedCounters
             }
         }
 
@@ -513,7 +594,31 @@ export default class BrowserFunc {
             return this.cachedCounters
         }
 
-        // 4. Periodic or forced network sync via getDashboardData
+        // 4. CRITICAL GUARD FOR DESKTOP SEARCH:
+        // Never call getDashboardData() (which attempts Axios /api/getuserinfo and mobile DAPI)
+        // during Desktop search (isMobile === false) or while active page is on bing.com!
+        if (isMobile === false || (page && !page.isClosed() && page.url().includes('bing.com'))) {
+            if (this.cachedCounters) {
+                const targetList = isMobile ? this.cachedCounters.mobileSearch : this.cachedCounters.pcSearch
+                if (targetList && targetList[0]) {
+                    const currentProgress = targetList[0].pointProgress || 0
+                    const maxProgress = targetList[0].pointProgressMax || (isMobile ? 60 : 90)
+                    if (currentProgress < maxProgress) {
+                        targetList[0].pointProgress = Math.min(maxProgress, currentProgress + 3)
+                    }
+                }
+                return this.cachedCounters
+            }
+
+            const fallbackCounters = {
+                pcSearch: [{ pointProgress: 3, pointProgressMax: 90 }],
+                mobileSearch: []
+            } as unknown as Counters
+            this.cachedCounters = fallbackCounters
+            return fallbackCounters
+        }
+
+        // 5. Periodic or forced network sync via getDashboardData (Mobile on rewards.bing.com only)
         try {
             const dashboardData = await this.getDashboardData()
             const counters = dashboardData?.userStatus?.counters
