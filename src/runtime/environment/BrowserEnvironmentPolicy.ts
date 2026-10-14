@@ -24,6 +24,53 @@ export class BrowserEnvironmentPolicy {
         hasTouch: false
     }
 
+    public static readonly DESKTOP_VIEWPORTS = [
+        { width: 1366, height: 768 },
+        { width: 1440, height: 900 },
+        { width: 1536, height: 864 },
+        { width: 1600, height: 900 },
+        { width: 1920, height: 1080 },
+        { width: 1280, height: 800 }
+    ] as const
+
+    public static readonly MOBILE_VIEWPORTS = [
+        { width: 393, height: 873 },
+        { width: 412, height: 915 },
+        { width: 360, height: 800 },
+        { width: 384, height: 854 },
+        { width: 390, height: 844 },
+        { width: 414, height: 896 }
+    ] as const
+
+    public static getDeterministicHash(input: string): number {
+        if (!input) return 0
+        let hash = 0
+        const normalized = input.trim().toLowerCase()
+        for (let i = 0; i < normalized.length; i++) {
+            hash = ((hash << 5) - hash + normalized.charCodeAt(i)) | 0
+        }
+        return Math.abs(hash)
+    }
+
+    public static getDeterministicDesktopScreen(accountIdentifier?: string): ScreenProfile {
+        if (!accountIdentifier) return BrowserEnvironmentPolicy.DEFAULT_DESKTOP_SCREEN
+        const hash = BrowserEnvironmentPolicy.getDeterministicHash(accountIdentifier)
+        const vp = BrowserEnvironmentPolicy.DESKTOP_VIEWPORTS[hash % BrowserEnvironmentPolicy.DESKTOP_VIEWPORTS.length]!
+        return {
+            viewport: { width: vp.width, height: vp.height },
+            deviceScaleFactor: 1,
+            isMobile: false,
+            hasTouch: false
+        }
+    }
+
+    public static getDeterministicMobileViewport(accountIdentifier?: string): { width: number; height: number } {
+        if (!accountIdentifier) return { width: 393, height: 873 }
+        const hash = BrowserEnvironmentPolicy.getDeterministicHash(accountIdentifier)
+        const vp = BrowserEnvironmentPolicy.MOBILE_VIEWPORTS[hash % BrowserEnvironmentPolicy.MOBILE_VIEWPORTS.length]!
+        return { width: vp.width, height: vp.height }
+    }
+
     /**
      * Resolves an environment profile for the specified context kind.
      * Hardcoded/specified viewports use source: 'project-config'.
@@ -32,7 +79,8 @@ export class BrowserEnvironmentPolicy {
     public static resolveProfile(
         kind: BrowserContextKind,
         config?: BrowserEnvironmentConfig,
-        deviceProfile?: DeviceHardwareProfile
+        deviceProfile?: DeviceHardwareProfile,
+        accountIdentifier?: string
     ): BrowserEnvironmentProfile {
         const isMobile = kind === 'mobile'
         const baseScreen = isMobile
@@ -43,8 +91,17 @@ export class BrowserEnvironmentPolicy {
                         isMobile: deviceProfile.isMobile,
                         hasTouch: deviceProfile.hasTouch
                     }
-                  : BrowserEnvironmentPolicy.DEFAULT_MOBILE_SCREEN)
-            : BrowserEnvironmentPolicy.DEFAULT_DESKTOP_SCREEN
+                  : (accountIdentifier
+                        ? {
+                              viewport: BrowserEnvironmentPolicy.getDeterministicMobileViewport(accountIdentifier),
+                              deviceScaleFactor: 2.5,
+                              isMobile: true,
+                              hasTouch: true
+                          }
+                        : BrowserEnvironmentPolicy.DEFAULT_MOBILE_SCREEN))
+            : (accountIdentifier
+                  ? BrowserEnvironmentPolicy.getDeterministicDesktopScreen(accountIdentifier)
+                  : BrowserEnvironmentPolicy.DEFAULT_DESKTOP_SCREEN)
 
         const overrideScreen = isMobile ? config?.mobile : config?.desktop
 

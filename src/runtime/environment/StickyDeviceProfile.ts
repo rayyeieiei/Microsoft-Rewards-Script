@@ -56,6 +56,15 @@ export const REAL_ANDROID_DEVICE_CATALOG: readonly DeviceHardwareProfile[] = [
         hasTouch: true,
         userAgent:
             'Mozilla/5.0 (Linux; Android 14; CPH2449) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36 EdgA/128.0.2739.79'
+    },
+    {
+        deviceModel: 'SM-A715F', // Samsung Galaxy A71
+        viewport: { width: 414, height: 896 },
+        deviceScaleFactor: 2.625,
+        isMobile: true,
+        hasTouch: true,
+        userAgent:
+            'Mozilla/5.0 (Linux; Android 14; SM-A715F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36 EdgA/128.0.2739.79'
     }
 ]
 

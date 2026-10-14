@@ -182,7 +182,8 @@ class Browser {
             const profile = BrowserEnvironmentPolicy.resolveProfile(
                 this.bot.isMobile ? 'mobile' : 'desktop',
                 undefined,
-                deviceProfile
+                deviceProfile,
+                account.email
             )
             const contextOptions = BrowserEnvironmentPolicy.toContextOptions(profile)
             if (storageStateForContext) {
