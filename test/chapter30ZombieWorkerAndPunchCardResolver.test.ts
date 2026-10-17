@@ -1057,15 +1057,20 @@ export async function runChapter30ZombieWorkerAndPunchCardResolverTests(): Promi
         const brokenStepId = 'Costume_season_2026'
         const brokenStepTitle = 'Costume season is here'
 
-        Workers.recordBrokenPunchCardStep(brokenStepId)
-        Workers.recordBrokenPunchCardStep(brokenStepTitle)
+        Workers.recordUnverifiedPunchCardStep(brokenStepId)
+        Workers.recordUnverifiedPunchCardStep(brokenStepTitle)
 
+        assert.strictEqual(Workers.isPunchCardStepUnverified(brokenStepId), true)
         assert.strictEqual(Workers.isPunchCardStepBroken(brokenStepId), true)
+        assert.strictEqual(Workers.isPunchCardStepUnverified('costume season is here'), true)
         assert.strictEqual(Workers.isPunchCardStepBroken('costume season is here'), true)
+        assert.strictEqual(Workers.isPunchCardStepUnverified('COSTUME_SEASON_2026'), true)
         assert.strictEqual(Workers.isPunchCardStepBroken('COSTUME_SEASON_2026'), true)
+        assert.strictEqual(Workers.isPunchCardStepUnverified('Working valid step'), false)
         assert.strictEqual(Workers.isPunchCardStepBroken('Working valid step'), false)
 
         Workers.clearBrokenPunchCardSteps()
+        assert.strictEqual(Workers.isPunchCardStepUnverified(brokenStepId), false)
         assert.strictEqual(Workers.isPunchCardStepBroken(brokenStepId), false)
 
         console.log('✅ Test 17 Passed: Stealth & Security Hardening (Cross-Account Query Isolation, Stop Desktop Search HTTP 400 Spam, Deterministic Viewport, & PunchCard Session Cache) verified')
