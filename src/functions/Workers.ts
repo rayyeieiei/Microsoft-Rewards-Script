@@ -26,9 +26,9 @@ export class Workers {
     public bot: MicrosoftRewardsBot
     public completedOffersInSession: Set<string> = new Set<string>()
     public verifiedOffersInSession: Set<string> = new Set<string>()
-    private static brokenPunchCardStepIds = new Set<string>()
+    private static sessionUnverifiedPunchCardSteps = new Set<string>()
 
-    public static recordBrokenPunchCardStep(idOrTitle: string): void {
+    public static recordUnverifiedPunchCardStep(idOrTitle: string): void {
         if (!idOrTitle) return
         const trimmed = idOrTitle.trim()
         if (!trimmed) return
@@ -36,11 +36,11 @@ export class Workers {
         if (/^step\s*\d+$/i.test(lower) || lower === 'daily step' || lower === 'step') {
             return
         }
-        Workers.brokenPunchCardStepIds.add(trimmed)
-        Workers.brokenPunchCardStepIds.add(lower)
+        Workers.sessionUnverifiedPunchCardSteps.add(trimmed)
+        Workers.sessionUnverifiedPunchCardSteps.add(lower)
     }
 
-    public static isPunchCardStepBroken(idOrTitle: string): boolean {
+    public static isPunchCardStepUnverified(idOrTitle: string): boolean {
         if (!idOrTitle) return false
         const trimmed = idOrTitle.trim()
         const lower = trimmed.toLowerCase()
@@ -48,17 +48,25 @@ export class Workers {
             return false
         }
         return (
-            Workers.brokenPunchCardStepIds.has(trimmed) ||
-            Workers.brokenPunchCardStepIds.has(lower)
+            Workers.sessionUnverifiedPunchCardSteps.has(trimmed) ||
+            Workers.sessionUnverifiedPunchCardSteps.has(lower)
         )
     }
 
+    public static recordBrokenPunchCardStep(idOrTitle: string): void {
+        Workers.recordUnverifiedPunchCardStep(idOrTitle)
+    }
+
+    public static isPunchCardStepBroken(idOrTitle: string): boolean {
+        return Workers.isPunchCardStepUnverified(idOrTitle)
+    }
+
     public static getBrokenPunchCardStepsCount(): number {
-        return Workers.brokenPunchCardStepIds.size
+        return Workers.sessionUnverifiedPunchCardSteps.size
     }
 
     public static clearBrokenPunchCardSteps(): void {
-        Workers.brokenPunchCardStepIds.clear()
+        Workers.sessionUnverifiedPunchCardSteps.clear()
     }
 
     constructor(bot: MicrosoftRewardsBot) {
@@ -1356,15 +1364,15 @@ export class Workers {
 
                         const stepTitle = activeChild.title || activeChild.name || `Step ${stepsProcessed + 1}`
 
-                        // Session Blacklist Check: Lewati langkah yang sudah terbukti gagal di akun sebelumnya dalam sesi ini
+                        // Session-Level Broken Punch Card Cache: Lewati langkah yang sudah terbukti gagal di akun sebelumnya dalam sesi ini
                         if (
-                            (targetChildOfferId && Workers.isPunchCardStepBroken(targetChildOfferId)) ||
-                            (stepTitle && Workers.isPunchCardStepBroken(stepTitle))
+                            (targetChildOfferId && Workers.isPunchCardStepUnverified(targetChildOfferId)) ||
+                            (stepTitle && Workers.isPunchCardStepUnverified(stepTitle))
                         ) {
-                            this.bot.logger.warn(
+                            this.bot.logger.info(
                                 this.bot.isMobile,
-                                'PUNCHCARD-SESSION-SKIP',
-                                `⚠️ [SESSION-BLACKLIST] Melewati langkah "${stepTitle}" (${targetChildOfferId}) yang telah terbukti gagal di akun sebelumnya dalam sesi ini.`
+                                'PUNCHCARD-CACHE',
+                                `[PUNCHCARD-CACHE] Melewati langkah "${stepTitle}" (tercatat gagal verifikasi pada sesi ini)`
                             )
                             if (targetChildOfferId) this.completedOffersInSession.add(targetChildOfferId)
                             this.bot.accountScope?.recordAttempt(offerId, targetChildOfferId, 'execution-unavailable')
