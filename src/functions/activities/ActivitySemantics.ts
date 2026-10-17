@@ -1,6 +1,6 @@
 export type ActivityCompletionStatus = 'verified-complete' | 'processed-unverified' | 'pending' | 'skipped' | 'failed'
 
-export type CompletionEvidence = 'server-offer-state' | 'server-dashboard-state' | 'none'
+export type CompletionEvidence = 'server-offer-state' | 'server-dashboard-state' | 'dom-checkmark' | 'none'
 
 export interface ActivityExecutionResult {
     offerId: string
@@ -270,7 +270,7 @@ export interface DataSaverBudgetResult {
 
 export function evaluateDataSaverBudget(
     consumedBytes: number,
-    budgetBytes: number = 20 * 1024 * 1024
+    budgetBytes: number = 40 * 1024 * 1024
 ): DataSaverBudgetResult {
     const consumedMb = consumedBytes / (1024 * 1024)
     const budgetMb = budgetBytes / (1024 * 1024)

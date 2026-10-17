@@ -10,9 +10,9 @@ export class MobileAccessLogin {
     private clientId = '0000000040170455'
     private authUrl = 'https://login.live.com/oauth20_authorize.srf'
     private redirectUrl = 'https://login.live.com/oauth20_desktop.srf'
-    private tokenUrl = 'https://login.microsoftonline.com/consumers/oauth2/v2.0/token'
+    private tokenUrl = 'https://login.live.com/oauth20_token.srf'
     private scope = 'service::prod.rewardsplatform.microsoft.com::MBI_SSL'
-    private maxTimeout = 180_000 // 3min
+    private maxTimeout = 35_000 // 35s
 
     // Selectors for handling Passkey prompt during OAuth
     private readonly selectors = {
@@ -20,6 +20,23 @@ export class MobileAccessLogin {
         passKeyError: '[data-testid="registrationImg"]',
         passKeyVideo: '[data-testid="biometricVideo"]'
     } as const
+
+    private readonly passkeyDismissSelectors = [
+        'button:has-text("Cancel")',
+        'button:has-text("Not now")',
+        'button:has-text("Skip")',
+        'button:has-text("Batal")',
+        'button:has-text("Lain kali")',
+        'a:has-text("Cancel")',
+        'a:has-text("Skip for now")',
+        'a:has-text("Not now")',
+        'a:has-text("Batal")',
+        'a:has-text("Lain kali")',
+        '#idBtn_Back',
+        '#iCancel',
+        '[data-testid="cancel-button"]',
+        'button[data-testid="secondaryButton"]'
+    ]
 
     constructor(
         private bot: MicrosoftRewardsBot,
@@ -33,19 +50,74 @@ export class MobileAccessLogin {
             .catch(() => false)
     }
 
-    private async handlePasskeyPrompt(targetPage: Page): Promise<void> {
+    private async handlePasskeyPrompt(targetPage: Page): Promise<boolean> {
         try {
-            // Handle Passkey prompt - click secondary button to skip
+            if (targetPage.isClosed()) return false
+
+            const currentUrl = targetPage.url().toLowerCase()
+            const isInterruptUrl = /fido|passkey|interrupt|create/i.test(currentUrl)
+
             const hasPasskeyError = await this.checkSelector(targetPage, this.selectors.passKeyError)
             const hasPasskeyVideo = await this.checkSelector(targetPage, this.selectors.passKeyVideo)
-            if (hasPasskeyError || hasPasskeyVideo) {
-                this.bot.logger.info(this.bot.isMobile, 'LOGIN-APP', 'Found Passkey prompt on OAuth page, skipping')
-                await this.bot.browser.utils.ghostClick(targetPage, this.selectors.secondaryButton)
-                await targetPage.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {})
+
+            if (isInterruptUrl || hasPasskeyError || hasPasskeyVideo) {
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'LOGIN-APP',
+                    `Passkey/FIDO interrupt detected on OAuth page (url: ${targetPage.url()}), attempting auto-dismiss...`
+                )
+
+                // Try each dismiss selector actively
+                for (const selector of this.passkeyDismissSelectors) {
+                    try {
+                        const loc = targetPage.locator(selector).first()
+                        if (await loc.isVisible().catch(() => false)) {
+                            this.bot.logger.info(
+                                this.bot.isMobile,
+                                'LOGIN-APP',
+                                `Clicking Passkey/FIDO dismiss element: ${selector}`
+                            )
+                            await loc.click({ timeout: 2000, force: true }).catch(async () => {
+                                await this.bot.browser.utils.ghostClick(targetPage, selector)
+                            })
+                            // Berikan toleransi jeda 1 detik setelah klik agar Microsoft segera me-redirect
+                            await this.bot.utils.wait(1000)
+                            await targetPage.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {})
+                            return true
+                        }
+                    } catch {
+                        // Continue to next selector
+                    }
+                }
+
+                // If on interrupt URL and element was not immediately visible, wait briefly for combined selector
+                if (isInterruptUrl) {
+                    const combinedSelector = this.passkeyDismissSelectors.join(', ')
+                    const found = await targetPage.waitForSelector(combinedSelector, { state: 'visible', timeout: 2500 }).catch(() => null)
+                    if (found) {
+                        this.bot.logger.info(
+                            this.bot.isMobile,
+                            'LOGIN-APP',
+                            'Dismissing Passkey/FIDO interrupt via combined selector match'
+                        )
+                        await found.click({ timeout: 2000, force: true }).catch(async () => {
+                            await this.bot.browser.utils.ghostClick(targetPage, combinedSelector)
+                        })
+                        // Berikan toleransi jeda 1 detik setelah klik
+                        await this.bot.utils.wait(1000)
+                        await targetPage.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {})
+                        return true
+                    }
+                }
             }
-        } catch {
-            // Ignore errors in prompt handling
+        } catch (err) {
+            this.bot.logger.debug(
+                this.bot.isMobile,
+                'LOGIN-APP',
+                `Error handling passkey prompt: ${err instanceof Error ? err.message : String(err)}`
+            )
         }
+        return false
     }
 
     async get(email: string): Promise<string> {
@@ -89,11 +161,13 @@ export class MobileAccessLogin {
 
             this.bot.logger.info(this.bot.isMobile, 'LOGIN-APP', 'Waiting for mobile OAuth code...')
 
-            const start = Date.now()
+            const totalStart = Date.now()
+            let pollStart = Date.now()
             let code = ''
             let lastUrl = ''
+            let hasReloaded = false
 
-            while (Date.now() - start < this.maxTimeout) {
+            while (true) {
                 if (oauthPage.isClosed()) {
                     this.bot.logger.warn(this.bot.isMobile, 'LOGIN-APP', 'OAuth page was closed prematurely')
                     break
@@ -129,13 +203,46 @@ export class MobileAccessLogin {
                         lastUrl = currentUrl
                     }
 
-                    // Handle Passkey prompt if it appears
+                    // Auto-dismiss Passkey / FIDO / WebAuthn interrupt if detected
                     await this.handlePasskeyPrompt(oauthPage)
+
+                    // Re-check URL immediately if handlePasskeyPrompt triggered a redirect
+                    if (!oauthPage.isClosed()) {
+                        const postCheckUrl = new URL(oauthPage.url())
+                        if (postCheckUrl.hostname === 'login.live.com' && postCheckUrl.pathname === '/oauth20_desktop.srf') {
+                            code = postCheckUrl.searchParams.get('code') || ''
+                            if (code) {
+                                break
+                            }
+                        }
+                    }
                 } catch (err) {
                     if (currentUrl !== lastUrl) {
                         this.bot.logger.debug(this.bot.isMobile, 'LOGIN-APP', 'Invalid URL while polling')
                         lastUrl = currentUrl
                     }
+                }
+
+                // If code not received within maxTimeout (35s), attempt 1x reload before declaring failure
+                if (Date.now() - pollStart >= this.maxTimeout) {
+                    if (!hasReloaded && !oauthPage.isClosed()) {
+                        this.bot.logger.info(
+                            this.bot.isMobile,
+                            'LOGIN-APP',
+                            'OAuth code not received within 35s, attempting 1x page reload before declaring failure...'
+                        )
+                        hasReloaded = true
+                        pollStart = Date.now()
+                        await oauthPage.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(err => {
+                            this.bot.logger.debug(
+                                this.bot.isMobile,
+                                'LOGIN-APP',
+                                `OAuth page reload failed: ${err instanceof Error ? err.message : String(err)}`
+                            )
+                        })
+                        continue
+                    }
+                    break
                 }
 
                 await this.bot.utils.wait(1000)
@@ -145,7 +252,7 @@ export class MobileAccessLogin {
                 this.bot.logger.warn(
                     this.bot.isMobile,
                     'LOGIN-APP',
-                    `Timed out waiting for OAuth code after ${Math.round((Date.now() - start) / 1000)}s`
+                    `Timed out waiting for OAuth code after ${Math.round((Date.now() - totalStart) / 1000)}s`
                 )
 
                 try {
@@ -170,17 +277,51 @@ export class MobileAccessLogin {
 
             this.bot.logger.debug(this.bot.isMobile, 'LOGIN-APP', 'Exchanging OAuth code for access token')
 
-            const response = await this.bot.axios.request({
-                url: this.tokenUrl,
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'User-Agent': UserAgentManager.DEFAULT_MOBILE_UA,
-                    'Origin': 'https://login.live.com',
-                    'Referer': 'https://login.live.com/'
-                },
-                data: data.toString()
-            })
+            let response: any = null
+            let exchangeError: any = null
+            for (let attempt = 1; attempt <= 2; attempt++) {
+                try {
+                    response = await this.bot.axios.request({
+                        url: this.tokenUrl,
+                        method: 'POST',
+                        timeout: 12000,
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded',
+                            'User-Agent': UserAgentManager.DEFAULT_MOBILE_UA,
+                            'Origin': 'https://login.live.com',
+                            'Referer': 'https://login.live.com/',
+                            'Authorization': undefined
+                        },
+                        data: data.toString(),
+                        'axios-retry': {
+                            retries: 0
+                        }
+                    })
+                    break
+                } catch (err: any) {
+                    exchangeError = err
+                    if (err?.response?.status === 400) {
+                        this.bot.logger.warn(
+                            this.bot.isMobile,
+                            'LOGIN-APP',
+                            `OAuth token exchange returned HTTP 400 (single-use authorization code expired or invalid). Disabling retry with this authorization code.`
+                        )
+                        return ''
+                    }
+                    if (attempt < 2) {
+                        this.bot.logger.warn(
+                            this.bot.isMobile,
+                            'LOGIN-APP',
+                            `OAuth token exchange attempt 1 timed out or failed (${err?.message || err}). Retrying 1x...`
+                        )
+                        await this.bot.utils.wait(1000)
+                    }
+                }
+            }
+
+            if (!response && exchangeError) {
+                throw exchangeError
+            }
 
             const token = (response?.data?.access_token as string) ?? ''
 
@@ -196,7 +337,15 @@ export class MobileAccessLogin {
 
             this.bot.logger.info(this.bot.isMobile, 'LOGIN-APP', 'Mobile access token received')
             return token
-        } catch (error) {
+        } catch (error: any) {
+            if (error?.response?.status === 400) {
+                this.bot.logger.warn(
+                    this.bot.isMobile,
+                    'LOGIN-APP',
+                    `OAuth token exchange returned HTTP 400 (single-use authorization code expired or invalid). Disabling retry with this authorization code.`
+                )
+                return ''
+            }
             this.bot.logger.error(
                 this.bot.isMobile,
                 'LOGIN-APP',

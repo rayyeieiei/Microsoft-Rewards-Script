@@ -77,8 +77,12 @@ export class Logger {
         const rawFormatted = formatMessage(message)
         const formatted = sanitizeLogMessage(rawFormatted)
 
-        const rawUserName = this.bot.userData.userName ? this.bot.userData.userName : 'MAIN'
-        const userName = redactAccountKey(rawUserName)
+        const activeEmail = this.bot.activeAccount?.email
+        const username =
+            this.bot.userData?.userName ||
+            (activeEmail ? (this.bot.utils ? this.bot.utils.getEmailUsername(activeEmail) : activeEmail.split('@')[0]) : '') ||
+            'MAIN'
+        const userName = redactAccountKey(username)
 
         const levelTag = level.toUpperCase()
         const cleanMsg = sanitizeLogMessage(
@@ -97,7 +101,11 @@ export class Logger {
         }
 
         const badge = platformBadge(isMobile)
-        const consoleStr = sanitizeLogMessage(`[${now}] [${userName}] [${levelTag}] ${badge} [${title}] ${formatted}`)
+        const consoleFormatted = sanitizeLogMessage(rawFormatted, { redactEmail: false })
+        const consoleStr = sanitizeLogMessage(
+            `[${now}] [${username}] [${levelTag}] ${badge} [${title}] ${consoleFormatted}`,
+            { redactEmail: false }
+        )
 
         let logColor: ColorKey | undefined = color
 

@@ -11,11 +11,11 @@ export interface AppOnlyConfig {
     cacheTtlHours: number
 }
 
-export type PunchCardExecutionMode = 'observer' | 'manual-handoff' | 'browser-ui-experimental'
+export type PunchCardExecutionMode = 'observer' | 'manual-handoff' | 'browser-ui-experimental' | 'auto'
 
 export interface PunchCardExecutionConfig {
     mode: PunchCardExecutionMode
-    maxChildrenPerRun: number
+    maxChildrenPerRun?: number
 }
 
 export type NewAccountOnboardingMode = 'disabled' | 'observe-only' | 'observe-and-handoff'
@@ -36,16 +36,22 @@ export interface Config {
     baseURL: string
     sessionPath: string
     headless: boolean
+    browserChannel?: string
+    channel?: string
+    browserPath?: string
     useDynamicWifiProxy?: boolean
     useLocalDashboard?: boolean
     useAdbIpRotation?: boolean
     useGhostCursor?: boolean
+    executionMode?: 'sequential' | 'dual' | 'staggered'
+    staggeredOffsetSeconds?: number
     usePostgres?: boolean
     postgresConfig?: PostgresConfig
     clusters: number
     errorDiagnostics: boolean
     workers: ConfigWorkers
     appOnlyRewards?: AppOnlyConfig
+    punchCard?: { mode: PunchCardExecutionMode; maxChildrenPerRun?: number }
     punchCardExecution?: PunchCardExecutionConfig
     newAccountOnboarding?: NewAccountOnboardingConfig
     identityPolicy?: IdentityPolicyConfig

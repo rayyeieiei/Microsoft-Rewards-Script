@@ -3,9 +3,14 @@
  * Completely independent of AppOnly or Logger modules to prevent circular dependencies.
  */
 
+export interface SanitizeLogOptions {
+    redactEmail?: boolean
+}
+
 export function redactAccountKey(identifier: string): string {
     if (!identifier) return 'anon'
     const clean = identifier.trim()
+    if (clean.toUpperCase() === 'MAIN') return 'MAIN'
     const atIndex = clean.indexOf('@')
     if (atIndex <= 0) {
         if (clean.length <= 4) return 'acc***'
@@ -17,7 +22,7 @@ export function redactAccountKey(identifier: string): string {
     return `${user.slice(0, visibleLen)}***@${domain}`
 }
 
-export function sanitizeLogMessage(input: string): string {
+export function sanitizeLogMessage(input: string, options?: SanitizeLogOptions): string {
     if (!input || typeof input !== 'string') return input
 
     let sanitized = input
@@ -39,14 +44,16 @@ export function sanitizeLogMessage(input: string): string {
     sanitized = sanitized.replace(/(Authorization:\s*Bearer\s+)[^\s"'`]+/gi, '$1[REDACTED]')
     sanitized = sanitized.replace(/\b(Bearer\s+)[A-Za-z0-9\-_=.]{10,}\b/gi, '$1[REDACTED]')
 
-    // 4. Redact full email addresses:
+    // 4. Redact full email addresses (if enabled, default: true):
     // e.g. ehsanfizibers@outlook.com -> ehs***@outlook.com
-    sanitized = sanitized.replace(/\b([A-Za-z0-9._%+-]+)@([A-Za-z0-9.-]+\.[A-Za-z]{2,})\b/g, (match, user, domain) => {
-        // If already redacted, preserve
-        if (user.endsWith('***')) return match
-        const visibleLen = Math.min(3, Math.max(1, user.length - 2))
-        return `${user.slice(0, visibleLen)}***@${domain}`
-    })
+    if (options?.redactEmail !== false) {
+        sanitized = sanitized.replace(/\b([A-Za-z0-9._%+-]+)@([A-Za-z0-9.-]+\.[A-Za-z]{2,})\b/g, (match, user, domain) => {
+            // If already redacted, preserve
+            if (user.endsWith('***')) return match
+            const visibleLen = Math.min(3, Math.max(1, user.length - 2))
+            return `${user.slice(0, visibleLen)}***@${domain}`
+        })
+    }
 
     return sanitized
 }

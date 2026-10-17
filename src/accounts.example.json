@@ -1,9 +1,9 @@
 [
     {
-        "email": "email_1",
-        "password": "password_1",
+        "email": "miliani9714121991@outlook.com",
+        "password": "ilhruocjw1",
         "totpSecret": "",
-        "recoveryEmail": "",
+        "recoveryEmail": "miliani9714121991@fviainboxes.com",
         "geoLocale": "auto",
         "langCode": "en",
         "proxy": {
@@ -19,10 +19,48 @@
         }
     },
     {
-        "email": "email_2",
-        "password": "password_2",
+        "email": "fynleyhershell799@outlook.com",
+        "password": "humontatw2",
         "totpSecret": "",
-        "recoveryEmail": "",
+        "recoveryEmail": "fynleyhershell799@fviainboxes.com",
+        "geoLocale": "auto",
+        "langCode": "en",
+        "proxy": {
+            "proxyAxios": false,
+            "url": "",
+            "port": 0,
+            "username": "",
+            "password": ""
+        },
+        "saveFingerprint": {
+            "mobile": false,
+            "desktop": false
+        }
+    },
+        {
+        "email": "braedonalysia3581@outlook.com",
+        "password": "uvivuqruq0",
+        "totpSecret": "",
+        "recoveryEmail": "braedonalysia3581@fviainboxes.com",
+        "geoLocale": "auto",
+        "langCode": "en",
+        "proxy": {
+            "proxyAxios": false,
+            "url": "",
+            "port": 0,
+            "username": "",
+            "password": ""
+        },
+        "saveFingerprint": {
+            "mobile": false,
+            "desktop": false
+        }
+    },
+    {
+        "email": "jaquitaairica23062001@outlook.com",
+        "password": "ipoasjyom6",
+        "totpSecret": "",
+        "recoveryEmail": "jaquitaairica23062001@fviainboxes.com",
         "geoLocale": "auto",
         "langCode": "en",
         "proxy": {

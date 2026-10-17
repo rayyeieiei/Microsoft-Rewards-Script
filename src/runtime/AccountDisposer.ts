@@ -64,7 +64,8 @@ export class AccountDisposer {
         // 4. Persist storageState bounded/atomic if contexts are open and valid
         try {
             const mobileCtx = scope.getContext('mobile')
-            if (mobileCtx) {
+            const isMobileClosed = !mobileCtx || (typeof mobileCtx.isClosed === 'function' ? mobileCtx.isClosed() : (mobileCtx as any).__isClosed === true)
+            if (mobileCtx && !isMobileClosed) {
                 await AccountSessionStore.saveContextSession(
                     mobileCtx,
                     scope,
@@ -73,7 +74,8 @@ export class AccountDisposer {
                 )
             }
             const desktopCtx = scope.getContext('desktop')
-            if (desktopCtx) {
+            const isDesktopClosed = !desktopCtx || (typeof desktopCtx.isClosed === 'function' ? desktopCtx.isClosed() : (desktopCtx as any).__isClosed === true)
+            if (desktopCtx && !isDesktopClosed) {
                 await AccountSessionStore.saveContextSession(
                     desktopCtx,
                     scope,
@@ -107,7 +109,10 @@ export class AccountDisposer {
         let timeoutOccurred = false
 
         for (const ctx of contextsToClose) {
+            const isClosed = typeof ctx.isClosed === 'function' ? ctx.isClosed() : (ctx as any).__isClosed === true
+            if (isClosed) continue
             try {
+                (ctx as any).__isClosed = true
                 await Promise.race([
                     ctx.close(),
                     new Promise((_, reject) =>
@@ -165,6 +170,11 @@ export class AccountDisposer {
 
         // Clear attempt records
         scope.clearAttemptRecords()
+
+        // 8b. Reset pending attribution ledger to guarantee zero cross-account balance leakage
+        if (scope.bot?.workers) {
+            scope.bot.workers.pendingAttributionQueue = []
+        }
 
         // 9. Mark disposed
         scope.markDisposed()

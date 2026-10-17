@@ -8,17 +8,26 @@ dist/
 /browser/
 src/browser/sessions/
 src/sessions/
+sessions/
+sessions*/
+safe_sessions/
+test_sessions/
+*.zip
 
 # Sensitive credentials & personal configs (CRITICAL ANTI-LEAK)
 accounts.json
 account.json
 account.dev.json
 accounts.dev.json
+accounts.example.json
+accounts.dev.example.json
 config.json
+config.dev.json
 src/account.json
 src/accounts.json
 src/accounts.dev.json
 src/config.json
+src/config.dev.json
 
 # Logs & temp files
 *.log

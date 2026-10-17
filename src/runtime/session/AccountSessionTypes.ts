@@ -129,7 +129,13 @@ export function isValidStorageState(obj: any): obj is PlaywrightStorageState {
         if (!Array.isArray(obj.origins)) return false
         for (const o of obj.origins) {
             if (!o || typeof o !== 'object') return false
-            if (typeof o.origin !== 'string') return false
+            if (typeof o.origin !== 'string' || !o.origin.trim()) return false
+            try {
+                const u = new URL(o.origin)
+                if (u.protocol !== 'http:' && u.protocol !== 'https:') return false
+            } catch {
+                return false
+            }
             if (!Array.isArray(o.localStorage)) return false
         }
     }

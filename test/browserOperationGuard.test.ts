@@ -668,4 +668,58 @@ export async function runBrowserOperationGuardTests() {
         assert.deepStrictEqual(closeOptions, { runBeforeUnload: false })
         console.log('✅ Test 25 Passed: recoverOwnerPage bounds window.stop() and enforces runBeforeUnload: false')
     }
+
+    // Test 26: OAuth Mobile Passkey / FIDO Prompt auto-dismiss and timeout optimization
+    {
+        const mobileAuthContent = fs.readFileSync(
+            path.join(__dirname, '../src/browser/auth/methods/MobileAccessLogin.ts'),
+            'utf-8'
+        )
+
+        // Verify timeout is 35s
+        assert.ok(mobileAuthContent.includes('maxTimeout = 35_000'), 'maxTimeout must be 35s (35_000ms)')
+
+        // Verify interrupt keywords monitoring
+        assert.ok(
+            mobileAuthContent.includes('/fido|passkey|interrupt|create/i'),
+            'Must monitor fido, passkey, interrupt, create keywords in URL'
+        )
+
+        // Verify dismiss selectors
+        const requiredSelectors = [
+            'button:has-text("Cancel")',
+            'button:has-text("Not now")',
+            'button:has-text("Skip")',
+            'button:has-text("Batal")',
+            'button:has-text("Lain kali")',
+            'a:has-text("Cancel")',
+            'a:has-text("Skip for now")',
+            'a:has-text("Not now")',
+            '#idBtn_Back',
+            '#iCancel',
+            '[data-testid="cancel-button"]'
+        ]
+
+        for (const selector of requiredSelectors) {
+            assert.ok(
+                mobileAuthContent.includes(selector),
+                `MobileAccessLogin must include selector: ${selector}`
+            )
+        }
+
+        // Verify 1x reload on timeout before failure
+        assert.ok(
+            mobileAuthContent.includes('oauthPage.reload'),
+            'MobileAccessLogin must attempt 1x reload on timeout before declaring failure'
+        )
+
+        // Verify 1s tolerance delay after click
+        assert.ok(
+            mobileAuthContent.includes('wait(1000)'),
+            'MobileAccessLogin must provide 1s delay after clicking dismiss button'
+        )
+
+        console.log('✅ Test 26 Passed: OAuth Mobile Passkey / FIDO auto-dismiss and 35s timeout verified')
+    }
 }
+

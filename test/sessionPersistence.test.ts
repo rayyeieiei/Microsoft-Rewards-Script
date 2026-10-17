@@ -30,9 +30,13 @@ export async function runSessionPersistenceTests(): Promise<void> {
     console.log('--- Running Unified Session Persistence Test Suite (Commit 2) ---')
 
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mr-session-test-'))
-    const prodSessionsDir = path.resolve(process.cwd(), 'browser', 'sessions')
+    const prodSessionsDir = path.resolve(process.cwd(), 'sessions')
+    const legacyProdSessionsDir = path.resolve(process.cwd(), 'browser', 'sessions')
     const initialProdFiles = fs.existsSync(prodSessionsDir)
         ? fs.readdirSync(prodSessionsDir)
+        : []
+    const initialLegacyProdFiles = fs.existsSync(legacyProdSessionsDir)
+        ? fs.readdirSync(legacyProdSessionsDir)
         : []
 
     try {
@@ -912,15 +916,29 @@ export async function runSessionPersistenceTests(): Promise<void> {
 
             const lockfilePath = path.join(testDir, 'contention_target.lock')
 
-            // Subprocess runner script: attempts acquireCrossProcessLock, holds for 400ms if acquired, then releases
+            // Subprocess runner script: attempts acquireCrossProcessLock, holds for 600ms if acquired, then releases
             const childScript = `
+                const fs = require('fs');
+                const path = require('path');
                 const { AccountSessionStore } = require('./src/runtime/session/AccountSessionStore');
                 (async () => {
                     const lockfilePath = process.argv.slice(1).find(a => a && a.endsWith('.lock')) || process.argv[1];
+                    const testDir = path.dirname(lockfilePath);
+                    const readyFile = path.join(testDir, 'ready_' + process.pid);
+                    fs.writeFileSync(readyFile, '1');
+
+                    // Synchronize children so both attempt acquisition simultaneously
+                    const startWait = Date.now();
+                    while (Date.now() - startWait < 5000) {
+                        const readyFiles = fs.readdirSync(testDir).filter(f => f.startsWith('ready_'));
+                        if (readyFiles.length >= 2) break;
+                        await new Promise(r => setTimeout(r, 20));
+                    }
+
                     const acq = await AccountSessionStore.acquireCrossProcessLock(lockfilePath, 'acc23', 'mobile', 300);
                     if (acq.acquired) {
                         process.stdout.write(JSON.stringify({ pid: process.pid, acquired: true, token: acq.ownerToken }));
-                        await new Promise(r => setTimeout(r, 400));
+                        await new Promise(r => setTimeout(r, 600));
                         await AccountSessionStore.releaseCrossProcessLock(lockfilePath, acq.ownerToken);
                     } else {
                         process.stdout.write(JSON.stringify({ pid: process.pid, acquired: false, reason: acq.reason }));
@@ -1069,10 +1087,18 @@ export async function runSessionPersistenceTests(): Promise<void> {
             const finalProdFiles = fs.existsSync(prodSessionsDir)
                 ? fs.readdirSync(prodSessionsDir)
                 : []
+            const finalLegacyProdFiles = fs.existsSync(legacyProdSessionsDir)
+                ? fs.readdirSync(legacyProdSessionsDir)
+                : []
             assert.deepStrictEqual(
                 initialProdFiles,
                 finalProdFiles,
                 'Production sessions directory must have 0 modifications from test suite'
+            )
+            assert.deepStrictEqual(
+                initialLegacyProdFiles,
+                finalLegacyProdFiles,
+                'Legacy browser/sessions directory must have 0 modifications from test suite'
             )
 
             console.log('✅ Test 26 Passed: Entire test suite operated exclusively in isolated synthetic storage')

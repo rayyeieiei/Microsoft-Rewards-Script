@@ -101,6 +101,14 @@ export class Quiz extends Workers {
                         )
 
                         const newBalance = await this.bot.browser.func.getCurrentPoints()
+                        if (oldBalance > 0 && newBalance < oldBalance * 0.7) {
+                            this.bot.logger.warn(
+                                this.bot.isMobile,
+                                'QUIZ-SANITY',
+                                `[SANITY-CLAMP] Abnormal balance drop detected in Quiz: ${oldBalance} -> ${newBalance}. Clamping to old balance.`
+                            )
+                            break
+                        }
                         gainedPoints = newBalance - oldBalance
 
                         this.bot.logger.debug(

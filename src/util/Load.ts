@@ -9,6 +9,22 @@ import { SessionPathResolver } from '../runtime/session/SessionPathResolver'
 
 
 let configCache: Config
+let activeConfigFile = ''
+
+export function resolveConfigFileName(): string {
+    let file = 'config.json'
+    if (process.argv.includes('-dev')) {
+        const devConfigFile = path.join(process.cwd(), 'config.dev.json')
+        if (fs.existsSync(devConfigFile)) {
+            file = 'config.dev.json'
+        }
+    }
+    return file
+}
+
+export function getActiveConfigFile(): string {
+    return activeConfigFile || resolveConfigFileName()
+}
 const rateLimitCooldowns = new Map<string, number>() // Penyimpanan cooldown sementara
 
 export function setRateLimitCooldown(sessionPath: string, durationMs: number) {
@@ -43,8 +59,12 @@ export function loadAccounts(): Account[] {
 export function loadConfig(forceReload = false): Config {
     try {
         if (configCache && !forceReload) return configCache
+
+        const file = resolveConfigFileName()
+        activeConfigFile = file
+
         // 🔥 FIX: Selalu baca dari folder root project
-        const configDir = path.join(process.cwd(), 'config.json')
+        const configDir = path.join(process.cwd(), file)
         const configData = JSON.parse(fs.readFileSync(configDir, 'utf-8'))
         const validated = validateConfig(configData)
         configCache = validated

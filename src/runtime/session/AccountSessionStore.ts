@@ -15,8 +15,18 @@ import {
     LockAcquisitionResult
 } from './AccountSessionTypes'
 import { SessionPathResolver } from './SessionPathResolver'
+import { Database } from '../../util/Database'
+import { AccountSuspendedError } from '../../interface/Errors'
+
+export { AccountSuspendedError }
 
 export class AccountSessionStore {
+    private static readonly logger = {
+        warn: (email: string, category: string, msg: string) => {
+            console.warn(`[${category}] ${msg} (${email})`)
+        }
+    }
+
     /**
      * In-process per-target-path mutex queue.
      * Guarantees serialized writes for any individual session file in this process.
@@ -167,6 +177,16 @@ export class AccountSessionStore {
                         }
                     }
 
+                    parsed.storageState.origins = (parsed.storageState.origins || []).filter((o: any) => {
+                        try {
+                            if (!o || typeof o.origin !== 'string') return false
+                            const u = new URL(o.origin)
+                            return u.protocol === 'http:' || u.protocol === 'https:'
+                        } catch {
+                            return false
+                        }
+                    })
+
                     return {
                         status: 'loaded',
                         source: 'modern-envelope',
@@ -178,6 +198,16 @@ export class AccountSessionStore {
 
                 // Previous raw storageState writer without envelope
                 if (isValidStorageState(parsed)) {
+                    parsed.origins = (parsed.origins || []).filter((o: any) => {
+                        try {
+                            if (!o || typeof o.origin !== 'string') return false
+                            const u = new URL(o.origin)
+                            return u.protocol === 'http:' || u.protocol === 'https:'
+                        } catch {
+                            return false
+                        }
+                    })
+
                     return {
                         status: 'loaded',
                         source: 'previous-storage-state',
@@ -285,6 +315,13 @@ export class AccountSessionStore {
         let attempt = 0
         const ownerToken = crypto.randomUUID()
 
+        const lockDir = path.dirname(lockfilePath)
+        try {
+            if (!fs.existsSync(lockDir)) {
+                await fs.promises.mkdir(lockDir, { recursive: true })
+            }
+        } catch {}
+
         while (true) {
             try {
                 const handle = await fs.promises.open(lockfilePath, 'wx')
@@ -300,6 +337,12 @@ export class AccountSessionStore {
                 await handle.close()
                 return { acquired: true, ownerToken }
             } catch (err: any) {
+                if (err?.code === 'ENOENT') {
+                    try {
+                        await fs.promises.mkdir(path.dirname(lockfilePath), { recursive: true })
+                    } catch {}
+                    continue
+                }
                 if (err?.code !== 'EEXIST') {
                     return {
                         acquired: false,
@@ -468,7 +511,18 @@ export class AccountSessionStore {
         device: SessionDevice,
         timeoutMs: number = 3000
     ): Promise<SessionSaveResult> {
-        if (!context || typeof context.storageState !== 'function') {
+        const browserContext = context
+        const email = (scope?.identity as any)?.rawEmail || scope?.identity?.accountId || 'unknown'
+
+        if (!browserContext || (typeof (browserContext as any).isClosed === 'function' && (browserContext as any).isClosed())) {
+            this.logger.warn(email, 'SESSION', 'Browser context sudah tertutup. Melewati ekstraksi storageState.')
+            return {
+                status: 'skipped',
+                reason: 'Browser context is closed'
+            }
+        }
+
+        if (typeof context.storageState !== 'function') {
             return {
                 status: 'skipped',
                 reason: 'Context is null or does not support storageState'
@@ -487,8 +541,15 @@ export class AccountSessionStore {
                 const start = Date.now()
                 let rawState: PlaywrightStorageState
                 try {
+                    if (!browserContext || (typeof (browserContext as any).isClosed === 'function' && (browserContext as any).isClosed())) {
+                        this.logger.warn(email, 'SESSION', 'Browser context sudah tertutup. Melewati ekstraksi storageState.')
+                        return {
+                            status: 'skipped',
+                            reason: 'Browser context is closed'
+                        }
+                    }
                     rawState = await Promise.race([
-                        context.storageState(),
+                        browserContext.storageState(),
                         new Promise<never>((_, reject) =>
                             setTimeout(() => reject(new Error('storageState extraction timed out')), timeoutMs)
                         )
@@ -501,6 +562,12 @@ export class AccountSessionStore {
                             durationMs: Date.now() - start,
                             path: targetPath
                         }
+                    }
+                    if (
+                        err?.message?.includes('closed') ||
+                        (typeof (browserContext as any).isClosed === 'function' && (browserContext as any).isClosed())
+                    ) {
+                        this.logger.warn(email, 'SESSION', 'Browser context sudah tertutup. Melewati ekstraksi storageState.')
                     }
                     return {
                         status: 'failed',
@@ -713,7 +780,7 @@ export class AccountSessionStore {
      * 3. Only after marker is confirmed on disk, remove source from primary path.
      * If a crash or fault occurs at any point, marker prevents silent legacy fallback.
      */
-    private static async quarantineCorruptFile(
+    public static async quarantineCorruptFile(
         sessionDir: string,
         accountId: string,
         device: SessionDevice,
@@ -773,5 +840,149 @@ export class AccountSessionStore {
         } catch (quarantineErr) {
             // If quarantine recording fails, preserve source in place so corruption is re-detected
         }
+    }
+
+    /**
+     * In-memory cache of suspended account IDs/emails for fast skip.
+     */
+    private static readonly suspendedAccounts = new Set<string>()
+
+    /**
+     * Clears in-memory suspended accounts cache (useful for testing).
+     */
+    public static clearSuspendedAccountsCache(): void {
+        this.suspendedAccounts.clear()
+    }
+
+    /**
+     * Checks if an account is already recorded as suspended/banned.
+     */
+    public static isAccountSuspended(sessionDir: string, accountId: string): boolean {
+        if (!accountId) return false
+        const normalized = accountId.toLowerCase()
+        if (this.suspendedAccounts.has(normalized)) return true
+
+        const resolvedSessionDir = SessionPathResolver.resolveBaseDir(sessionDir)
+        const quarantineDir = SessionPathResolver.getQuarantineDir(resolvedSessionDir)
+        const storageKey = SessionPathResolver.getStorageKey(accountId)
+        const specificMarker = path.join(quarantineDir, `${storageKey}.banned-marker.json`)
+        const genericMarker = path.join(quarantineDir, 'banned-marker.json')
+
+        if (fs.existsSync(specificMarker)) {
+            this.suspendedAccounts.add(normalized)
+            return true
+        }
+
+        if (fs.existsSync(genericMarker)) {
+            try {
+                const raw = fs.readFileSync(genericMarker, 'utf-8')
+                const parsed = JSON.parse(raw)
+                if (Array.isArray(parsed)) {
+                    if (parsed.some((p: any) => p.email?.toLowerCase() === normalized || p.accountId === accountId)) {
+                        this.suspendedAccounts.add(normalized)
+                        return true
+                    }
+                } else if (parsed?.email?.toLowerCase() === normalized || parsed?.accountId === accountId) {
+                    this.suspendedAccounts.add(normalized)
+                    return true
+                }
+            } catch {}
+        }
+
+        return false
+    }
+
+    /**
+     * Quarantines all session files for a suspended/banned account.
+     * Moves .mobile.storageState.json, .desktop.storageState.json, and .deviceProfile.json
+     * from sessions/ to sessions/quarantine/, creates banned-marker.json, and registers status.
+     */
+    public static async quarantineSuspendedAccount(
+        sessionDir: string,
+        accountId: string,
+        reason: string = 'Account suspended/banned by Microsoft'
+    ): Promise<{ movedFiles: string[]; markerPath: string }> {
+        const resolvedSessionDir = SessionPathResolver.resolveBaseDir(sessionDir)
+        const quarantineDir = SessionPathResolver.getQuarantineDir(resolvedSessionDir)
+        if (!fs.existsSync(quarantineDir)) {
+            await fs.promises.mkdir(quarantineDir, { recursive: true })
+        }
+
+        const storageKey = SessionPathResolver.getStorageKey(accountId)
+        const movedFiles: string[] = []
+
+        // Candidate basenames to move
+        const candidateBaseNames = [
+            `${storageKey}.mobile.storageState.json`,
+            `${storageKey}.desktop.storageState.json`,
+            `${storageKey}.deviceProfile.json`,
+            `${accountId}.mobile.storageState.json`,
+            `${accountId}.desktop.storageState.json`,
+            `${accountId}.deviceProfile.json`
+        ]
+
+        const uniqueBaseNames = Array.from(new Set(candidateBaseNames))
+
+        for (const fileName of uniqueBaseNames) {
+            const srcPath = path.join(resolvedSessionDir, fileName)
+            const destPath = path.join(quarantineDir, fileName)
+
+            if (fs.existsSync(srcPath)) {
+                try {
+                    await fs.promises.rename(srcPath, destPath).catch(async () => {
+                        await fs.promises.copyFile(srcPath, destPath)
+                        await fs.promises.unlink(srcPath)
+                    })
+                    movedFiles.push(destPath)
+                } catch (err) {
+                    console.error(`[QUARANTINE-ERROR] Failed to move session file ${fileName}:`, err)
+                }
+            }
+        }
+
+        // Marker record
+        const markerData = {
+            accountId,
+            email: accountId,
+            status: 'SUSPENDED',
+            date: new Date().toISOString(),
+            timestamp: Date.now(),
+            reason,
+            quarantinedFiles: movedFiles
+        }
+
+        // 1. Write per-account banned marker: ${storageKey}.banned-marker.json
+        const specificMarkerPath = path.join(quarantineDir, `${storageKey}.banned-marker.json`)
+        await fs.promises.writeFile(specificMarkerPath, JSON.stringify(markerData, null, 2), 'utf-8')
+
+        // 2. Also update or write the global banned-marker.json in quarantineDir
+        const globalMarkerPath = path.join(quarantineDir, 'banned-marker.json')
+        let globalMarkers: any[] = []
+        try {
+            if (fs.existsSync(globalMarkerPath)) {
+                const existingContent = await fs.promises.readFile(globalMarkerPath, 'utf-8')
+                const parsed = JSON.parse(existingContent)
+                globalMarkers = Array.isArray(parsed) ? parsed : [parsed]
+            }
+        } catch {}
+        globalMarkers = globalMarkers.filter(m => m.accountId !== accountId && m.email?.toLowerCase() !== accountId.toLowerCase())
+        globalMarkers.push(markerData)
+        await fs.promises.writeFile(globalMarkerPath, JSON.stringify(globalMarkers, null, 2), 'utf-8')
+
+        // 3. Register in in-memory tracker
+        this.suspendedAccounts.add(accountId.toLowerCase())
+
+        // 4. Record status to internal database if available
+        try {
+            const db = Database.getInstance()
+            if (db && db.getIsConnected()) {
+                await db.upsertAccountSummary({
+                    email: accountId,
+                    status: 'SUSPENDED'
+                })
+            }
+        } catch {}
+
+        return { movedFiles, markerPath: globalMarkerPath }
     }
 }

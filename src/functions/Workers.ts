@@ -1,5 +1,8 @@
 import type { Page } from 'patchright'
 import type { MicrosoftRewardsBot } from '../index'
+import { AccountSuspendedError, checkPageSuspension, isSuspensionContent } from '../browser/auth/SuspensionDetector'
+
+export { AccountSuspendedError }
 import type { DashboardData, PunchCard, BasePromotion, FindClippyPromotion } from '../interface/DashboardData'
 import type { AppDashboardData } from '../interface/AppDashBoardData'
 import type { PunchCardExecutionMode } from '../interface/Config'
@@ -15,31 +18,123 @@ import {
     PunchCardStateReader,
     evaluatePunchCardRun
 } from './activities/ActivitySemantics'
+import { isLocalSystemProtocol, resolvePunchCardExecutionUrl } from './activities/api/UrlProtocolGuard'
+
+export function isQuizPromotion(activity: Partial<BasePromotion> | Record<string, any>): boolean {
+    if (!activity) return false
+
+    const type = String(activity.promotionType ?? '').toLowerCase()
+    const subType = String(activity.promotionSubtype ?? '').toLowerCase()
+    const title = String(activity.title ?? '').toLowerCase().trim()
+    const name = String(activity.name ?? '').toLowerCase()
+    const destUrl = String(activity.destinationUrl ?? '').toLowerCase()
+    const points = Number(activity.pointProgressMax ?? 0)
+    const maxQuestions = Number((activity.attributes as any)?.maxQuestions ?? 0)
+
+    // 1. Tipe eksplisit atau nama aktivitas kuis
+    if (type === 'quiz' || type.includes('trivia') || type.includes('poll') || type.includes('survey')) return true
+    if (subType.includes('quiz') || subType.includes('trivia') || subType.includes('poll')) return true
+    if (name.includes('quiz') || name.includes('trivia') || name.includes('poll')) return true
+
+    // 2. Nilai poin khas kuis Bing (15, 30, 40, 50 poin) atau atribut multi-pertanyaan
+    if ([15, 30, 40, 50].includes(points) || maxQuestions > 1) return true
+
+    // 3. Kata kunci pertanyaan kuis pada judul
+    const questionPrefixes = ['how many', 'which', 'what', 'who', 'where', 'when', 'why', 'can you', 'do you know']
+    if (
+        questionPrefixes.some(prefix => title.startsWith(prefix)) ||
+        title.includes('?') ||
+        title.includes('trivia') ||
+        title.includes('test your knowledge') ||
+        title.includes('quiz')
+    ) {
+        return true
+    }
+
+    // 4. Ciri khas query string kuis Bing
+    if (destUrl.includes('filters=btepokey') || destUrl.includes('rwds_quiz') || destUrl.includes('openquiz')) {
+        return true
+    }
+
+    return false
+}
 
 export class Workers {
+    public static sessionUnverifiedPunchCardSteps: Set<string> = new Set<string>()
     public bot: MicrosoftRewardsBot
     public completedOffersInSession: Set<string> = new Set<string>()
+    public pendingAttributionQueue: Array<{
+        offerId: string
+        title: string
+        advertisedPoints: number
+        timestamp: number
+        category: string
+    }> = []
+
+    public isQuizPromotion(activity: Partial<BasePromotion> | Record<string, any>): boolean {
+        return isQuizPromotion(activity)
+    }
+
+    public pass1FoundCoins: boolean = false
+    public hadBrowserActivitiesSincePass1: boolean = false
 
     constructor(bot: MicrosoftRewardsBot) {
         this.bot = bot
     }
 
+    public async checkAccountSuspended(page: Page, email?: string): Promise<boolean> {
+        if (!page || typeof page.isClosed !== 'function' || page.isClosed()) return false
+        const accEmail = email || this.bot?.activeAccount?.email || 'unknown'
+        const suspension = await checkPageSuspension(page)
+        if (suspension.isSuspended) {
+            this.bot?.logger?.error?.(
+                this.bot.isMobile,
+                'ACCOUNT-SUSPENDED',
+                `🚨 [ACCOUNT-SUSPENDED] Akun ${accEmail} TERBUKTI DITANGGUHKAN (BANNED) oleh Microsoft!`
+            )
+            throw new AccountSuspendedError(accEmail, suspension.reason)
+        }
+        return false
+    }
+
+    public async verifyDapiSuspension(error: any, page?: Page, email?: string): Promise<void> {
+        const status = error?.response?.status || error?.status
+        if (status === 403 || status === 401) {
+            const targetPage = page || this.bot?.mainMobilePage || this.bot?.mainDesktopPage
+            const accountEmail = email || this.bot?.activeAccount?.email || 'unknown'
+            if (targetPage && typeof targetPage.isClosed === 'function' && !targetPage.isClosed()) {
+                const content = await targetPage.content().catch(() => '')
+                const url = typeof targetPage.url === 'function' ? targetPage.url() || '' : ''
+                if (isSuspensionContent(content, url)) {
+                    this.bot?.logger?.error?.(
+                        this.bot.isMobile,
+                        'ACCOUNT-SUSPENDED',
+                        `🚨 [ACCOUNT-SUSPENDED] Akun ${accountEmail} TERBUKTI DITANGGUHKAN (BANNED) oleh Microsoft!`
+                    )
+                    throw new AccountSuspendedError(accountEmail, 'DAPI returned 401/403 and suspension banner confirmed in page')
+                }
+            }
+        }
+    }
+
     public async doClaimPendingPoints(page: Page, isRecheck: boolean = false) {
-        if (!page || page.isClosed()) return
-        try {
-            const currentUrl = page.url().toLowerCase()
-            if (!currentUrl.includes('rewards.bing.com')) {
-                this.bot.logger.debug(
+        if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return
+        await this.checkAccountSuspended(page)
+
+        // Bypass Pass 2 secara kondisional jika Pass 1 bersih dan aktivitas sebelumnya berjalan murni via API DAPI
+        if (isRecheck) {
+            if (!this.pass1FoundCoins && !this.hadBrowserActivitiesSincePass1) {
+                this.bot.logger.info(
                     this.bot.isMobile,
                     'DASHBOARD',
-                    'Navigating to Rewards dashboard to check pending claims...'
+                    '[PASS-2] Pass 1 tidak menemukan koin dan aktivitas sebelumnya berjalan via DAPI. Melewati Pass 2 otomatis.',
+                    'green'
                 )
-                await page
-                    .goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 15000 })
-                    .catch(() => {})
-                await this.bot.utils.wait(2500)
+                return
             }
+        }
 
+        try {
             const prefix = isRecheck ? '[RE-CHECK] ' : ''
             this.bot.logger.info(
                 this.bot.isMobile,
@@ -47,35 +142,159 @@ export class Workers {
                 `${prefix}Scanning Rewards dashboard for pending coins / "Ready to claim" cards...`
             )
 
-            // 1. Deteksi spesifik kartu "Ready to claim" (Hindari kartu "Available points" dan bagian bawah)
-            const cardInfo = await page
-                .evaluate(() => {
-                    const allElements = Array.from(
-                        document.querySelectorAll('div, section, .card, .p-card, .c-card, [class*="card"]')
-                    )
-                    for (const el of allElements) {
-                        const txt = (el.textContent || '').trim()
+            let clicked = false
+            let textFound = ''
+
+            // 1. Deteksi kontainer kartu dengan pencarian berbasis teks fleksibel: /ready to claim/i, /\+\d+\s*claim/i, /[0-9]+\s*koin/i
+            const cardRegex = /ready to claim|\+\d+\s*claim|[0-9]+\s*koin|(?:claim|klaim)\s*\+?\d+|siap diklaim/i
+            const cardCandidates = page
+                .locator('div, section, article, [class*="card"], [class*="tile"], [class*="item"], [role="region"]')
+                .filter({ hasText: cardRegex })
+
+            const cardCount = await cardCandidates.count().catch(() => 0)
+
+            for (let i = 0; i < cardCount; i++) {
+                const card = cardCandidates.nth(i)
+                const isCardVis = await card.isVisible().catch(() => false)
+                if (!isCardVis) continue
+
+                const cardTxt = (await card.innerText().catch(() => '')).trim()
+                if (!cardTxt || cardTxt.length > 300) continue
+                if (cardTxt.includes('Available points') || cardTxt.includes('Poin yang tersedia')) {
+                    continue
+                }
+                if (!cardRegex.test(cardTxt)) continue
+
+                // Ambil nilai poin yang tertera di dalam teks kartu (misal: "195") untuk dicatat di log
+                let claimedPoints = '0'
+                const ptsMatch =
+                    cardTxt.match(/(?:ready to claim|siap diklaim)[\s\S]*?(\d+)/i) ||
+                    cardTxt.match(/\+(\d+)\s*(?:claim|klaim)/i) ||
+                    cardTxt.match(/(\d+)\s*(?:koin|pts|points)/i) ||
+                    cardTxt.match(/(?:claim|klaim)[\s\S]*?(\d+)/i) ||
+                    cardTxt.match(/(\d+)/)
+
+                if (ptsMatch && ptsMatch[1]) {
+                    claimedPoints = ptsMatch[1]
+                }
+
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'DASHBOARD',
+                    `[DASHBOARD] 🎉 Terdeteksi koin pending: ${claimedPoints} Pts. Mengeksekusi klaim...`,
+                    'green'
+                )
+
+                const oldBalance = Number(this.bot.userData.currentPoints ?? 0)
+                let clickExecuted = false
+
+                // Multi-tier locator:
+                // 1. card.locator('button, a, [role="button"]').filter({ hasText: /claim|klaim/i }).first()
+                const tier1Btn = card.locator('button, a, [role="button"]').filter({ hasText: /claim|klaim/i }).first()
+                if (await tier1Btn.isVisible().catch(() => false)) {
+                    await tier1Btn.click({ timeout: 5000 }).catch(async () => {
+                        await tier1Btn.evaluate((b: HTMLElement) => {
+                            b.click()
+                            b.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
+                        }).catch(() => {})
+                    })
+                    clickExecuted = true
+                }
+
+                // 2. Fallback: card.locator('[class*="claim"], [class*="action"], [id*="claim"]').first()
+                if (!clickExecuted) {
+                    const tier2Btn = card.locator('[class*="claim"], [class*="action"], [id*="claim"]').first()
+                    if (await tier2Btn.isVisible().catch(() => false)) {
+                        await tier2Btn.click({ timeout: 5000 }).catch(async () => {
+                            await tier2Btn.evaluate((b: HTMLElement) => {
+                                b.click()
+                                b.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
+                            }).catch(() => {})
+                        })
+                        clickExecuted = true
+                    }
+                }
+
+                // 3. Fallback terakhir: Klik langsung pada container kartu itu sendiri (card.click({ force: true }))
+                if (!clickExecuted) {
+                    await card.click({ force: true, timeout: 5000 }).catch(async () => {
+                        await card.evaluate((b: HTMLElement) => {
+                            b.click()
+                            b.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
+                        }).catch(() => {})
+                    })
+                    clickExecuted = true
+                }
+
+                // Setelah klik dieksekusi, berikan jeda 2 detik dan verifikasi apakah saldo akun bertambah atau kartu menghilang
+                if (clickExecuted) {
+                    await this.bot.utils.wait(2000)
+                    const isCardStillVis = await card.isVisible().catch(() => false)
+                    const currentBal = await this.bot.browser.func.getCurrentPoints(page).catch(() => oldBalance)
+                    const verified = !isCardStillVis || currentBal > oldBalance
+                    if (verified) {
+                        this.bot.logger.debug(
+                            this.bot.isMobile,
+                            'DASHBOARD',
+                            `Klaim koin terverifikasi (cardHidden=${!isCardStillVis}, balDelta=${currentBal - oldBalance})`
+                        )
+                    }
+
+                    clicked = true
+                    textFound = `${claimedPoints} Pts`
+                    break
+                }
+            }
+
+            // 2. Evaluasi tombol claim langsung di DOM jika belum menemukan dari kartu
+            if (!clicked) {
+                const directBtns = page.locator(
+                    'button:has-text("Claim"), [role="button"]:has-text("Claim"), button.c-action-trigger, button:has-text("Klaim"), [role="button"]:has-text("Klaim")'
+                )
+                const directCount = await directBtns.count().catch(() => 0)
+                for (let j = 0; j < directCount; j++) {
+                    const btn = directBtns.nth(j)
+                    if (await btn.isVisible().catch(() => false)) {
+                        const bTxt = (await btn.innerText().catch(() => '')).trim().toLowerCase()
+                        if (bTxt.includes('available') || bTxt.includes('tersedia')) continue
                         if (
-                            (txt.includes('Ready to claim') || txt.includes('Siap diklaim')) &&
-                            !txt.includes('Available points') &&
-                            txt.length < 150
+                            bTxt === 'claim' ||
+                            bTxt === 'klaim' ||
+                            bTxt === 'claim points' ||
+                            bTxt === 'claim all' ||
+                            bTxt === 'klaim poin' ||
+                            bTxt === 'klaim semua'
                         ) {
-                            const m = txt.match(/(\d+)/)
-                            const pts = m && m[1] ? parseInt(m[1], 10) : 0
-                            if (pts > 0 && pts < 5000) {
-                                return { hasReadyCard: true, hasPanelOpen: false, pts }
+                            const oldBal = Number(this.bot.userData.currentPoints ?? 0)
+                            await btn.click({ timeout: 5000 }).catch(async () => {
+                                await btn.evaluate((b: HTMLElement) => b.click()).catch(() => {})
+                            })
+                            for (let step = 0; step < 5; step++) {
+                                await this.bot.utils.wait(800)
+                                const stillVis = await btn.isVisible().catch(() => false)
+                                const currentBal = await this.bot.browser.func.getCurrentPoints(page).catch(() => oldBal)
+                                if (!stillVis || currentBal > oldBal) break
                             }
+                            clicked = true
+                            textFound = bTxt
+                            break
                         }
                     }
-                    const hasPanelOpen = document.body
-                        ? document.body.innerText.includes('First search of the day') ||
-                          document.body.innerText.includes('Claim points')
-                        : false
-                    return { hasReadyCard: false, hasPanelOpen, pts: 0 }
-                })
-                .catch(() => ({ hasReadyCard: false, hasPanelOpen: false, pts: 0 }))
+                }
+            }
 
-            if (!cardInfo.hasReadyCard && !cardInfo.hasPanelOpen) {
+            // Coba tutup panel/modal jika ada
+            const closeBtn = page.locator(
+                'button[aria-label*="close" i], button[aria-label*="tutup" i], button.ms-Panel-closeButton, [data-icon-name="Cancel"], [aria-label="Close"]'
+            ).first()
+            if (await closeBtn.isVisible().catch(() => false)) {
+                await closeBtn.click().catch(() => {})
+            }
+
+            if (!clicked) {
+                if (!isRecheck) {
+                    this.pass1FoundCoins = false
+                }
                 this.bot.logger.info(
                     this.bot.isMobile,
                     'DASHBOARD',
@@ -84,151 +303,19 @@ export class Workers {
                 return
             }
 
-            const ptsLabel = cardInfo.pts > 0 ? ` (+${cardInfo.pts} Poin)` : ''
+            if (!isRecheck) {
+                this.pass1FoundCoins = true
+            }
+
             this.bot.logger.info(
                 this.bot.isMobile,
                 'DASHBOARD',
-                `${prefix}🎉 Nemu koin nyangkut di ${this.bot.isMobile ? 'Mobile' : 'Desktop'}${ptsLabel}! Mengeksekusi panel klaim...`,
+                `${prefix}🎉 Koin nyangkut terdeteksi ("${textFound}"). Klaim instan berhasil dieksekusi!`,
                 'green'
             )
 
-            // 2. Buka Panel Slide "Claim points" JIKA belum terbuka
-            const panelHeader = page
-                .locator('text="Claim points", text="First search of the day", button:has-text("Claim points")')
-                .first()
-            const isPanelAlreadyOpen = await panelHeader.isVisible().catch(() => false)
+            await this.bot.utils.wait(800)
 
-            if (!isPanelAlreadyOpen) {
-                // Targetkan secara terisolasi kartu "Ready to claim" (eksklusi Available points / Redeem)
-                const readyCard = page
-                    .locator('div, section, .card, .p-card, .c-card, [class*="card"]')
-                    .filter({ hasText: 'Ready to claim' })
-                    .filter({ hasNotText: 'Available points' })
-                    .first()
-                const claimLink = readyCard
-                    .locator('a, button, [role="button"], span')
-                    .filter({ hasText: /^Claim(\s*>)?$/i })
-                    .first()
-
-                if (await claimLink.isVisible().catch(() => false)) {
-                    await claimLink.scrollIntoViewIfNeeded().catch(() => {})
-                    await claimLink.click({ force: true }).catch(() => {})
-                } else if (await readyCard.isVisible().catch(() => false)) {
-                    await readyCard.scrollIntoViewIfNeeded().catch(() => {})
-                    await readyCard.click({ force: true }).catch(() => {})
-                } else {
-                    await page
-                        .evaluate(() => {
-                            const allElements = Array.from(
-                                document.querySelectorAll('div, section, .card, .p-card, .c-card, [class*="card"]')
-                            )
-                            for (const el of allElements) {
-                                const txt = (el.textContent || '').trim()
-                                if (
-                                    (txt.includes('Ready to claim') || txt.includes('Siap diklaim')) &&
-                                    !txt.includes('Available points') &&
-                                    txt.length < 150
-                                ) {
-                                    const target = (el.querySelector('a, button, [role="button"]') || el) as HTMLElement
-                                    target.click()
-                                    target.dispatchEvent(
-                                        new MouseEvent('click', { bubbles: true, cancelable: true, view: window })
-                                    )
-                                    break
-                                }
-                            }
-                        })
-                        .catch(() => {})
-                }
-
-                await panelHeader.waitFor({ state: 'visible', timeout: 4000 }).catch(() => {})
-                await this.bot.utils.wait(1500)
-            }
-
-            // 3. TEKAN TOMBOL BESAR [ Claim points ] DI DALAM PANEL (Sesuai Screenshot media_1788187521263.png)
-            this.bot.logger.info(
-                this.bot.isMobile,
-                'DASHBOARD',
-                `Mengeksekusi tombol "Claim points" di dalam panel...`,
-                'green'
-            )
-
-            // a. Native Playwright Click pada tombol Claim points
-            const modalClaimButton = page
-                .locator(
-                    'button:has-text("Claim points"), [role="button"]:has-text("Claim points"), button:has-text("Klaim poin"), div[role="button"]:has-text("Claim points")'
-                )
-                .first()
-            if (await modalClaimButton.isVisible().catch(() => false)) {
-                await modalClaimButton.scrollIntoViewIfNeeded().catch(() => {})
-                await modalClaimButton.click({ force: true, timeout: 5000 }).catch(() => {})
-            }
-
-            // b. Fallback DOM Click Event dengan bounding rect nyata
-            await page
-                .evaluate(() => {
-                    const btns = Array.from(document.querySelectorAll('button, a, div[role="button"]'))
-                    for (const b of btns) {
-                        const txt = ((b as HTMLElement).innerText || b.textContent || '').trim().toLowerCase()
-                        if (
-                            txt === 'claim points' ||
-                            txt === 'klaim poin' ||
-                            txt === 'claim all' ||
-                            txt === 'klaim semua'
-                        ) {
-                            ;(b as HTMLElement).click()
-                            b.dispatchEvent(
-                                new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window })
-                            )
-                            b.dispatchEvent(
-                                new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window })
-                            )
-                            b.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
-                        }
-                    }
-                })
-                .catch(() => {})
-
-            await this.bot.utils.wait(2500)
-
-            // 4. Tutup Panel Modal (Klik tombol Close X)
-            try {
-                const closeBtn = page
-                    .locator(
-                        'button[aria-label*="close" i], button[aria-label*="tutup" i], button.ms-Panel-closeButton, [data-icon-name="Cancel"], [aria-label="Close"]'
-                    )
-                    .first()
-                if (await closeBtn.isVisible().catch(() => false)) {
-                    await closeBtn.click({ force: true }).catch(() => {})
-                }
-            } catch {}
-
-            await this.bot.utils.wait(1500)
-
-            // 5. RE-CHECK VERIFIKASI AKHIR: Pastikan koin di dashboard sudah bersih
-            const finalVerify = await page
-                .evaluate(() => {
-                    const allElements = Array.from(
-                        document.querySelectorAll('div, section, .card, .p-card, .c-card, [class*="card"]')
-                    )
-                    for (const el of allElements) {
-                        const txt = (el.textContent || '').trim()
-                        if (
-                            (txt.includes('Ready to claim') || txt.includes('Siap diklaim')) &&
-                            !txt.includes('Available points') &&
-                            txt.length < 150
-                        ) {
-                            const m = txt.match(/(\d+)/)
-                            if (m && m[1] && parseInt(m[1], 10) > 0) {
-                                return { isClean: false, remaining: parseInt(m[1], 10) }
-                            }
-                        }
-                    }
-                    return { isClean: true }
-                })
-                .catch(() => ({ isClean: true }))
-
-            // 6. Validasi Nyata Saldo (HANYA BERDASARKAN DELTA SERVER NYATA)
             const oldBalance = Number(this.bot.userData.currentPoints ?? 0)
             const newBalance = await this.bot.browser.func.getCurrentPoints(page).catch(() => oldBalance)
             const gainedPoints = Math.max(0, newBalance - oldBalance)
@@ -247,18 +334,12 @@ export class Workers {
                     'CLAIM_PENDING_POINTS',
                     gainedPoints
                 )
-            } else if (finalVerify.isClean) {
+            } else {
                 this.bot.logger.info(
                     this.bot.isMobile,
                     'DASHBOARD',
-                    `${prefix}🎯 Re-check terverifikasi: Semua koin nyangkut sudah 100% bersih & sinkron (${oldBalance} pts).`,
+                    `${prefix}🎯 Klaim instan selesai (${newBalance} pts).`,
                     'green'
-                )
-            } else {
-                this.bot.logger.warn(
-                    this.bot.isMobile,
-                    'DASHBOARD',
-                    `${prefix}⚠️ Re-check mendeteksi masih ada ${(finalVerify as any).remaining} koin pending di dashboard.`
                 )
             }
         } catch {
@@ -267,6 +348,9 @@ export class Workers {
     }
 
     public async doDailySet(data: DashboardData, page: Page) {
+        if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return
+        await this.checkAccountSuspended(page)
+
         // 1. Ambil dari seluruh tanggal di dailySetPromotions (API)
         const dailySetMapItems: BasePromotion[] = Object.values(data.dailySetPromotions ?? {}).flat() as BasePromotion[]
 
@@ -470,6 +554,15 @@ export class Workers {
                 })
             }
 
+            // Pastikan halaman dashboard dalam kondisi bersih dan bebas overlay sebelum eksekusi kartu
+            if (page && !page.isClosed()) {
+                const currentUrl = page.url().toLowerCase()
+                if (!currentUrl.endsWith('rewards.bing.com') && !currentUrl.endsWith('rewards.bing.com/')) {
+                    await page.goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {})
+                    await this.bot.utils.wait(1000)
+                }
+            }
+
             // 2. Selesaikan batch seperti flow lama
             await this.solveActivities(activitiesUncompleted, page)
 
@@ -492,6 +585,59 @@ export class Workers {
                 : []
             const allFreshDailySet = [...freshItems, ...fallbackFresh]
 
+            // Evaluasi status centang hijau langsung dari DOM dashboard (Pastikan page context berada di rewards.bing.com)
+            let domCheckmarkMap: Record<string, boolean> = {}
+            if (page && !page.isClosed()) {
+                try {
+                    const curUrl = page.url().toLowerCase()
+                    if (!curUrl.includes('rewards.bing.com')) {
+                        await page.goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {})
+                        await this.bot.utils.wait(1500)
+                    }
+                    domCheckmarkMap = await page.evaluate(() => {
+                        const statusMap: Record<string, boolean> = {}
+                        const dailyContainers = Array.from(
+                            document.querySelectorAll('#daily-sets, [data-bi-area*="DailySet"], section#dailyset, .daily-set, .daily-sets, [id*="daily-set"]')
+                        )
+                        const candidateCards: Element[] = []
+                        if (dailyContainers.length > 0) {
+                            for (const c of dailyContainers) {
+                                candidateCards.push(
+                                    ...Array.from(
+                                        c.querySelectorAll('.c-card, .p-card, a, [role="button"], [class*="card"], [class*="tile"], div:has(> [class*="title"]), div:has(> [class*="heading"])')
+                                    )
+                                )
+                            }
+                        }
+                        if (candidateCards.length === 0) {
+                            candidateCards.push(
+                                ...Array.from(
+                                    document.querySelectorAll('#daily-sets .c-card, #daily-sets .p-card, [data-bi-area*="DailySet"] .c-card, .c-card, .p-card, a, [role="button"], [class*="card"]')
+                                )
+                            )
+                        }
+
+                        for (const card of candidateCards) {
+                            const titleEl = card.querySelector('h3, h4, h5, .title, .c-heading, [class*="title"], [class*="heading"]')
+                            const rawTitle = (titleEl?.textContent || card.getAttribute('aria-label') || '').trim().toLowerCase()
+                            const lines = (card.textContent || '').split('\n').map(l => l.trim().toLowerCase()).filter(Boolean)
+                            const title = rawTitle || lines[0] || ''
+                            const hasCheck =
+                                card.querySelector(
+                                    '.mee-icon-CheckMark, [data-icon-name="CheckMark"], .c-glyph.f-checkmark, .c-icon-check, .complete-check, svg[aria-label*="Complete"], [class*="check"]'
+                                ) !== null ||
+                                card.classList.contains('completed') ||
+                                card.classList.contains('complete') ||
+                                card.getAttribute('aria-checked') === 'true' ||
+                                (card.textContent || '').toLowerCase().includes('completed') ||
+                                (card.textContent || '').toLowerCase().includes('selesai')
+                            if (title) statusMap[title] = hasCheck
+                        }
+                        return statusMap
+                    }).catch(() => ({} as Record<string, boolean>))
+                } catch {}
+            }
+
             for (const [key, result] of executionMap.entries()) {
                 const freshMatch = allFreshDailySet.find(
                     f =>
@@ -506,19 +652,54 @@ export class Workers {
                             (freshMatch.pointProgress ?? 0) >= freshMatch.pointProgressMax))
                 )
 
-                if (isServerComplete) {
+                // Cek DOM checkmark sekunder jika server API belum merefleksikan complete: true
+                const titleKey = (result.title || '').toLowerCase().trim()
+                const isDomComplete = Boolean(
+                    domCheckmarkMap[titleKey] ||
+                    Object.entries(domCheckmarkMap).some(([k, v]) => v && (k.includes(titleKey) || titleKey.includes(k)))
+                )
+
+                if (isServerComplete || isDomComplete) {
+                    const evidence = isServerComplete ? 'server-dashboard-state' : 'dom-checkmark'
+                    if (isDomComplete && !isServerComplete) {
+                        this.bot.logger.info(
+                            this.bot.isMobile,
+                            'DAILY-SET',
+                            `Dashboard DOM confirmed checkmark for "${result.title}" (+${result.advertisedPoints} pts)`,
+                            'green'
+                        )
+                    }
+
                     const attributed =
                         observedBalanceDelta === result.advertisedPoints && result.advertisedPoints > 0
                             ? result.advertisedPoints
                             : null
+
                     executionMap.set(key, {
                         ...result,
                         status: 'verified-complete',
                         serverCompleted: true,
-                        completionEvidence: 'server-dashboard-state',
+                        completionEvidence: evidence,
                         observedBalanceDelta,
                         attributedPoints: attributed
                     })
+
+                    // Jika diverifikasi via DOM namun saldo instan belum bertambah (delayed eventual consistency),
+                    // daftarkan ke pending attribution ledger
+                    if (attributed === null && result.advertisedPoints > 0) {
+                        this.pendingAttributionQueue.push({
+                            offerId: result.offerId || key,
+                            title: result.title,
+                            advertisedPoints: result.advertisedPoints,
+                            timestamp: Date.now(),
+                            category: 'DAILY_SET'
+                        })
+                        this.bot.logger.debug(
+                            this.bot.isMobile,
+                            'DAILY-SET',
+                            `Enqueued "${result.title}" (+${result.advertisedPoints} pts) into pending attribution ledger (waiting for server sync)`
+                        )
+                    }
                 } else {
                     executionMap.set(key, {
                         ...result,
@@ -543,7 +724,7 @@ export class Workers {
                 observedAccountBalanceDelta: observedBalanceDelta
             }
 
-            this.bot.userData.currentPoints = updatedBalance
+            this.bot.userData.currentPoints = Math.max(this.bot.userData.currentPoints ?? 0, updatedBalance)
 
             const advertisedTotal = allResults.reduce((sum, r) => sum + r.advertisedPoints, 0)
             this.bot.logger.info(
@@ -671,7 +852,12 @@ export class Workers {
                 titleLower.includes('enable notification')
             if (isInternalInfo) return false
 
+            const isDesktopActivation =
+                offerIdLower.includes('eligibility_edgebarchrome') ||
+                offerIdLower.includes('activation_banner')
+
             const isAppOnly =
+                isDesktopActivation ||
                 titleLower.includes('rewards app only') ||
                 titleLower.includes('app only') ||
                 titleLower.includes('bing app') ||
@@ -696,6 +882,9 @@ export class Workers {
     }
 
     public async doMorePromotions(data: DashboardData, page: Page) {
+        if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return
+        await this.checkAccountSuspended(page)
+
         const appOnlyPromos = this.extractAppOnlyPromotions(data)
         const appOnlyTitles = new Set(appOnlyPromos.map(p => (p.title || '').toLowerCase().trim()).filter(Boolean))
         const appOnlyOfferIds = new Set(appOnlyPromos.map(p => (p.offerId || '').toLowerCase().trim()).filter(Boolean))
@@ -817,6 +1006,18 @@ export class Workers {
                             href.startsWith('microsoft-edge:') ||
                             href.includes('images/create')
 
+                        const isQuizHeuristic =
+                            title.toLowerCase().includes('?') ||
+                            txt.toLowerCase().includes('quiz') ||
+                            [15, 30, 40, 50].includes(points) ||
+                            ['how many', 'which', 'what', 'who', 'where', 'when', 'why'].some(p =>
+                                title.toLowerCase().trim().startsWith(p)
+                            ) ||
+                            (href &&
+                                (href.toLowerCase().includes('filters=btepokey') ||
+                                    href.toLowerCase().includes('rwds_quiz') ||
+                                    href.toLowerCase().includes('openquiz')))
+
                         if (hasCheckmark) {
                             completedTitles.push(title.toLowerCase().trim())
                         } else if (points > 0 && !isPunchCardTile && !isAppOnly && !isMarketingPromo) {
@@ -827,10 +1028,7 @@ export class Workers {
                                 pointProgress: 0,
                                 complete: false,
                                 offerId: `dom_bonus_${title.replace(/[^\w]/g, '_').toLowerCase()}`,
-                                promotionType:
-                                    title.toLowerCase().includes('?') || txt.toLowerCase().includes('quiz')
-                                        ? 'quiz'
-                                        : 'urlreward'
+                                promotionType: isQuizHeuristic ? 'quiz' : 'urlreward'
                             })
                         }
                     }
@@ -850,6 +1048,12 @@ export class Workers {
             })
 
             if (uncompletedCards && uncompletedCards.length > 0) {
+                for (const card of uncompletedCards) {
+                    if (this.isQuizPromotion(card)) {
+                        card.promotionType = 'quiz'
+                        ;(card as any).isQuiz = true
+                    }
+                }
                 const filteredDom = uncompletedCards.filter(c => {
                     const t = (c.title || '').toLowerCase().trim()
                     const oid = (c.offerId || '').toLowerCase().trim()
@@ -1024,16 +1228,33 @@ export class Workers {
 
         const uniqueSpecials = [...new Map(allSpecials.map(p => [p.offerId, p])).values()]
 
-        const uncompleted = uniqueSpecials.filter(
-            x =>
+        const uncompleted = uniqueSpecials.filter(x => {
+            const offerIdLower = (x.offerId ?? '').toLowerCase()
+            const isDesktopActivation =
+                offerIdLower.includes('eligibility_edgebarchrome') ||
+                offerIdLower.includes('activation_banner')
+
+            if (isDesktopActivation) {
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'SPECIAL-ACTIVITY',
+                    `[PROMO-FILTER] Menandai kartu "${x.title}" (${x.offerId}) sebagai kartu khusus aplikasi/desktop non-mobile.`
+                )
+                if (this.bot.isMobile) {
+                    return false
+                }
+            }
+
+            return (
                 !x.complete &&
                 x.pointProgressMax > 0 &&
                 x.pointProgressMax <= 500 &&
-                !(x.offerId ?? '').toLowerCase().includes('locked') &&
-                !(x.offerId ?? '').toLowerCase().includes('impression') &&
-                !(x.offerId ?? '').toLowerCase().includes('refer_and_earn') &&
+                !offerIdLower.includes('locked') &&
+                !offerIdLower.includes('impression') &&
+                !offerIdLower.includes('refer_and_earn') &&
                 (x.title ?? '').trim() !== ''
-        )
+            )
+        })
 
         if (uncompleted.length > 0) {
             this.bot.logger.info(
@@ -1080,6 +1301,9 @@ export class Workers {
     }
 
     public async doPunchCards(data: DashboardData, page: Page, readerOverride?: PunchCardStateReader) {
+        if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return
+        await this.checkAccountSuspended(page)
+
         const punchCards: PunchCard[] = [...(data.punchCards ?? [])]
 
         // Periksa juga apakah ada kartu di promotionalItems/morePromotions yang merupakan PunchCard
@@ -1215,6 +1439,21 @@ export class Workers {
                     const stepTitle = activeChild.title || activeChild.name || `Step ${counts.completed + 1}`
                     const stepNum = counts.completed + 1
                     const taskTag = `(${stepNum}/${counts.total} Tasks)`
+
+                    const childKey = targetChildOfferId ? `${offerId}:${targetChildOfferId}` : `${offerId}:${stepTitle}`
+                    if (
+                        Workers.sessionUnverifiedPunchCardSteps.has(childKey) ||
+                        Workers.sessionUnverifiedPunchCardSteps.has(`${offerId}:${stepTitle}`) ||
+                        (targetChildOfferId && Workers.sessionUnverifiedPunchCardSteps.has(targetChildOfferId))
+                    ) {
+                        this.bot.logger.info(
+                            this.bot.isMobile,
+                            'PUNCHCARD',
+                            `[PUNCHCARD-CACHE] Melewati langkah "${stepTitle}" (tercatat gagal verifikasi pada sesi ini)`
+                        )
+                        continue
+                    }
+
                     const childBeforeSnapshot = createPunchCardSnapshot(card, targetChildOfferId)
 
                     this.bot.logger.info(
@@ -1228,11 +1467,20 @@ export class Workers {
                         `[PUNCHCARD] Before snapshot | parentOfferId=${offerId} childOfferId=${targetChildOfferId} completed=${childBeforeSnapshot.completedChildren}/${childBeforeSnapshot.totalChildren}`
                     )
 
+                    const configuredMode =
+                        (this.bot.config as any)?.punchCard?.mode ||
+                        this.bot.config?.punchCardExecution?.mode
+
                     const executionMode: PunchCardExecutionMode =
-                        (this.bot.config?.punchCardExecution?.mode as PunchCardExecutionMode) || 'manual-handoff'
+                        (configuredMode as PunchCardExecutionMode) || 'manual-handoff'
+
+                    const source = (this.bot.config as any)?.punchCard?.mode
+                        ? 'config'
+                        : this.bot.config?.punchCardExecution?.mode
+                          ? 'config'
+                          : 'global-default'
 
                     if (executionMode === 'manual-handoff') {
-                        const source = this.bot.config?.punchCardExecution?.mode ? 'config' : 'global-default'
                         this.bot.logger.info(
                             this.bot.isMobile,
                             'PUNCHCARD-CONFIG',
@@ -1286,7 +1534,7 @@ export class Workers {
                         this.bot.logger.info(
                             this.bot.isMobile,
                             'PUNCHCARD-CONFIG',
-                            `[PUNCHCARD-CONFIG] mode=observer source=config`
+                            `[PUNCHCARD-CONFIG] mode=observer source=${source}`
                         )
                         this.bot.logger.info(
                             this.bot.isMobile,
@@ -1297,7 +1545,12 @@ export class Workers {
                         continue
                     }
 
-                    // Mode is browser-ui-experimental (explicit opt-in)
+                    // Mode is auto or browser-ui-experimental (auto-solve / explicit opt-in)
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'PUNCHCARD-CONFIG',
+                        `[PUNCHCARD-CONFIG] mode=${executionMode} source=${source}`
+                    )
                     // 1. Kill switch check
                     const killReason = await this.checkPunchCardKillSwitch(page)
                     if (killReason) {
@@ -1353,27 +1606,27 @@ export class Workers {
                     }
 
                     // 4. Single-transport execution: first-party dashboard click
+                    const childUrlResolution = resolvePunchCardExecutionUrl(
+                        activeChild.destinationUrl,
+                        stepTitle,
+                        targetChildOfferId
+                    )
+                    if (childUrlResolution.action === 'skip-app') {
+                        this.bot.logger.warn(
+                            this.bot.isMobile,
+                            'PUNCHCARD-GUARD',
+                            `[PUNCHCARD-GUARD] Langkah "${stepTitle}" adalah quest eksklusif aplikasi Bing App. Melewati navigasi browser.`
+                        )
+                        currentScope.recordAttempt(offerId, targetChildOfferId, 'processed-unverified')
+                        continue
+                    }
+
                     const balanceBefore = Number(this.bot.userData.currentPoints ?? 0)
                     await this.clickExactChildFromDashboard(page, card, activeChild)
 
                     // Refresh exact parent/child server state with propagation delay
                     await this.bot.utils.wait(2000)
-                    let afterSnapshot = await stateReader.fetchPunchCardSnapshot(offerId, targetChildOfferId)
-
-                    const isVerified = Boolean(
-                        afterSnapshot &&
-                            (afterSnapshot.parentComplete ||
-                                afterSnapshot.childComplete ||
-                                afterSnapshot.completedChildren > childBeforeSnapshot.completedChildren)
-                    )
-
-                    if (!isVerified) {
-                        await this.bot.utils.wait(3000)
-                        const retrySnapshot = await stateReader.fetchPunchCardSnapshot(offerId, targetChildOfferId)
-                        if (retrySnapshot) {
-                            afterSnapshot = retrySnapshot
-                        }
-                    }
+                    const afterSnapshot = await stateReader.fetchPunchCardSnapshot(offerId, targetChildOfferId)
 
                     const balanceAfter = Number(this.bot.userData.currentPoints ?? 0)
                     const observedBalanceDelta = Math.max(0, balanceAfter - balanceBefore)
@@ -1411,6 +1664,12 @@ export class Workers {
                         }
                     } else {
                         // Ambiguous / unchanged outcome -> ZERO second transport!
+                        const childKey = targetChildOfferId ? `${offerId}:${targetChildOfferId}` : `${offerId}:${stepTitle}`
+                        Workers.sessionUnverifiedPunchCardSteps.add(childKey)
+                        Workers.sessionUnverifiedPunchCardSteps.add(`${offerId}:${stepTitle}`)
+                        if (targetChildOfferId) {
+                            Workers.sessionUnverifiedPunchCardSteps.add(targetChildOfferId)
+                        }
                         this.bot.logger.info(
                             this.bot.isMobile,
                             'PUNCHCARD-EXEC',
@@ -1439,6 +1698,21 @@ export class Workers {
             } else if (card.parentPromotion?.destinationUrl) {
                 const stepTitle = 'Daily Step'
                 const taskTag = `(1/1 Tasks)`
+
+                const parentKey = offerId || title
+                if (
+                    Workers.sessionUnverifiedPunchCardSteps.has(`${parentKey}:${stepTitle}`) ||
+                    (offerId && Workers.sessionUnverifiedPunchCardSteps.has(offerId)) ||
+                    Workers.sessionUnverifiedPunchCardSteps.has(title)
+                ) {
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'PUNCHCARD',
+                        `[PUNCHCARD-CACHE] Melewati langkah "${title}" (tercatat gagal verifikasi pada sesi ini)`
+                    )
+                    continue
+                }
+
                 this.bot.logger.info(
                     this.bot.isMobile,
                     'PUNCHCARD',
@@ -1450,11 +1724,20 @@ export class Workers {
                     `[PUNCHCARD] Before snapshot | parentOfferId=${offerId} completed=${beforeSnapshot.completedChildren}/${beforeSnapshot.totalChildren}`
                 )
 
+                const configuredMode =
+                    (this.bot.config as any)?.punchCard?.mode ||
+                    this.bot.config?.punchCardExecution?.mode
+
                 const executionMode: PunchCardExecutionMode =
-                    (this.bot.config?.punchCardExecution?.mode as PunchCardExecutionMode) || 'manual-handoff'
+                    (configuredMode as PunchCardExecutionMode) || 'manual-handoff'
+
+                const source = (this.bot.config as any)?.punchCard?.mode
+                    ? 'config'
+                    : this.bot.config?.punchCardExecution?.mode
+                      ? 'config'
+                      : 'global-default'
 
                 if (executionMode === 'manual-handoff') {
-                    const source = this.bot.config?.punchCardExecution?.mode ? 'config' : 'global-default'
                     this.bot.logger.info(
                         this.bot.isMobile,
                         'PUNCHCARD-CONFIG',
@@ -1508,7 +1791,7 @@ export class Workers {
                     this.bot.logger.info(
                         this.bot.isMobile,
                         'PUNCHCARD-CONFIG',
-                        `[PUNCHCARD-CONFIG] mode=observer source=config`
+                        `[PUNCHCARD-CONFIG] mode=observer source=${source}`
                     )
                     this.bot.logger.info(
                         this.bot.isMobile,
@@ -1519,7 +1802,12 @@ export class Workers {
                     continue
                 }
 
-                // Mode is browser-ui-experimental
+                // Mode is auto or browser-ui-experimental (auto-solve / explicit opt-in)
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'PUNCHCARD-CONFIG',
+                    `[PUNCHCARD-CONFIG] mode=${executionMode} source=${source}`
+                )
                 const killReason = await this.checkPunchCardKillSwitch(page)
                 if (killReason) {
                     this.bot.logger.warn(
@@ -1541,17 +1829,27 @@ export class Workers {
                 }
 
                 const currentScope = this.bot.accountScope
+                const parentResolution = resolvePunchCardExecutionUrl(
+                    card.parentPromotion.destinationUrl,
+                    title,
+                    offerId
+                )
+                if (parentResolution.action === 'skip-app') {
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'PUNCHCARD-GUARD',
+                        `[PUNCHCARD-GUARD] Langkah "${title}" adalah quest eksklusif aplikasi Bing App. Melewati navigasi browser.`
+                    )
+                    currentScope?.recordAttempt(offerId, offerId, 'processed-unverified')
+                    continue
+                }
+
                 const balanceBefore = Number(this.bot.userData.currentPoints ?? 0)
                 const claimActivity = card.parentPromotion as unknown as BasePromotion
                 await this.bot.activities.doUrlReward(claimActivity, page, card)
 
                 await this.bot.utils.wait(2000)
-                let afterSnapshot = await stateReader.fetchPunchCardSnapshot(offerId)
-                if (!afterSnapshot?.parentComplete) {
-                    await this.bot.utils.wait(3000)
-                    const retrySnapshot = await stateReader.fetchPunchCardSnapshot(offerId)
-                    if (retrySnapshot) afterSnapshot = retrySnapshot
-                }
+                const afterSnapshot = await stateReader.fetchPunchCardSnapshot(offerId)
 
                 const balanceAfter = Number(this.bot.userData.currentPoints ?? 0)
                 const observedBalanceDelta = Math.max(0, balanceAfter - balanceBefore)
@@ -1584,6 +1882,14 @@ export class Workers {
                     if (offerId) this.completedOffersInSession.add(offerId)
                     if (stepTitle) this.completedOffersInSession.add(stepTitle.toLowerCase().trim())
                 } else {
+                    const parentKey = offerId || title
+                    Workers.sessionUnverifiedPunchCardSteps.add(`${parentKey}:${stepTitle}`)
+                    if (offerId) {
+                        Workers.sessionUnverifiedPunchCardSteps.add(offerId)
+                    }
+                    if (title) {
+                        Workers.sessionUnverifiedPunchCardSteps.add(title)
+                    }
                     this.bot.logger.info(
                         this.bot.isMobile,
                         'PUNCHCARD-EXEC',
@@ -1773,16 +2079,20 @@ export class Workers {
                 const type = (activity.promotionType ?? '').toLowerCase()
                 const name = (activity.name ?? '').toLowerCase()
                 const offerId = (activity.offerId ?? '').toLowerCase()
+                const isQuiz = this.isQuizPromotion(activity)
+                ;(activity as any).isQuiz = isQuiz
 
                 const isTokenMissing = !this.bot.requestToken || this.bot.rewardsVersion === 'modern'
 
                 this.bot.logger.debug(
                     this.bot.isMobile,
                     'ACTIVITY',
-                    `Processing | title="${activity.title}" | type=${type} | tokenMissing=${isTokenMissing}`
+                    `Processing | title="${activity.title}" | type=${type} | isQuiz=${isQuiz} | tokenMissing=${isTokenMissing}`
                 )
 
                 if (
+                    !isTokenMissing &&
+                    !offerId.startsWith('dom_') &&
                     (type === 'quiz' || type.includes('trivia') || type.includes('poll') || type.includes('survey')) &&
                     !offerId.includes('dailyset')
                 ) {
@@ -1792,7 +2102,7 @@ export class Workers {
                 } else if (name.includes('exploreonbing')) {
                     await this.bot.activities.doSearchOnBing(activity, page)
                 } else {
-                    // Default fallback: Selesaikan via Hybrid UrlReward solver (mencakup Daily Set URL, side quests 15 poin, explore cards, promo links, punchcard items)
+                    // Default fallback: Selesaikan via Hybrid UrlReward solver (mencakup Daily Set URL, side quests 15 poin, explore cards, promo links, punchcard items, serta web quiz)
                     await this.bot.activities.doUrlReward(activity, page, punchCard)
                 }
 
@@ -1847,13 +2157,32 @@ export class Workers {
     ): Promise<boolean> {
         if (!page || page.isClosed()) return false
 
-        const targetDashboard = (card.parentPromotion?.destinationUrl || 'https://rewards.bing.com').trim()
+        let targetDashboard = (card.parentPromotion?.destinationUrl || 'https://rewards.bing.com').trim()
+        if (
+            targetDashboard.toLowerCase().includes('/dashboard/envelope') ||
+            isLocalSystemProtocol(targetDashboard)
+        ) {
+            targetDashboard = 'https://rewards.bing.com'
+        }
         const currentUrl = page.url().toLowerCase()
         if (!currentUrl.includes('rewards.bing.com')) {
             await page
                 .goto(targetDashboard, { waitUntil: 'domcontentloaded', timeout: 15000 })
                 .catch(() => {})
             await this.bot.utils.wait(1500)
+        }
+
+        const childTitle = child.title || child.name || 'Punch Card Step'
+        const childDest = (child.destinationUrl || '').trim()
+        const resolved = resolvePunchCardExecutionUrl(childDest, childTitle, child.offerId)
+
+        if (resolved.action === 'skip-app') {
+            this.bot.logger.warn(
+                this.bot.isMobile,
+                'PUNCHCARD-GUARD',
+                `[PUNCHCARD-GUARD] Langkah "${childTitle}" adalah quest eksklusif aplikasi Bing App. Melewati navigasi browser.`
+            )
+            return false
         }
 
         const safeOfferId = (child.offerId || '').replace(/["\\]/g, '\\$&')
@@ -1864,7 +2193,11 @@ export class Workers {
             selectors.push(`[id*="${safeOfferId}"]`)
             selectors.push(`a[href*="${safeOfferId}"]`)
         }
-        if (child.destinationUrl) {
+        if (
+            child.destinationUrl &&
+            !child.destinationUrl.toLowerCase().includes('/dashboard/envelope') &&
+            !isLocalSystemProtocol(child.destinationUrl)
+        ) {
             try {
                 const parsed = new URL(child.destinationUrl)
                 const safePath = parsed.pathname.replace(/["\\]/g, '\\$&')
@@ -1897,6 +2230,31 @@ export class Workers {
                     await this.bot.utils.wait(2000)
                 }
                 return true
+            }
+        }
+
+        // Jika selector elemen tidak ditemukan di halaman dashboard, langsung eksekusi navigasi ke resolved URL
+        if (resolved.url) {
+            try {
+                const logLabel = resolved.action === 'search' ? '[PUNCHCARD-SEARCH]' : '[PUNCHCARD-AUTO]'
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'PUNCHCARD',
+                    `${logLabel} Navigasi langsung ke langkah aktif (${resolved.action}): ${resolved.url}`
+                )
+                const newPage = await page.context().newPage()
+                this.bot.accountScope?.trackPage(newPage)
+                await newPage.goto(resolved.url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
+                await this.bot.utils.wait(3000)
+                await newPage.close().catch(() => {})
+                this.bot.accountScope?.untrackPage(newPage)
+                return true
+            } catch (err) {
+                this.bot.logger.warn(
+                    this.bot.isMobile,
+                    'PUNCHCARD',
+                    `[PUNCHCARD-AUTO] Direct step navigation failed: ${err}`
+                )
             }
         }
         return false

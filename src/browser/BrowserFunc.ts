@@ -4,6 +4,9 @@ import type { AxiosRequestConfig } from 'axios'
 import type { MicrosoftRewardsBot } from '../index'
 import { saveSessionData } from '../util/Load'
 import { AccountSessionStore } from '../runtime/session/AccountSessionStore'
+import { AccountSuspendedError, checkPageSuspension, isSuspensionContent } from './auth/SuspensionDetector'
+
+export { AccountSuspendedError }
 
 import type { Counters, DashboardData } from './../interface/DashboardData'
 import type { AppUserData } from '../interface/AppUserData'
@@ -12,6 +15,8 @@ import type { AppEarnablePoints, BrowserEarnablePoints, MissingSearchPoints } fr
 import type { AppDashboardData } from '../interface/AppDashBoardData'
 
 export default class BrowserFunc {
+    public static isGetUserInfoDeprecated: boolean = false
+    public cachedCounters?: Counters
     private bot: MicrosoftRewardsBot
 
     constructor(bot: MicrosoftRewardsBot) {
@@ -19,14 +24,112 @@ export default class BrowserFunc {
     }
 
     /**
+     * Map AppDashboardData from DAPI to DashboardData
+     */
+    public mapAppDataToDashboard(appData: AppDashboardData): DashboardData | null {
+        if (!appData?.response) return null
+        const balance = appData.response.balance ?? 0
+        const rawPromos = appData.response.promotions ?? []
+        
+        const dailySetItems: any[] = []
+        const morePromos: any[] = []
+
+        for (const p of rawPromos) {
+            const attrs = p.attributes || {}
+            const offerId = (attrs.offerid || p.name || '').toLowerCase()
+            const title = attrs.title || p.name || ''
+            const rawPointMax = attrs.pointmax || attrs.points
+            const rawPointProgress = attrs.pointprogress
+            
+            const isInternalInfo = offerId.endsWith('_info') ||
+                                   offerId.includes('user_') ||
+                                   offerId.includes('redeem_') ||
+                                   offerId.includes('level_') ||
+                                   offerId.includes('streak') ||
+                                   offerId.includes('checkin') ||
+                                   offerId.includes('readarticle') ||
+                                   offerId.includes('appinstall') ||
+                                   offerId.includes('appmigration') ||
+                                   offerId.includes('trialuser') ||
+                                   offerId.includes('activation') ||
+                                   offerId.includes('exempt')
+
+            if (isInternalInfo || !rawPointMax) {
+                continue
+            }
+
+            const pointProgress = parseInt(rawPointProgress || '0', 10)
+            const pointProgressMax = parseInt(rawPointMax, 10)
+            if (isNaN(pointProgressMax) || pointProgressMax <= 0) continue
+
+            const complete = attrs.complete === 'True' || attrs.complete === 'true' || pointProgress >= pointProgressMax
+            const destinationUrl = attrs.destination_url || attrs.url || 'https://rewards.bing.com'
+            const promotionType = attrs.type || 'urlreward'
+
+            const promoObj = {
+                title,
+                destinationUrl,
+                pointProgressMax,
+                pointProgress,
+                complete,
+                offerId: attrs.offerid || p.name,
+                promotionType
+            }
+
+            if (offerId.includes('dailyset') || offerId.includes('daily_set') || offerId.includes('child_offer')) {
+                dailySetItems.push(promoObj)
+            } else {
+                morePromos.push(promoObj)
+            }
+        }
+
+        if (dailySetItems.length > 0 || morePromos.length > 0 || balance > 0) {
+            return {
+                userStatus: {
+                    availablePoints: balance,
+                    counters: {
+                        pcSearch: [{ pointProgress: 0, pointProgressMax: 90 }],
+                        mobileSearch: [{ pointProgress: 0, pointProgressMax: 60 }]
+                    }
+                },
+                dailySetPromotions: {
+                    [new Date().toISOString().split('T')[0] as string]: dailySetItems
+                },
+                morePromotions: morePromos,
+                promotionalItems: [],
+                punchCards: []
+            } as unknown as DashboardData
+        }
+        return null
+    }
+
+    /**
      * Fetch user desktop dashboard data
      * @returns {DashboardData} Object of user bing rewards dashboard data
      */
     async getDashboardData(): Promise<DashboardData> {
-        const maxAttempts = 3
+        const maxAttempts = 2
+        const startTime = Date.now()
+        const hardCapMs = 28000
 
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            if (Date.now() - startTime >= hardCapMs) break
+
             const activePage = this.bot.mainMobilePage || this.bot.mainDesktopPage
+
+            if (activePage && !activePage.isClosed()) {
+                const suspension = await checkPageSuspension(activePage)
+                if (suspension.isSuspended) {
+                    const accountEmail = this.bot.activeAccount?.email || 'unknown'
+                    this.bot.logger.error(
+                        this.bot.isMobile,
+                        'ACCOUNT-SUSPENDED',
+                        `🚨 [ACCOUNT-SUSPENDED] Akun ${accountEmail} TERBUKTI DITANGGUHKAN (BANNED) oleh Microsoft!`
+                    )
+                    throw new AccountSuspendedError(accountEmail, suspension.reason)
+                }
+            }
+
             let liveCookies: Cookie[] = []
             if (activePage && !activePage.isClosed()) {
                 liveCookies = await activePage.context().cookies().catch(() => [])
@@ -40,172 +143,133 @@ export default class BrowserFunc {
                     await activePage.waitForSelector('section#dailyset, [data-bi-area*="DailySet"], .c-card, [class*="card"]', { timeout: 3000 }).catch(() => {})
 
                     const inPageData = await activePage.evaluate(async () => {
+                        let timeoutId: any
                         try {
-                            const res = await fetch('/api/getuserinfo?type=1', { credentials: 'include' }).catch(() => fetch('/api/getuserinfo', { credentials: 'include' }))
+                            const controller = new AbortController()
+                            timeoutId = setTimeout(() => controller.abort(), 8000)
+                            const res = await fetch('/api/getuserinfo?type=1', {
+                                credentials: 'include',
+                                signal: controller.signal
+                            }).catch(() => fetch('/api/getuserinfo', {
+                                credentials: 'include',
+                                signal: controller.signal
+                            }))
                             const json = await res.json()
                             return json?.dashboard || (window as any).dashboard || null
-                        } catch { return (window as any).dashboard || null }
+                        } catch {
+                            return (window as any).dashboard || null
+                        } finally {
+                            if (timeoutId) clearTimeout(timeoutId)
+                        }
                     }).catch(() => null)
 
-                    const hasAppOnlyInPage = (inPageData?.morePromotions || []).some((p: any) =>
-                        (p.title || '').toLowerCase().includes('rewards app only') ||
-                        (p.offerId || '').toLowerCase().includes('rewardsapp_offer')
-                    )
-
-                    if (inPageData && inPageData.userStatus && (inPageData.dailySetPromotions || hasAppOnlyInPage || inPageData.punchCards)) {
-                        if (hasAppOnlyInPage || (inPageData.morePromotions?.length ?? 0) > 10) {
-                            return inPageData as DashboardData
-                        }
+                    if (inPageData && inPageData.userStatus) {
+                        return inPageData as DashboardData
                     }
                 } catch {}
             }
 
-            // 2. Coba via Axios API request dengan Desktop User-Agent agar tidak ter-strip oleh backend Microsoft
-            const apiEndpoints = [
-                'https://rewards.bing.com/api/getuserinfo?type=1',
-                'https://rewards.bing.com/api/getuserinfo'
-            ]
+            // 2. Coba via Axios API request dengan Desktop User-Agent (hanya jika endpoint belum terdeteksi 404 deprecated)
+            if (!BrowserFunc.isGetUserInfoDeprecated && (Date.now() - startTime < hardCapMs)) {
+                const apiEndpoints = [
+                    'https://rewards.bing.com/api/getuserinfo?type=1',
+                    'https://rewards.bing.com/api/getuserinfo'
+                ]
 
-            for (const endpoint of apiEndpoints) {
+                // Sinkronkan cookie terbaru dari activePage jika ada
+                if (activePage && !activePage.isClosed()) {
+                    const freshCookies = await activePage.context().cookies().catch(() => [])
+                    if (freshCookies.length > 0) {
+                        liveCookies = freshCookies
+                    }
+                }
+                const reqCookies = liveCookies.length > 0 ? liveCookies : activeCookies
+
+                for (const endpoint of apiEndpoints) {
+                    if (Date.now() - startTime >= hardCapMs) break
+
+                    try {
+                        const request: AxiosRequestConfig = {
+                            url: endpoint,
+                            method: 'GET',
+                            timeout: 10000,
+                            'axios-retry': {
+                                retries: 1
+                            },
+                            headers: {
+                                ...(this.bot.fingerprint?.headers ?? {}),
+                                'User-Agent':
+                                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0',
+                                'sec-ch-ua-mobile': '?0',
+                                'sec-ch-ua-platform': '"Windows"',
+                                Cookie: this.buildCookieHeader(reqCookies, [
+                                    'bing.com',
+                                    'live.com',
+                                    'microsoftonline.com'
+                                ]),
+                                Referer: 'https://rewards.bing.com/',
+                                Origin: 'https://rewards.bing.com'
+                            }
+                        }
+
+                        const response = await this.bot.axios.request(request)
+
+                        if (response.data?.dashboard && response.data.dashboard.userStatus) {
+                            return response.data.dashboard as DashboardData
+                        }
+                    } catch (error: any) {
+                        if (error?.response?.status === 404) {
+                            BrowserFunc.isGetUserInfoDeprecated = true
+                            break
+                        }
+                    }
+                }
+            }
+
+            // 3. Coba parsing script tag dari HTML dashboard
+            if (Date.now() - startTime < hardCapMs) {
                 try {
                     const request: AxiosRequestConfig = {
-                        url: endpoint,
+                        url: this.bot.config.baseURL,
                         method: 'GET',
-                        timeout: 10000,
+                        timeout: 5000,
                         headers: {
                             ...(this.bot.fingerprint?.headers ?? {}),
-                            'User-Agent':
-                                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0',
-                            'sec-ch-ua-mobile': '?0',
-                            'sec-ch-ua-platform': '"Windows"',
-                            Cookie: this.buildCookieHeader(activeCookies, [
-                                'bing.com',
-                                'live.com',
-                                'microsoftonline.com'
-                            ]),
+                            Cookie: this.buildCookieHeader(activeCookies),
                             Referer: 'https://rewards.bing.com/',
                             Origin: 'https://rewards.bing.com'
                         }
                     }
 
                     const response = await this.bot.axios.request(request)
+                    const match = response.data.match(/var\s+dashboard\s*=\s*({.*?});/s)
 
-                    if (response.data?.dashboard && response.data.dashboard.userStatus) {
-                        return response.data.dashboard as DashboardData
-                    }
-                } catch (error) {
-                    // Ignore 404 silently on deprecated direct API endpoints
-                }
-            }
-
-            // 3. Coba parsing script tag dari HTML dashboard
-            try {
-                const request: AxiosRequestConfig = {
-                    url: this.bot.config.baseURL,
-                    method: 'GET',
-                    timeout: 5000,
-                    headers: {
-                        ...(this.bot.fingerprint?.headers ?? {}),
-                        Cookie: this.buildCookieHeader(activeCookies),
-                        Referer: 'https://rewards.bing.com/',
-                        Origin: 'https://rewards.bing.com'
-                    }
-                }
-
-                const response = await this.bot.axios.request(request)
-                const match = response.data.match(/var\s+dashboard\s*=\s*({.*?});/s)
-
-                if (match?.[1]) {
-                    const parsed = JSON.parse(match[1]) as DashboardData
-                    if (parsed?.userStatus) {
-                        return parsed
-                    }
-                }
-            } catch {}
-
-            // 4. Fallback Terakhir: Adaptasi dari Mobile App API (dengan pemetaan promosi lengkap)
-            if (this.bot.accessToken) {
-                try {
-                    const appData = await this.getAppDashboardData()
-                    if (appData?.response) {
-                        const balance = appData.response.balance ?? 0
-                        const rawPromos = appData.response.promotions ?? []
-                        
-                        const dailySetItems: any[] = []
-                        const morePromos: any[] = []
-
-                        for (const p of rawPromos) {
-                            const attrs = p.attributes || {}
-                            const offerId = (attrs.offerid || p.name || '').toLowerCase()
-                            const title = attrs.title || p.name || ''
-                            const rawPointMax = attrs.pointmax || attrs.points
-                            const rawPointProgress = attrs.pointprogress
-                            
-                            const isInternalInfo = offerId.endsWith('_info') ||
-                                                   offerId.includes('user_') ||
-                                                   offerId.includes('redeem_') ||
-                                                   offerId.includes('level_') ||
-                                                   offerId.includes('streak') ||
-                                                   offerId.includes('checkin') ||
-                                                   offerId.includes('readarticle') ||
-                                                   offerId.includes('appinstall') ||
-                                                   offerId.includes('appmigration') ||
-                                                   offerId.includes('trialuser') ||
-                                                   offerId.includes('activation') ||
-                                                   offerId.includes('exempt')
-
-                            if (isInternalInfo || !rawPointMax) {
-                                continue
-                            }
-
-                            const pointProgress = parseInt(rawPointProgress || '0', 10)
-                            const pointProgressMax = parseInt(rawPointMax, 10)
-                            if (isNaN(pointProgressMax) || pointProgressMax <= 0) continue
-
-                            const complete = attrs.complete === 'True' || attrs.complete === 'true' || pointProgress >= pointProgressMax
-                            const destinationUrl = attrs.destination_url || attrs.url || 'https://rewards.bing.com'
-                            const promotionType = attrs.type || 'urlreward'
-
-                            const promoObj = {
-                                title,
-                                destinationUrl,
-                                pointProgressMax,
-                                pointProgress,
-                                complete,
-                                offerId: attrs.offerid || p.name,
-                                promotionType
-                            }
-
-                            if (offerId.includes('dailyset') || offerId.includes('daily_set') || offerId.includes('child_offer')) {
-                                dailySetItems.push(promoObj)
-                            } else {
-                                morePromos.push(promoObj)
-                            }
-                        }
-
-                        if (dailySetItems.length > 0 || morePromos.length > 0 || balance > 0) {
-                            return {
-                                userStatus: {
-                                    availablePoints: balance,
-                                    counters: {
-                                        pcSearch: [{ pointProgress: 0, pointProgressMax: 90 }],
-                                        mobileSearch: [{ pointProgress: 0, pointProgressMax: 60 }]
-                                    }
-                                },
-                                dailySetPromotions: {
-                                    [new Date().toISOString().split('T')[0] as string]: dailySetItems
-                                },
-                                morePromotions: morePromos,
-                                promotionalItems: [],
-                                punchCards: []
-                            } as unknown as DashboardData
+                    if (match?.[1]) {
+                        const parsed = JSON.parse(match[1]) as DashboardData
+                        if (parsed?.userStatus) {
+                            return parsed
                         }
                     }
                 } catch {}
             }
 
-            if (attempt < maxAttempts) {
-                await this.bot.utils.wait(2000)
+            // 4. Fallback Terakhir: Adaptasi dari Mobile App API (dengan pemetaan promosi lengkap)
+            if (this.bot.accessToken) {
+                try {
+                    const appData = await this.getAppDashboardData()
+                    const mapped = this.mapAppDataToDashboard(appData)
+                    if (mapped) {
+                        return mapped
+                    }
+                } catch (err: any) {
+                    if (err instanceof AccountSuspendedError || err?.name === 'AccountSuspendedError') {
+                        throw err
+                    }
+                }
+            }
+
+            if (attempt < maxAttempts && Date.now() - startTime < hardCapMs) {
+                await this.bot.utils.wait(1500)
             }
         }
 
@@ -230,7 +294,25 @@ export default class BrowserFunc {
 
             const response = await this.bot.axios.request(request)
             return response.data as AppDashboardData
-        } catch (error) {
+        } catch (error: any) {
+            const status = error?.response?.status
+            if (status === 403 || status === 401) {
+                const activePage = this.bot.mainMobilePage || this.bot.mainDesktopPage
+                const accountEmail = this.bot.activeAccount?.email || 'unknown'
+                if (activePage && !activePage.isClosed()) {
+                    const pageContent = await activePage.content().catch(() => '')
+                    const currentUrl = activePage.url() || ''
+                    if (isSuspensionContent(pageContent, currentUrl)) {
+                        this.bot.logger.error(
+                            this.bot.isMobile,
+                            'ACCOUNT-SUSPENDED',
+                            `🚨 [ACCOUNT-SUSPENDED] Akun ${accountEmail} TERBUKTI DITANGGUHKAN (BANNED) oleh Microsoft!`
+                        )
+                        throw new AccountSuspendedError(accountEmail, 'DAPI returned 401/403 and page confirmed suspension')
+                    }
+                }
+            }
+
             this.bot.logger.error(
                 this.bot.isMobile,
                 'GET-APP-DASHBOARD-DATA',
@@ -271,35 +353,54 @@ export default class BrowserFunc {
     /**
      * Get search point counters
      * @param {Page} [page] Optional active page to extract fast in-page counters from
+     * @param {boolean} [forceDapi=false] If true, bypasses in-memory cached counters
+     * @param {boolean} [isMobile] Context indicator
      */
-    async getSearchPoints(page?: Page): Promise<Counters> {
-        if (page && !page.isClosed() && page.url().includes('rewards.bing.com')) {
-            const inPageCounters = await page.evaluate(() => {
+    async getSearchPoints(page?: Page, forceDapi: boolean = false, isMobile?: boolean): Promise<Counters> {
+        if (!forceDapi && this.cachedCounters) {
+            return this.cachedCounters
+        }
+
+        if (page && !page.isClosed()) {
+            const inPageData = await page.evaluate(() => {
                 const dash = (window as any).dashboard
-                if (dash?.userStatus?.counters) return dash.userStatus.counters
+                if (dash?.userStatus?.counters) return { counters: dash.userStatus.counters }
+                const rc = document.getElementById('id_rc')?.innerText?.replace(/[^0-9]/g, '')
+                if (rc && !isNaN(Number(rc)) && Number(rc) > 0) return { rcPoints: Number(rc) }
                 return null
             }).catch(() => null)
 
-            if (inPageCounters) return inPageCounters
+            if (inPageData?.counters) {
+                this.cachedCounters = inPageData.counters
+                return inPageData.counters
+            }
+            if (inPageData?.rcPoints) {
+                this.bot.userData.currentPoints = inPageData.rcPoints
+            }
         }
 
         try {
             const dashboardData = await this.getDashboardData()
             const counters = dashboardData?.userStatus?.counters
             if (counters && (counters.pcSearch?.length || counters.mobileSearch?.length)) {
+                this.cachedCounters = counters
                 return counters
             }
             const dailySearchPts = Number(dashboardData?.userStatus?.levelInfo?.bingSearchDailyPoints || 0)
             if (dailySearchPts > 0) {
-                return {
+                const res = {
                     pcSearch: [{ pointProgress: 0, pointProgressMax: dailySearchPts }],
                     mobileSearch: []
                 } as unknown as Counters
+                this.cachedCounters = res
+                return res
             }
-            return counters || ({
+            const res = counters || ({
                 pcSearch: [{ pointProgress: 0, pointProgressMax: 60 }],
                 mobileSearch: []
             } as unknown as Counters)
+            this.cachedCounters = res
+            return res
         } catch {
             return {
                 pcSearch: [{ pointProgress: 0, pointProgressMax: 60 }],
@@ -328,9 +429,9 @@ export default class BrowserFunc {
     /**
      * Get total earnable points with web browser
      */
-    async getBrowserEarnablePoints(): Promise<BrowserEarnablePoints> {
+    async getBrowserEarnablePoints(preloadedData?: DashboardData): Promise<BrowserEarnablePoints> {
         try {
-            const data = await this.getDashboardData()
+            const data = preloadedData ?? await this.getDashboardData()
 
             const desktopSearchPoints =
                 data.userStatus.counters.pcSearch?.reduce(
@@ -523,23 +624,50 @@ export default class BrowserFunc {
                         const allCards = Array.from(document.querySelectorAll('div, section, .card, .p-card, .c-card, [class*="card"]'))
                         for (const el of allCards) {
                             const txt = (el.textContent || '').trim()
+                            if (txt.startsWith('+')) continue
                             if ((txt.includes('Available points') || txt.includes('Poin yang tersedia')) && !txt.includes('Ready to claim') && txt.length < 150) {
-                                const numbers = txt.replace(/Available points|Poin yang tersedia|Redeem|>|,/gi, ' ').match(/\b(\d+)\b/g)
-                                if (numbers && numbers.length > 0) {
-                                    const val = parseInt(numbers[0], 10)
-                                    if (val > 0) return val
+                                const cleaned = txt.replace(/Available points|Poin yang tersedia|Redeem|>/gi, '')
+                                const lines = cleaned.split('\n').map(s => s.trim()).filter(s => s && !s.startsWith('+'))
+                                for (const line of lines) {
+                                    const digitsOnly = line.replace(/[^\d]/g, '')
+                                    if (digitsOnly) {
+                                        const val = parseInt(digitsOnly, 10)
+                                        if (val > 0) return val
+                                    }
                                 }
                             }
                         }
 
                         // 2. Badge koin header Bing search (#id_rc atau #rh_meter)
-                        const rc = document.getElementById('id_rc')?.innerText?.replace(/[^0-9]/g, '')
-                        if (rc && !isNaN(Number(rc)) && Number(rc) > 0) return Number(rc)
-                        const flyout = document.querySelector('#rh_meter .rh_meter_points, .id_rh_pts, #id_rh, #id_h')?.textContent?.replace(/[^0-9]/g, '')
-                        if (flyout && !isNaN(Number(flyout)) && Number(flyout) > 0) return Number(flyout)
+                        const rcEl = document.getElementById('id_rc')
+                        const rcText = (rcEl?.innerText || '').trim()
+                        if (rcText && !rcText.startsWith('+')) {
+                            const rcDigits = rcText.replace(/[^\d]/g, '')
+                            if (rcDigits) {
+                                const rcVal = parseInt(rcDigits, 10)
+                                if (rcVal > 0) return rcVal
+                            }
+                        }
 
-                        const headerPts = document.querySelector('header [class*="points"], [data-bi-area*="points"], #userPoints, .user-points')?.textContent?.replace(/[^0-9]/g, '')
-                        if (headerPts && !isNaN(Number(headerPts)) && Number(headerPts) > 0) return Number(headerPts)
+                        const flyoutEl = document.querySelector('#rh_meter .rh_meter_points, .id_rh_pts, #id_rh, #id_h')
+                        const flyoutText = (flyoutEl?.textContent || '').trim()
+                        if (flyoutText && !flyoutText.startsWith('+')) {
+                            const flyoutDigits = flyoutText.replace(/[^\d]/g, '')
+                            if (flyoutDigits) {
+                                const flyoutVal = parseInt(flyoutDigits, 10)
+                                if (flyoutVal > 0) return flyoutVal
+                            }
+                        }
+
+                        const headerEl = document.querySelector('header [class*="points"], [data-bi-area*="points"], #userPoints, .user-points')
+                        const headerText = (headerEl?.textContent || '').trim()
+                        if (headerText && !headerText.startsWith('+')) {
+                            const headerDigits = headerText.replace(/[^\d]/g, '')
+                            if (headerDigits) {
+                                const headerVal = parseInt(headerDigits, 10)
+                                if (headerVal > 0) return headerVal
+                            }
+                        }
 
                         // 3. Fallback ke window.dashboard jika di SSR awal
                         const dashPoints = (window as any).dashboard?.userStatus?.availablePoints
@@ -566,27 +694,34 @@ export default class BrowserFunc {
         const rootBrowser = (browser as any).browser?.() || null
 
         try {
-            if (this.bot.accountScope) {
-                const saveResult = await AccountSessionStore.saveContextSession(
-                    browser,
-                    this.bot.accountScope,
-                    this.bot.isMobile ? 'mobile' : 'desktop'
-                )
-                this.bot.logger.debug(
-                    this.bot.isMobile,
-                    'CLOSE-BROWSER',
-                    `Unified session persistence completed (${saveResult.status})`
-                )
-            } else {
-                // Fallback for legacy standalone invocation without scope
-                const cookies = await browser.cookies()
-                this.bot.logger.debug(this.bot.isMobile, 'CLOSE-BROWSER', `Saving ${cookies.length} cookies.`)
-                await saveSessionData(this.bot.config.sessionPath, cookies, email, this.bot.isMobile)
+            const isClosed = typeof (browser as any).isClosed === 'function'
+                ? (browser as any).isClosed()
+                : (browser as any).__isClosed === true
+
+            if (!isClosed) {
+                if (this.bot.accountScope) {
+                    const saveResult = await AccountSessionStore.saveContextSession(
+                        browser,
+                        this.bot.accountScope,
+                        this.bot.isMobile ? 'mobile' : 'desktop'
+                    )
+                    this.bot.logger.debug(
+                        this.bot.isMobile,
+                        'CLOSE-BROWSER',
+                        `Unified session persistence completed (${saveResult.status}${saveResult.status === 'failed' ? `: ${(saveResult as any).error}` : ''})`
+                    )
+                } else {
+                    // Fallback for legacy standalone invocation without scope
+                    const cookies = await browser.cookies()
+                    this.bot.logger.debug(this.bot.isMobile, 'CLOSE-BROWSER', `Saving ${cookies.length} cookies.`)
+                    await saveSessionData(this.bot.config.sessionPath, cookies, email, this.bot.isMobile)
+                }
             }
         } catch (error) {
             this.bot.logger.error(this.bot.isMobile, 'CLOSE-BROWSER', `Failed to save session: ${error}`)
         } finally {
             try {
+                (browser as any).__isClosed = true
                 await browser.close()
 
                 if (rootBrowser) {

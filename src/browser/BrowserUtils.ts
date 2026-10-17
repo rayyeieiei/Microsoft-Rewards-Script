@@ -117,11 +117,7 @@ export default class BrowserUtils {
 
             if ($('body.neterror').length) {
                 this.bot.logger.info(this.bot.isMobile, 'RELOAD-BAD-PAGE', 'Bad page detected, reloading!')
-                try {
-                    await page.reload({ waitUntil: 'load' })
-                } catch {
-                    await page.reload().catch(() => {})
-                }
+                await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
                 return true
             } else {
                 return false

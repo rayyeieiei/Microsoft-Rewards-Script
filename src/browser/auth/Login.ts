@@ -8,10 +8,14 @@ import { EmailLogin } from './methods/EmailLogin'
 import { PasswordlessLogin } from './methods/PasswordlessLogin'
 import { TotpLogin } from './methods/Totp2FALogin'
 import { CodeLogin } from './methods/GetACodeLogin'
-import { RecoveryLogin } from './methods/RecoveryEmailLogin'
+import { RecoveryLogin } from './LoginRecovery'
 import { promiseAny } from '../../runtime/BrowserOperationGuard'
+import { autoEnrollRewards } from '../../functions/Onboarding'
 
 import type { Account } from '../../interface/Account'
+import { AccountSuspendedError, checkPageSuspension } from './SuspensionDetector'
+
+export { AccountSuspendedError }
 
 type LoginState =
     | 'EMAIL_INPUT'
@@ -33,6 +37,7 @@ type LoginState =
     | 'UNKNOWN'
     | 'CHROMEWEBDATA_ERROR'
     | 'TOO_MANY_REQUESTS'
+    | 'TOU_PROMPT'
 
 export class Login {
     emailLogin: EmailLogin
@@ -101,12 +106,23 @@ export class Login {
 
             await page
                 .goto('https://rewards.bing.com/createuser?idru=%2F&userScenarioId=anonsignin', {
-                    waitUntil: 'domcontentloaded'
+                    waitUntil: 'domcontentloaded',
+                    timeout: 15000
                 })
                 .catch(() => {})
             await this.bot.utils.wait(2000)
             await this.bot.browser.utils.reloadBadPage(page)
             await this.bot.browser.utils.disableFido(page)
+
+            const initialSuspension = await checkPageSuspension(page)
+            if (initialSuspension.isSuspended) {
+                this.bot.logger.error(
+                    this.bot.isMobile,
+                    'ACCOUNT-SUSPENDED',
+                    `🚨 [ACCOUNT-SUSPENDED] Akun ${account.email} TERBUKTI DITANGGUHKAN (BANNED) oleh Microsoft!`
+                )
+                throw new AccountSuspendedError(account.email, initialSuspension.reason)
+            }
 
             const maxIterations = 25
             let iteration = 0
@@ -120,14 +136,39 @@ export class Login {
                 this.bot.logger.debug(this.bot.isMobile, 'LOGIN', `State check iteration ${iteration}/${maxIterations}`)
 
                 // =========================================================================
-                // 🛠️ SAFE DEFENSIVE INTERCEPTOR (GLOBAL BYPASS TO PASSWORD SCREEN / FIDO)
+                // 🛠️ SAFE DEFENSIVE INTERCEPTOR (GLOBAL BYPASS TO PASSWORD SCREEN / FIDO / TOU)
                 // =========================================================================
                 try {
                     const currentUrl = page.url();
                     if (currentUrl.includes('consumers/fido/create') || currentUrl.includes('fido/create')) {
                         this.bot.logger.warn(this.bot.isMobile, 'LOGIN-BYPASS', '🛡️ Terdeteksi paksaan Register Passkey (FIDO)! Memaksa redirect ke halaman utama rewards...');
-                        await page.goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded' }).catch(() => {});
+                        await page.goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
                         await this.bot.utils.wait(2000);
+                    }
+
+                    const pageTitle = (await page.title().catch(() => '')).toLowerCase();
+                    if (currentUrl.includes('/tou/accrue') || currentUrl.includes('/tou') || pageTitle.includes('terms') || pageTitle.includes('ketentuan')) {
+                        this.bot.logger.info(this.bot.isMobile, 'LOGIN-TOU', '🛡️ [LOGIN-TOU] Menyetujui pembaruan Terms of Use Microsoft secara otomatis.');
+                        const confirmSelectors = [
+                            '#iNext',
+                            'input[type="submit"]',
+                            'button:has-text("Next")',
+                            'button:has-text("I accept")',
+                            'button:has-text("Continue")',
+                            'button:has-text("Setuju")',
+                            '#idSIButton9'
+                        ];
+                        for (const selector of confirmSelectors) {
+                            const btn = page.locator(selector).first();
+                            if (await btn.count() > 0 && await btn.isVisible().catch(() => false)) {
+                                await btn.click({ timeout: 5000 }).catch(async () => {
+                                    await this.bot.browser.utils.ghostClick(page, selector);
+                                });
+                                await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+                                await this.bot.utils.wait(2000);
+                                break;
+                            }
+                        }
                     }
 
                     const usePasswordBtn = page.locator('#idA_PWD').first()
@@ -164,7 +205,7 @@ export class Login {
                     sameStateCount++
                     if (sameStateCount >= 4) {
                         this.bot.logger.warn(this.bot.isMobile, 'LOGIN', `Stuck in state "${state}", refreshing page`)
-                        await page.reload({ waitUntil: 'domcontentloaded' })
+                        await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
                         await this.bot.utils.wait(3000)
                         sameStateCount = 0
                         previousState = 'UNKNOWN'
@@ -198,12 +239,44 @@ export class Login {
     }
 
     async getAppAccessToken(page: Page, email: string) {
+        await autoEnrollRewards(page, this.bot)
+        const currentUrl = page.url()
+        if (currentUrl.includes('rewards.bing.com/about') || currentUrl.includes('rewards.bing.com/welcome')) {
+            this.bot.logger.warn(
+                this.bot.isMobile,
+                'GET-APP-TOKEN',
+                `Akun masih berada di ${currentUrl} (belum enrolled). Melewati penukaran token DAPI untuk mencegah HTTP 401 Unauthorized.`
+            )
+            return ''
+        }
         this.bot.logger.info(this.bot.isMobile, 'GET-APP-TOKEN', 'Requesting mobile access token')
         return await new MobileAccessLogin(this.bot, page).get(email)
     }
 
     private async detectCurrentState(page: Page, account?: Account): Promise<LoginState> {
         await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {})
+
+        const suspension = await checkPageSuspension(page)
+        if (suspension.isSuspended) {
+            this.bot.logger.error(
+                this.bot.isMobile,
+                'ACCOUNT-SUSPENDED',
+                `🚨 [ACCOUNT-SUSPENDED] Akun ${account?.email || 'unknown'} TERBUKTI DITANGGUHKAN (BANNED) oleh Microsoft!`
+            )
+            throw new AccountSuspendedError(account?.email || 'unknown', suspension.reason)
+        }
+
+        const currentUrlLower = page.url().toLowerCase()
+        const currentTitleLower = (await page.title().catch(() => '')).toLowerCase()
+
+        if (
+            currentUrlLower.includes('/tou/accrue') ||
+            currentUrlLower.includes('/tou') ||
+            currentTitleLower.includes('terms') ||
+            currentTitleLower.includes('ketentuan')
+        ) {
+            return 'TOU_PROMPT'
+        }
 
         const url = new URL(page.url())
 
@@ -226,6 +299,7 @@ export class Login {
         if (url.hostname === 'rewards.bing.com' || url.hostname === 'account.microsoft.com' || url.hostname === 'www.bing.com') return 'LOGGED_IN'
 
         const stateChecks: Array<[string, LoginState]> = [
+            ['#iNext, form[action*="tou"], [data-testid*="tou" i]', 'TOU_PROMPT'],
             [this.selectors.errorAlert, 'ERROR_ALERT'],
             [this.selectors.passwordEntry, 'PASSWORD_INPUT'],
             [this.selectors.emailEntry, 'EMAIL_INPUT'],
@@ -252,7 +326,7 @@ export class Login {
         if (foundStates.length === 0) return 'UNKNOWN'
 
         const priorities: LoginState[] = [
-            'ACCOUNT_LOCKED', 'ERROR_ALERT', 'PASSKEY_VIDEO', 'PASSKEY_ERROR', 'KMSI_PROMPT',
+            'ACCOUNT_LOCKED', 'ERROR_ALERT', 'TOU_PROMPT', 'PASSKEY_VIDEO', 'PASSKEY_ERROR', 'KMSI_PROMPT',
             'PASSWORD_INPUT', 'EMAIL_INPUT', 'SIGN_IN_ANOTHER_WAY', 'SIGN_IN_ANOTHER_WAY_EMAIL',
             'RECOVERY_EMAIL_INPUT', 'GET_A_CODE', 'OTP_CODE_ENTRY', 'LOGIN_PASSWORDLESS', '2FA_TOTP'
         ]
@@ -279,7 +353,7 @@ export class Login {
 
                 const delayMs = this.bot.utils.stringToNumber(configLimit.delay)
                 setRateLimitCooldown(this.bot.config.sessionPath, delayMs)
-                await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {})
+                await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
                 await this.bot.utils.wait(2000)
                 return true
             }
@@ -408,6 +482,42 @@ export class Login {
                 throw new Error('Forced OTP verification checkpoint active with no automated bypass options atau waktu tunggu habis.')
             }
 
+            case 'TOU_PROMPT': {
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'LOGIN-TOU',
+                    '🛡️ [LOGIN-TOU] Menyetujui pembaruan Terms of Use Microsoft secara otomatis.',
+                    'green'
+                )
+                const confirmSelectors = [
+                    '#iNext',
+                    'input[type="submit"]',
+                    'button:has-text("Next")',
+                    'button:has-text("I accept")',
+                    'button:has-text("Continue")',
+                    'button:has-text("Setuju")',
+                    '#idSIButton9'
+                ]
+                for (const selector of confirmSelectors) {
+                    const btn = page.locator(selector).first()
+                    if (await btn.count() > 0 && await btn.isVisible().catch(() => false)) {
+                        await btn.click({ timeout: 5000 }).catch(async () => {
+                            await this.bot.browser.utils.ghostClick(page, selector)
+                        })
+                        await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {})
+                        await this.bot.utils.wait(2000)
+                        return true
+                    }
+                }
+                const submitBtn = page.locator('input[type="submit"], button[type="submit"]').first()
+                if (await submitBtn.count() > 0) {
+                    await submitBtn.click({ timeout: 5000 }).catch(() => {})
+                    await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {})
+                    await this.bot.utils.wait(2000)
+                }
+                return true
+            }
+
             case 'KMSI_PROMPT':
                 await this.bot.browser.utils.ghostClick(page, this.selectors.primaryButton)
                 return true
@@ -457,6 +567,23 @@ export class Login {
 
     private async getRewardsSession(page: Page) {
         await page.goto(`${this.bot.config.baseURL}?_=${Date.now()}`, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {})
+
+        const currentUrl = page.url()
+        if (currentUrl.includes('rewards.bing.com/about') || currentUrl.includes('rewards.bing.com/welcome')) {
+            await autoEnrollRewards(page, this.bot)
+        }
+
+        const suspension = await checkPageSuspension(page)
+        if (suspension.isSuspended) {
+            const accEmail = this.bot.activeAccount?.email || 'unknown'
+            this.bot.logger.error(
+                this.bot.isMobile,
+                'ACCOUNT-SUSPENDED',
+                `🚨 [ACCOUNT-SUSPENDED] Akun ${accEmail} TERBUKTI DITANGGUHKAN (BANNED) oleh Microsoft!`
+            )
+            throw new AccountSuspendedError(accEmail, suspension.reason)
+        }
+
         await promiseAny([
             page.waitForSelector(this.selectors.requestToken, { timeout: 10000 }),
             page.waitForSelector(this.selectors.requestTokenMeta, { timeout: 10000 }),

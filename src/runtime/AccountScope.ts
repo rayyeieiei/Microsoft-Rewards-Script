@@ -1,5 +1,5 @@
 import crypto from 'crypto'
-import path from 'path'
+import fs from 'fs'
 import type { PunchCardAttemptRecord } from '../functions/activities/ActivitySemantics'
 import { ResolvedActionSecret } from '../functions/UrlRewardActionResolver'
 import { resolveAccountIdentity } from './identity/AccountIdentity'
@@ -10,6 +10,9 @@ import type {
 } from './environment/BrowserEnvironmentTypes'
 import { AccountDisposer } from './AccountDisposer'
 import type { MicrosoftRewardsBot } from '../index'
+import { SessionPathResolver } from './session/SessionPathResolver'
+
+import { StickyDeviceProfile, type StickyDeviceProfileData } from './environment/StickyDeviceProfile'
 
 export type AccountScopeLifecycleState = 'active' | 'disposing' | 'disposed'
 
@@ -22,6 +25,14 @@ export class AccountScope {
     public readonly storagePaths: StorageStatePaths
     public readonly bot?: MicrosoftRewardsBot
     public readonly abortController: AbortController = new AbortController()
+    public readonly deviceProfile?: StickyDeviceProfileData
+
+    // Isolated runtime state
+    public cookies: { mobile: any[]; desktop: any[] } = { mobile: [], desktop: [] }
+    public mainMobilePage?: any
+    public mainDesktopPage?: any
+    public userData?: any
+    public bandwidthTracker: { totalBytes: number; blockedRequests: number } = { totalBytes: 0, blockedRequests: 0 }
 
     private _lifecycleState: AccountScopeLifecycleState = 'active'
     private _disposalPromise: Promise<void> | null = null
@@ -50,7 +61,8 @@ export class AccountScope {
         accountId: string,
         storagePaths: StorageStatePaths,
         ownershipIdentity: AccountOwnershipIdentity,
-        bot?: MicrosoftRewardsBot
+        bot?: MicrosoftRewardsBot,
+        deviceProfile?: StickyDeviceProfileData
     ) {
         this.accountKey = accountKey
         this.runId = runId
@@ -63,6 +75,7 @@ export class AccountScope {
             householdId: ownershipIdentity.householdId
         })
         this.bot = bot
+        this.deviceProfile = deviceProfile
     }
 
     /**
@@ -83,9 +96,20 @@ export class AccountScope {
             .slice(0, 32)
 
         const sessionFolder = options.bot?.config?.sessionPath ?? 'sessions'
-        const sessionDir = path.join(process.cwd(), 'browser', sessionFolder)
-        const mobilePath = path.join(sessionDir, `${storageKey}.mobile.storageState.json`)
-        const desktopPath = path.join(sessionDir, `${storageKey}.desktop.storageState.json`)
+        const sessionDir = SessionPathResolver.resolveBaseDir(sessionFolder)
+        const mobilePath = SessionPathResolver.getModernPath(sessionDir, identity.accountId, 'mobile')
+        const desktopPath = SessionPathResolver.getModernPath(sessionDir, identity.accountId, 'desktop')
+
+        // Ensure sessionDir and quarantineDir exist on disk at the beginning of the account lifecycle
+        try {
+            if (!fs.existsSync(sessionDir)) {
+                await fs.promises.mkdir(sessionDir, { recursive: true })
+            }
+            const quarantineDir = SessionPathResolver.getQuarantineDir(sessionDir)
+            if (!fs.existsSync(quarantineDir)) {
+                await fs.promises.mkdir(quarantineDir, { recursive: true })
+            }
+        } catch {}
 
         const storagePaths: StorageStatePaths = {
             storageKey,
@@ -100,6 +124,8 @@ export class AccountScope {
             householdId: options.account.householdId?.trim() || 'unassigned-household'
         }
 
+        const deviceProfile = await StickyDeviceProfile.resolveDeviceProfile(sessionDir, identity.accountId)
+
         const scope = new AccountScope(
             identity.displayAccount,
             runId,
@@ -107,7 +133,8 @@ export class AccountScope {
             identity.accountId,
             storagePaths,
             ownershipIdentity,
-            options.bot
+            options.bot,
+            deviceProfile
         )
 
         return scope
@@ -134,12 +161,15 @@ export class AccountScope {
             .digest('hex')
             .slice(0, 32)
 
-        const sessionDir = customSessionDir || path.join(process.cwd(), 'browser', 'sessions')
+        const sessionDir = customSessionDir || SessionPathResolver.resolveBaseDir()
+        const mobilePath = SessionPathResolver.getModernPath(sessionDir, accountId, 'mobile')
+        const desktopPath = SessionPathResolver.getModernPath(sessionDir, accountId, 'desktop')
+
         const storagePaths: StorageStatePaths = {
             storageKey,
             sessionDir,
-            mobilePath: path.join(sessionDir, `${storageKey}.mobile.storageState.json`),
-            desktopPath: path.join(sessionDir, `${storageKey}.desktop.storageState.json`)
+            mobilePath,
+            desktopPath
         }
 
         const ownershipIdentity: AccountOwnershipIdentity = {
@@ -148,13 +178,17 @@ export class AccountScope {
             householdId: customOwnership?.householdId || 'test-household-id'
         }
 
+        const deviceProfile = StickyDeviceProfile.resolveDeviceProfileSync(sessionDir, accountId)
+
         return new AccountScope(
             accountKey,
             resolvedRunId,
             scopeId,
             accountId,
             storagePaths,
-            ownershipIdentity
+            ownershipIdentity,
+            undefined,
+            deviceProfile
         )
     }
 
@@ -243,6 +277,11 @@ export class AccountScope {
             } catch (err) {
                 rejectPromise(err)
             } finally {
+                this.cookies = { mobile: [], desktop: [] }
+                this.mainMobilePage = undefined
+                this.mainDesktopPage = undefined
+                this.userData = undefined
+                this.bandwidthTracker = { totalBytes: 0, blockedRequests: 0 }
                 this._lifecycleState = 'disposed'
                 this._isDisposed = true
             }
@@ -295,11 +334,30 @@ export class AccountScope {
             }
             throw new Error(`Cannot attach ${kind} context to ${this._lifecycleState} AccountScope`)
         }
+        if (context) {
+            if (typeof context.isClosed !== 'function') {
+                context.isClosed = () => (context as any).__isClosed === true
+            }
+            if (typeof context.on === 'function') {
+                context.on('close', () => {
+                    (context as any).__isClosed = true
+                })
+            }
+        }
         if (kind === 'mobile') {
             this.mobileContext = context
         } else {
             this.desktopContext = context
         }
+    }
+
+    public isContextClosed(kind: 'mobile' | 'desktop'): boolean {
+        const ctx = this.getContext(kind)
+        if (!ctx) return true
+        if (typeof ctx.isClosed === 'function') {
+            return ctx.isClosed()
+        }
+        return (ctx as any).__isClosed === true
     }
 
     public getContext(kind: 'mobile' | 'desktop'): any | undefined {

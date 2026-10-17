@@ -7,14 +7,22 @@ export class SessionPathResolver {
     /**
      * Resolves the base session directory.
      * If customSessionPath is absolute (e.g. test fixture), resolves directly.
-     * Otherwise resolves relative to process.cwd()/browser/<customSessionPath || 'sessions'>.
+     * Otherwise resolves relative to process.cwd()/<customSessionPath || 'sessions'>.
      */
     public static resolveBaseDir(customSessionPath?: string): string {
-        if (customSessionPath && path.isAbsolute(customSessionPath)) {
-            return path.resolve(customSessionPath)
-        }
         const folder = customSessionPath || 'sessions'
-        return path.resolve(process.cwd(), 'browser', folder)
+        let baseDir: string
+        if (path.isAbsolute(folder)) {
+            baseDir = path.resolve(folder)
+        } else {
+            baseDir = path.resolve(process.cwd(), folder)
+        }
+        try {
+            if (!fs.existsSync(baseDir)) {
+                fs.mkdirSync(baseDir, { recursive: true })
+            }
+        } catch {}
+        return baseDir
     }
 
     /**
@@ -92,6 +100,17 @@ export class SessionPathResolver {
     ): string {
         const storageKey = this.getStorageKey(accountId)
         const fileName = `${storageKey}.${device}.storageState.json`
+        const targetPath = path.resolve(sessionDir, fileName)
+        this.assertContained(sessionDir, targetPath)
+        return targetPath
+    }
+
+    /**
+     * Resolves sticky device profile file path for an account.
+     */
+    public static getDeviceProfilePath(sessionDir: string, accountId: string): string {
+        const storageKey = this.getStorageKey(accountId)
+        const fileName = `${storageKey}.deviceProfile.json`
         const targetPath = path.resolve(sessionDir, fileName)
         this.assertContained(sessionDir, targetPath)
         return targetPath

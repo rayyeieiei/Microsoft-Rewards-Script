@@ -44,8 +44,8 @@ export class ClaimBonusPoints extends Workers {
             )
 
             const formData = new URLSearchParams({
-                timeZone: this.bot.userData.timezoneOffset,
-                __RequestVerificationToken: this.bot.requestToken
+                timeZone: String(this.bot.userData.timezoneOffset ?? '0'),
+                __RequestVerificationToken: this.bot.requestToken || ''
             })
 
             this.bot.logger.debug(
@@ -59,11 +59,14 @@ export class ClaimBonusPoints extends Workers {
                 method: 'POST',
                 headers: {
                     ...(this.bot.fingerprint?.headers ?? {}),
+                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                    'X-Requested-With': 'XMLHttpRequest',
+                    '__RequestVerificationToken': this.bot.requestToken || '',
                     Cookie: this.cookieHeader,
                     Referer: 'https://rewards.bing.com/',
                     Origin: 'https://rewards.bing.com'
                 },
-                data: formData
+                data: formData.toString()
             }
 
             this.bot.logger.debug(
@@ -79,6 +82,15 @@ export class ClaimBonusPoints extends Workers {
                 'CLAIM-BONUS-POINTS',
                 `Received ClaimBonusPoints response | status=${response.status}`
             )
+
+            if (response.status === 400) {
+                this.bot.logger.warn(
+                    this.bot.isMobile,
+                    'CLAIM-BONUS-POINTS',
+                    `ClaimBonusPoints returned HTTP 400 (no pending points or invalid verification token), skipping gracefully.`
+                )
+                return
+            }
 
             const newBalance = await this.bot.browser.func.getCurrentPoints()
             this.gainedPoints = newBalance - this.oldBalance
@@ -110,12 +122,21 @@ export class ClaimBonusPoints extends Workers {
             this.bot.logger.debug(this.bot.isMobile, 'CLAIM-BONUS-POINTS', `Waiting after ClaimBonusPoints`)
 
             await this.bot.utils.wait(this.bot.utils.randomDelay(5000, 10000))
-        } catch (error) {
-            this.bot.logger.error(
-                this.bot.isMobile,
-                'CLAIM-BONUS-POINTS',
-                `Error in doClaimBonusPoints | message=${error instanceof Error ? error.message : String(error)}`
-            )
+        } catch (error: any) {
+            const status = error?.response?.status || error?.status
+            if (status === 400 || (typeof error?.message === 'string' && error.message.includes('400'))) {
+                this.bot.logger.warn(
+                    this.bot.isMobile,
+                    'CLAIM-BONUS-POINTS',
+                    `ClaimBonusPoints returned HTTP 400 (no pending bonus or token expired). Skipping gracefully: ${error?.message || error}`
+                )
+            } else {
+                this.bot.logger.error(
+                    this.bot.isMobile,
+                    'CLAIM-BONUS-POINTS',
+                    `Error in doClaimBonusPoints | message=${error instanceof Error ? error.message : String(error)}`
+                )
+            }
         }
     }
 }

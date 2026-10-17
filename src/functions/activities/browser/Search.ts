@@ -7,6 +7,7 @@ import { Workers } from '../../Workers'
 import { Database } from '../../../util/Database'
 import { OrganicEngine } from './OrganicEngine'
 import { TopicalChainer } from './TopicalChainer'
+import { interruptibleWait } from '../../../runtime/BrowserOperationGuard'
 
 import type { QueryEngine } from '../../../interface/Config'
 
@@ -15,7 +16,8 @@ export class Search extends Workers {
     private organicEngine: OrganicEngine = new OrganicEngine(this.bot)
     private topicalChainer: TopicalChainer = new TopicalChainer(this.bot)
 
-    public async doSearch(data: DashboardData, page: Page, isMobile: boolean): Promise<number> {
+    public async doSearch(data: DashboardData, page: Page, isMobile: boolean, abortSignal?: AbortSignal): Promise<number> {
+        const signal = abortSignal || this.bot.accountScope?.abortController.signal
         const startBalance = Number(this.bot.userData.currentPoints ?? 0)
         let searchCount = 0
 
@@ -24,7 +26,10 @@ export class Search extends Workers {
         let totalGainedPoints = 0
 
         try {
-            let searchCounters: Counters = await this.bot.browser.func.getSearchPoints()
+            if (data?.userStatus?.counters) {
+                this.bot.browser.func.cachedCounters = JSON.parse(JSON.stringify(data.userStatus.counters))
+            }
+            let searchCounters: Counters = await this.bot.browser.func.getSearchPoints(page, false, isMobile)
             const missingPoints = this.bot.browser.func.missingSearchPoints(searchCounters, isMobile)
             let missingPointsTotal = missingPoints.totalPoints
 
@@ -80,11 +85,12 @@ export class Search extends Workers {
                 )
             }
 
-            if (this.bot.searchCooldownActive) {
+            const isDualMode = this.bot.config?.executionMode === 'dual'
+            if (this.bot.searchCooldownActive || (isDualMode && typeof (this.bot as any).isCircuitBreakerTriggered === 'function' && (this.bot as any).isCircuitBreakerTriggered())) {
                 this.bot.logger.warn(
                     isMobile,
                     'SEARCH-BING',
-                    `[COOLDOWN-DETECTED] Search cooldown is active for this account, skipping ${isMobile ? 'Mobile' : 'Desktop'} searches.`
+                    `[COOLDOWN-DETECTED] Search cooldown or circuit breaker active for this batch, skipping ${isMobile ? 'Mobile' : 'Desktop'} searches.`
                 )
                 return totalGainedPoints
             }
@@ -102,6 +108,24 @@ export class Search extends Workers {
             let isCooldownDetected = false
 
             for (let i = 0; i < queries.length; i++) {
+                if (signal?.aborted) {
+                    this.bot.logger.warn(
+                        isMobile,
+                        'SEARCH-BING',
+                        '[ABORT] Search aborted by signal.'
+                    )
+                    break
+                }
+
+                if (isDualMode && typeof (this.bot as any).isCircuitBreakerTriggered === 'function' && (this.bot as any).isCircuitBreakerTriggered()) {
+                    this.bot.logger.warn(
+                        isMobile,
+                        'SEARCH-BING',
+                        `[CIRCUIT-BREAKER] Circuit breaker active on this batch. Gracefully aborting search loop to protect account.`
+                    )
+                    break
+                }
+
                 const query = queries[i] as string
                 const trimmedQuery = query?.trim() ?? ''
                 if (trimmedQuery.length < 5 || !trimmedQuery.includes(' ')) {
@@ -113,11 +137,22 @@ export class Search extends Workers {
                     continue
                 }
 
+                const normalizedQ = trimmedQuery.replace(/\s+/g, ' ').toLowerCase()
+                if (QueryCore.sessionUsedQueries.has(normalizedQ)) {
+                    this.bot.logger.debug(
+                        isMobile,
+                        'SEARCH-BING',
+                        `Skipping query already used in session: "${trimmedQuery}"`
+                    )
+                    continue
+                }
+                QueryCore.sessionUsedQueries.add(normalizedQ)
+
                 searchCount++
 
-                searchCounters = await this.bingSearch(page, query, isMobile, searchCount)
+                searchCounters = await this.bingSearch(page, query, isMobile, searchCount, searchCounters, signal)
                 const newMissingPoints = this.bot.browser.func.missingSearchPoints(searchCounters, isMobile)
-                const newMissingPointsTotal = newMissingPoints.totalPoints
+                let newMissingPointsTotal = newMissingPoints.totalPoints
 
                 const pcProg = searchCounters.pcSearch?.[0] ? `${searchCounters.pcSearch[0].pointProgress}/${searchCounters.pcSearch[0].pointProgressMax}` : '0/0'
                 const edgeProg = searchCounters.pcSearch?.[1] && searchCounters.pcSearch[1].pointProgressMax > 0 ? ` (+${searchCounters.pcSearch[1].pointProgress}/${searchCounters.pcSearch[1].pointProgressMax} Edge)` : ''
@@ -135,9 +170,37 @@ export class Search extends Workers {
                     status: `Searching (${isMobile ? 'Mobile' : 'Desktop'})`
                 })
 
-                const gainedPoints = missingPointsTotal - newMissingPointsTotal
+                const counterDelta = missingPointsTotal - newMissingPointsTotal
+                let gainedPoints = 0
 
-                if (gainedPoints === 0) {
+                if (counterDelta < 0) {
+                    // Kenaikan kuota maksimal di tengah jalan (Level Up / Quota Leap: Level 1 -> Level 2)
+                    this.bot.logger.info(
+                        isMobile,
+                        'SEARCH-BING',
+                        `[LEVEL-UP] Search quota expanded mid-session (Level 1 -> Level 2 detected). Resetting remaining target from ${missingPointsTotal} to ${newMissingPointsTotal} points.`,
+                        'green'
+                    )
+                    gainedPoints = 3
+                    stagnantLoop = 0
+
+                    void Database.getInstance().recordActivity(
+                        currentEmail,
+                        isMobile ? 'SEARCH_MOBILE' : 'SEARCH_DESKTOP',
+                        gainedPoints
+                    )
+
+                    this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
+                    this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
+                    totalGainedPoints += gainedPoints
+
+                    this.bot.logger.info(
+                        isMobile,
+                        'SEARCH-BING',
+                        `gainedPoints=${gainedPoints} points | query="${query}" | remaining=${newMissingPointsTotal}`,
+                        'green'
+                    )
+                } else if (counterDelta === 0) {
                     stagnantLoop++
                     this.bot.logger.info(
                         isMobile,
@@ -153,7 +216,7 @@ export class Search extends Workers {
                         )
                         const verifyRes = await this.verifyPointsWithServer(page, isMobile)
                         if (verifyRes.verifiedGained && verifyRes.newBalance) {
-                            const actualGained = verifyRes.gained ?? 0
+                            const actualGained = Math.max(0, verifyRes.gained ?? 0)
                             this.bot.logger.info(
                                 isMobile,
                                 'SEARCH-BING',
@@ -171,12 +234,28 @@ export class Search extends Workers {
                                 `[COOLDOWN-DETECTED] Microsoft 15-Minute Search Cooldown aktif pada akun ini (Server verified points stagnant after ${stagnantLoopMax} queries). Aborting search loop for graceful hand-off.`
                             )
                             this.bot.searchCooldownActive = true
+                            const isDualMode = this.bot.config?.executionMode === 'dual'
+                            if (isDualMode && typeof (this.bot as any).triggerCircuitBreaker === 'function') {
+                                (this.bot as any).triggerCircuitBreaker(`15-Minute Search Cooldown aktif pada ${currentEmail}`)
+                            }
                             isCooldownDetected = true
                             break
                         }
                     }
                 } else {
                     stagnantLoop = 0
+                    if (counterDelta > 3) {
+                        this.bot.logger.warn(
+                            isMobile,
+                            'SEARCH-BING',
+                            `[COUNTER-ANOMALY] Terdeteksi lonjakan counter delta ${counterDelta} > 3! Mengunci penambahan poin sebesar baseline (+3 poin).`
+                        )
+                        gainedPoints = 3
+                        newMissingPointsTotal = Math.max(0, missingPointsTotal - 3)
+                    } else {
+                        gainedPoints = Math.max(0, counterDelta)
+                    }
+
                     void Database.getInstance().recordActivity(
                         currentEmail,
                         isMobile ? 'SEARCH_MOBILE' : 'SEARCH_DESKTOP',
@@ -269,10 +348,30 @@ export class Search extends Workers {
                     )
 
                     for (const query of queries) {
+                        if (signal?.aborted) {
+                            this.bot.logger.warn(
+                                isMobile,
+                                'SEARCH-BING-EXTRA',
+                                '[ABORT] Extra search aborted by signal.'
+                            )
+                            break
+                        }
+
                         const trimmedQuery = query?.trim() ?? ''
                         if (trimmedQuery.length < 5 || !trimmedQuery.includes(' ')) {
                             continue
                         }
+
+                        const normalizedQ = trimmedQuery.replace(/\s+/g, ' ').toLowerCase()
+                        if (QueryCore.sessionUsedQueries.has(normalizedQ)) {
+                            this.bot.logger.debug(
+                                isMobile,
+                                'SEARCH-BING-EXTRA',
+                                `Skipping query already used in session: "${trimmedQuery}"`
+                            )
+                            continue
+                        }
+                        QueryCore.sessionUsedQueries.add(normalizedQ)
 
                         this.bot.logger.info(
                             isMobile,
@@ -281,13 +380,35 @@ export class Search extends Workers {
                         )
 
                         searchCount++
-                        searchCounters = await this.bingSearch(page, query, isMobile, searchCount)
+                        searchCounters = await this.bingSearch(page, query, isMobile, searchCount, searchCounters, signal)
                         const newMissingPoints = this.bot.browser.func.missingSearchPoints(searchCounters, isMobile)
-                        const newMissingPointsTotal = newMissingPoints.totalPoints
+                        let newMissingPointsTotal = newMissingPoints.totalPoints
 
-                        const gainedPoints = missingPointsTotal - newMissingPointsTotal
+                        const counterDelta = missingPointsTotal - newMissingPointsTotal
+                        let gainedPoints = 0
 
-                        if (gainedPoints === 0) {
+                        if (counterDelta < 0) {
+                            // Kenaikan kuota maksimal di tengah jalan (Level Up / Quota Leap: Level 1 -> Level 2)
+                            this.bot.logger.info(
+                                isMobile,
+                                'SEARCH-BING-EXTRA',
+                                `[LEVEL-UP] Search quota expanded mid-session. Resetting remaining target from ${missingPointsTotal} to ${newMissingPointsTotal} points.`,
+                                'green'
+                            )
+                            gainedPoints = 3
+                            stagnantLoop = 0
+
+                            this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
+                            this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
+                            totalGainedPoints += gainedPoints
+
+                            this.bot.logger.info(
+                                isMobile,
+                                'SEARCH-BING-EXTRA',
+                                `gainedPoints=${gainedPoints} points | query="${query}" | remaining=${newMissingPointsTotal}`,
+                                'green'
+                            )
+                        } else if (counterDelta === 0) {
                             stagnantLoop++
                             this.bot.logger.info(
                                 isMobile,
@@ -303,7 +424,7 @@ export class Search extends Workers {
                                 )
                                 const verifyRes = await this.verifyPointsWithServer(page, isMobile)
                                 if (verifyRes.verifiedGained && verifyRes.newBalance) {
-                                    const actualGained = verifyRes.gained ?? 0
+                                    const actualGained = Math.max(0, verifyRes.gained ?? 0)
                                     this.bot.logger.info(
                                         isMobile,
                                         'SEARCH-BING-EXTRA',
@@ -321,12 +442,28 @@ export class Search extends Workers {
                                         `[COOLDOWN-DETECTED] Microsoft 15-Minute Search Cooldown aktif pada akun ini (Server verified points stagnant after ${stagnantLoopMax} queries). Aborting extra searches.`
                                     )
                                     this.bot.searchCooldownActive = true
+                                    const isDualMode = this.bot.config?.executionMode === 'dual'
+                                    if (isDualMode && typeof (this.bot as any).triggerCircuitBreaker === 'function') {
+                                        const targetAcc = this.bot.activeAccount?.email || this.bot.userData.userName
+                                        ;(this.bot as any).triggerCircuitBreaker(`15-Minute Search Cooldown aktif pada ${targetAcc}`)
+                                    }
                                     isCooldownDetected = true
                                     break
                                 }
                             }
                         } else {
                             stagnantLoop = 0
+                            if (counterDelta > 3) {
+                                this.bot.logger.warn(
+                                    isMobile,
+                                    'SEARCH-BING-EXTRA',
+                                    `[COUNTER-ANOMALY] Terdeteksi lonjakan counter delta ${counterDelta} > 3! Mengunci penambahan poin sebesar baseline (+3 poin).`
+                                )
+                                gainedPoints = 3
+                                newMissingPointsTotal = Math.max(0, missingPointsTotal - 3)
+                            } else {
+                                gainedPoints = Math.max(0, counterDelta)
+                            }
 
                             this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
                             this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
@@ -377,7 +514,14 @@ export class Search extends Workers {
         }
     }
 
-    private async bingSearch(searchPage: Page, query: string, isMobile: boolean, currentSearchCount: number) {
+    private async bingSearch(
+        searchPage: Page,
+        query: string,
+        isMobile: boolean,
+        currentSearchCount: number,
+        currentCounters?: Counters,
+        signal?: AbortSignal
+    ): Promise<Counters> {
         const maxAttempts = 5
         const refreshThreshold = 10 // Page gets sluggish after x searches?
 
@@ -420,9 +564,9 @@ export class Search extends Workers {
                 if (isReady) {
                     await searchBox.click({ timeout: 1500 }).catch(() => {})
                     await searchBox.fill('')
-                    // Pengetikan realistis dengan random jitter 70ms - 190ms per karakter
+                    // Pengetikan realistis dengan random jitter 25ms - 55ms per karakter
                     for (const char of query) {
-                        const charDelay = Math.floor(Math.random() * (190 - 70 + 1)) + 70
+                        const charDelay = Math.floor(Math.random() * (55 - 25 + 1)) + 25
                         await searchPage.keyboard.type(char, { delay: charDelay })
                     }
                     await searchPage.keyboard.press('Enter')
@@ -439,30 +583,87 @@ export class Search extends Workers {
                     `Submitted query to Bing | attempt=${i + 1}/${maxAttempts} | query="${query}"`
                 )
 
-                await this.bot.utils.wait(2000)
+                // Hapus jeda ganda redundan, satukan menjadi satu jeda natural 800–1200ms
+                const postSubmitDwell = Math.floor(Math.random() * (1200 - 800 + 1)) + 800
+                await interruptibleWait(postSubmitDwell, signal)
 
                 if (this.bot.config.searchSettings.organicSearch?.enabled) {
                     await this.organicEngine.simulateOrganicCTR(searchPage, isMobile)
                 } else {
                     if (this.bot.config.searchSettings.scrollRandomResults) {
-                        await this.bot.utils.wait(2000)
                         await this.randomScroll(searchPage, isMobile)
                     }
 
                     if (this.bot.config.searchSettings.clickRandomResults) {
-                        await this.bot.utils.wait(2000)
+                        await interruptibleWait(postSubmitDwell, signal)
                         await this.clickRandomLink(searchPage, isMobile)
                     }
                 }
 
-                await this.bot.utils.wait(
-                    this.bot.utils.randomDelay(
-                        this.bot.config.searchSettings.searchDelay.min,
-                        this.bot.config.searchSettings.searchDelay.max
-                    )
-                )
+                // Rentang searchDelay aman 10–14 detik (rata-rata 12 detik)
+                const rawMinDelay = this.bot.config.searchSettings.searchDelay?.min
+                    ? this.bot.utils.stringToNumber(this.bot.config.searchSettings.searchDelay.min)
+                    : 10000
+                const rawMaxDelay = this.bot.config.searchSettings.searchDelay?.max
+                    ? this.bot.utils.stringToNumber(this.bot.config.searchSettings.searchDelay.max)
+                    : 14000
+                const minDelay = Math.max(10000, Math.min(14000, rawMinDelay))
+                const maxDelay = Math.max(minDelay, Math.min(14000, rawMaxDelay))
+                await interruptibleWait(this.bot.utils.randomDelay(minDelay, maxDelay), signal)
 
-                const counters = await this.bot.browser.func.getSearchPoints(searchPage)
+                // In-page balance tracking (#id_rc atau #rh_meter)
+                const inPageBalance = await searchPage.evaluate(() => {
+                    const rc = document.getElementById('id_rc')?.innerText?.replace(/[^0-9]/g, '')
+                    if (rc && !isNaN(Number(rc)) && Number(rc) > 0) return Number(rc)
+                    const flyout = document.querySelector('#rh_meter .rh_meter_points, .id_rh_pts, #id_rh, #id_h')?.textContent?.replace(/[^0-9]/g, '')
+                    if (flyout && !isNaN(Number(flyout)) && Number(flyout) > 0) return Number(flyout)
+                    return null
+                }).catch(() => null)
+
+                if (inPageBalance && inPageBalance > Number(this.bot.userData.currentPoints ?? 0)) {
+                    this.bot.userData.currentPoints = inPageBalance
+                }
+
+                // Sinkronisasi DAPI berkala per 4 kueri saja
+                if (currentSearchCount % 4 === 0) {
+                    const counters = await this.bot.browser.func.getSearchPoints(searchPage, true, isMobile)
+                    this.bot.browser.func.cachedCounters = counters
+                    this.bot.logger.debug(
+                        isMobile,
+                        'SEARCH-BING',
+                        `Search counters after query (DAPI sync) | count=${currentSearchCount} | query="${query}"`
+                    )
+                    return counters
+                }
+
+                // Optimistic Counter Tracking (+3 poin per respon pencarian 200 OK)
+                if (currentCounters) {
+                    const updatedCounters = JSON.parse(JSON.stringify(currentCounters)) as Counters
+                    if (isMobile) {
+                        if (updatedCounters.mobileSearch?.[0]) {
+                            updatedCounters.mobileSearch[0].pointProgress = Math.min(
+                                updatedCounters.mobileSearch[0].pointProgressMax,
+                                (updatedCounters.mobileSearch[0].pointProgress || 0) + 3
+                            )
+                        }
+                    } else {
+                        if (updatedCounters.pcSearch?.[0]) {
+                            updatedCounters.pcSearch[0].pointProgress = Math.min(
+                                updatedCounters.pcSearch[0].pointProgressMax,
+                                (updatedCounters.pcSearch[0].pointProgress || 0) + 3
+                            )
+                        }
+                    }
+                    this.bot.browser.func.cachedCounters = updatedCounters
+                    this.bot.logger.debug(
+                        isMobile,
+                        'SEARCH-BING',
+                        `Search counters after query (Optimistic +3) | count=${currentSearchCount} | query="${query}"`
+                    )
+                    return updatedCounters
+                }
+
+                const counters = await this.bot.browser.func.getSearchPoints(searchPage, false, isMobile)
 
                 this.bot.logger.debug(
                     isMobile,
@@ -493,7 +694,7 @@ export class Search extends Workers {
                     `Retrying search | attempt=${i + 1}/${maxAttempts} | query="${query}"`
                 )
 
-                await this.bot.utils.wait(2000)
+                await interruptibleWait(2000, signal)
             }
         }
 
@@ -503,7 +704,7 @@ export class Search extends Workers {
             `Returning current search counters after failed retries | query="${query}"`
         )
 
-        return await this.bot.browser.func.getSearchPoints(searchPage)
+        return await this.bot.browser.func.getSearchPoints(searchPage, false, isMobile)
     }
 
     private async randomScroll(page: Page, isMobile: boolean) {
@@ -562,8 +763,11 @@ export class Search extends Workers {
 
     private async verifyPointsWithServer(
         page: Page,
-        _isMobile: boolean
+        isMobile: boolean
     ): Promise<{ verifiedGained: boolean; newBalance?: number; gained?: number }> {
+        if (!isMobile) {
+            return { verifiedGained: false }
+        }
         try {
             const ctx = page.context()
             if (ctx && ctx.request) {

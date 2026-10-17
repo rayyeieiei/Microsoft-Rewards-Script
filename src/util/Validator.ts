@@ -54,7 +54,7 @@ export const AppOnlyConfigSchema = z.object({
 })
 
 // Punch Card Execution Schema
-export const PunchCardExecutionModeSchema = z.enum(['observer', 'manual-handoff', 'browser-ui-experimental'])
+export const PunchCardExecutionModeSchema = z.enum(['observer', 'manual-handoff', 'browser-ui-experimental', 'auto'])
 
 export const PunchCardExecutionConfigSchema = z.object({
     mode: PunchCardExecutionModeSchema.default('manual-handoff'),
@@ -99,10 +99,15 @@ export const ConfigSchema = z.object({
     baseURL: z.string(),
     sessionPath: z.string(),
     headless: z.boolean(),
+    browserChannel: z.string().optional(),
+    channel: z.string().optional(),
+    browserPath: z.string().optional(),
     useDynamicWifiProxy: z.boolean().optional(),
     useLocalDashboard: z.boolean().optional(),
     useAdbIpRotation: z.boolean().optional(),
     useGhostCursor: z.boolean().optional(),
+    executionMode: z.enum(['sequential', 'dual', 'staggered']).optional().default('sequential'),
+    staggeredOffsetSeconds: z.number().nonnegative().optional().default(45),
     usePostgres: z.boolean().optional(),
     identityPolicy: IdentityPolicySchema,
     networkRecovery: NetworkRecoverySchema.optional(),
@@ -133,6 +138,15 @@ export const ConfigSchema = z.object({
         doReadToEarn: z.boolean()
     }),
     appOnlyRewards: AppOnlyConfigSchema.optional(),
+    punchCard: z
+        .union([
+            PunchCardExecutionConfigSchema,
+            z.object({
+                mode: PunchCardExecutionModeSchema,
+                maxChildrenPerRun: z.number().int().positive().optional()
+            })
+        ])
+        .optional(),
     punchCardExecution: PunchCardExecutionConfigSchema.optional().default({
         mode: 'manual-handoff',
         maxChildrenPerRun: 1
@@ -213,14 +227,13 @@ export function validateAccounts(data: unknown): Account[] {
 
 export function checkNodeVersion(): void {
     try {
-        const requiredVersion = pkg.engines?.node
-
-        if (!requiredVersion) {
-            console.warn('No Node.js version requirement found in package.json "engines" field.')
-            return
-        }
+        const requiredVersion = pkg.engines?.node || '>=20.0.0'
 
         if (!semver.satisfies(process.version, requiredVersion)) {
+            // Allow Node.js >= 20.0.0 for compatibility with LTS environments like Lubuntu
+            if (semver.satisfies(process.version, '>=20.0.0')) {
+                return
+            }
             console.error(`Current Node.js version ${process.version} does not satisfy requirement: ${requiredVersion}`)
             process.exit(1)
         }

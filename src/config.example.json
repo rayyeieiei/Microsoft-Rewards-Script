@@ -1,11 +1,14 @@
 {
     "baseURL": "https://rewards.bing.com",
     "sessionPath": "sessions",
-    "headless": false,
+    "headless": true,
+    "browserChannel": "msedge",
     "useDynamicWifiProxy": false,
-    "useLocalDashboard": false,
+    "useLocalDashboard": true,
     "useAdbIpRotation": false,
     "useGhostCursor": true,
+    "executionMode": "sequential",
+    "staggeredOffsetSeconds": 45,
     "usePostgres": false,
     "postgresConfig": {
         "host": "localhost",
@@ -28,6 +31,13 @@
         "doMobileSearch": true,
         "doDailyCheckIn": true,
         "doReadToEarn": true
+    },
+    "punchCard": {
+        "mode": "auto"
+    },
+    "punchCardExecution": {
+        "mode": "auto",
+        "maxChildrenPerRun": 1
     },
     "appOnlyRewards": {
         "enabled": true,
@@ -68,8 +78,8 @@
         "queryEngines": ["google", "wikipedia", "reddit", "local"],
         "searchResultVisitTime": "10sec",
         "searchDelay": {
-            "min": "30sec",
-            "max": "1min"
+            "min": "10sec",
+            "max": "14sec"
         },
         "readDelay": {
             "min": "30sec",

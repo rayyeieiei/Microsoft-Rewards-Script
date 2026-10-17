@@ -30,12 +30,22 @@ export interface AppOnlyManualRequiredEvent {
     detectedAt?: string
 }
 
+export interface BatchProgressState {
+    batchIndex: number
+    totalBatches: number
+    activeAccounts: string[]
+    staggerCountdown: number
+}
+
 export interface DashboardState {
     currentIP: string
     proxyMode: boolean
     useDynamicWifiProxy: boolean
     useAdbIpRotation: boolean
     useGhostCursor: boolean
+    executionMode: 'sequential' | 'dual'
+    staggeredOffsetSeconds: number
+    currentBatch: BatchProgressState | null
     isRunning: boolean
     startTime: number
     loadedAccounts: string[]
@@ -49,6 +59,9 @@ export let dashboardState: DashboardState = {
     useDynamicWifiProxy: false,
     useAdbIpRotation: true,
     useGhostCursor: true,
+    executionMode: 'dual',
+    staggeredOffsetSeconds: 45,
+    currentBatch: null,
     isRunning: false,
     startTime: 0,
     loadedAccounts: [],
@@ -499,6 +512,14 @@ const htmlPage = `<!DOCTYPE html>
             <div id="stat-active-ip" class="card-value highlight-blue">-</div>
         </div>
         <div class="card">
+            <div class="card-label">Active Batch</div>
+            <div id="stat-active-batch" class="card-value highlight-amber">Idle</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Execution Mode</div>
+            <div id="stat-execution-mode" class="card-value highlight-blue">Dual-Worker</div>
+        </div>
+        <div class="card">
             <div class="card-label">Total Runtime</div>
             <div id="stat-runtime" class="card-value highlight-amber">Idle</div>
         </div>
@@ -622,6 +643,17 @@ const htmlPage = `<!DOCTYPE html>
                         <span class="slider"></span>
                     </label>
                 </div>
+
+                <div class="toggle-item" style="margin-top:1.25rem;">
+                    <div>
+                        <strong>Execution Mode</strong>
+                        <div style="font-size:0.75rem; color:#94a3b8;" id="exec-mode-label">Dual-Worker Staggered (2 Workers - 45s Offset)</div>
+                    </div>
+                    <div style="display: flex; gap: 0.5rem;">
+                        <button id="btn-mode-seq" class="btn-secondary" style="font-size: 0.75rem; padding: 0.35rem 0.75rem; background-color: #374151;" onclick="setExecutionMode('sequential')">Sequential (1 Worker)</button>
+                        <button id="btn-mode-dual" class="btn-primary" style="font-size: 0.75rem; padding: 0.35rem 0.75rem;" onclick="setExecutionMode('dual')">Dual-Worker (45s)</button>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -656,6 +688,19 @@ const htmlPage = `<!DOCTYPE html>
             const email = document.getElementById('single-email').value.trim();
             if (email) {
                 sendControl('start-single', email);
+            }
+        }
+
+        async function setExecutionMode(mode) {
+            try {
+                await fetch('/api/control', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'set-execution-mode', mode })
+                });
+                fetchStatus();
+            } catch (e) {
+                console.error('Failed to set execution mode:', e);
             }
         }
 
@@ -835,6 +880,42 @@ const htmlPage = `<!DOCTYPE html>
                 document.getElementById('stat-points-collected').innerText = '+' + totalGained;
                 
                 document.getElementById('stat-active-ip').innerText = data.currentIP;
+
+                // Update batch indicator
+                const batchEl = document.getElementById('stat-active-batch');
+                if (batchEl) {
+                    if (data.currentBatch) {
+                        const b = data.currentBatch;
+                        const staggerText = b.staggerCountdown > 0 ? (' (Stagger: ' + b.staggerCountdown + 's)') : '';
+                        batchEl.innerText = 'Batch ' + (b.batchIndex + 1) + '/' + b.totalBatches + staggerText;
+                    } else {
+                        batchEl.innerText = isBotRunning ? 'In Progress' : 'Idle';
+                    }
+                }
+
+                // Update execution mode
+                const execEl = document.getElementById('stat-execution-mode');
+                const execLabel = document.getElementById('exec-mode-label');
+                const btnSeq = document.getElementById('btn-mode-seq');
+                const btnDual = document.getElementById('btn-mode-dual');
+                const isSeq = data.executionMode === 'sequential';
+
+                const offsetSec = data.staggeredOffsetSeconds || 45;
+                if (execEl) execEl.innerText = isSeq ? 'Sequential (1 Wk)' : ('Dual-Worker (' + offsetSec + 's)');
+                if (execLabel) execLabel.innerText = isSeq ? 'Sequential (1 Worker)' : ('Dual-Worker Staggered (2 Workers - ' + offsetSec + 's Offset)');
+                if (btnSeq && btnDual) {
+                    if (isSeq) {
+                        btnSeq.className = 'btn-primary';
+                        btnSeq.style.backgroundColor = '#10b981';
+                        btnDual.className = 'btn-secondary';
+                        btnDual.style.backgroundColor = '#374151';
+                    } else {
+                        btnSeq.className = 'btn-secondary';
+                        btnSeq.style.backgroundColor = '#374151';
+                        btnDual.className = 'btn-primary';
+                        btnDual.style.backgroundColor = '#10b981';
+                    }
+                }
 
                 // Update accounts table
                 const tbody = document.getElementById('accounts-table-body');
@@ -1247,6 +1328,10 @@ export class DashboardServer {
                             if (body.action === 'confirm-ip') {
                                 onIpConfirmCommand()
                             }
+                        } else if (body && body.action === 'set-execution-mode') {
+                            const mode = body.mode === 'sequential' ? 'sequential' : 'dual'
+                            updateDashboardGlobal({ executionMode: mode })
+                            void onControlCommand(body)
                         } else {
                             // Async run execution callbacks
                             void onControlCommand(body)
@@ -1262,7 +1347,9 @@ export class DashboardServer {
                         updateDashboardGlobal({
                             useDynamicWifiProxy: body.useDynamicWifiProxy ?? dashboardState.useDynamicWifiProxy,
                             useAdbIpRotation: body.useAdbIpRotation ?? dashboardState.useAdbIpRotation,
-                            useGhostCursor: body.useGhostCursor ?? dashboardState.useGhostCursor
+                            useGhostCursor: body.useGhostCursor ?? dashboardState.useGhostCursor,
+                            executionMode: body.executionMode ?? dashboardState.executionMode,
+                            staggeredOffsetSeconds: body.staggeredOffsetSeconds ?? dashboardState.staggeredOffsetSeconds
                         })
 
                         res.writeHead(200, { 'Content-Type': 'application/json' })

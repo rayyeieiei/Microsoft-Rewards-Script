@@ -1,4 +1,5 @@
 import { AppOnlyPolicy } from '../functions/activities/appOnly/AppOnlyTypes'
+export { AccountSuspendedError } from './Errors'
 
 export interface Account {
     id?: string

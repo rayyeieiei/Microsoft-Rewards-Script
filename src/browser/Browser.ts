@@ -1,8 +1,10 @@
+import fs from 'fs'
 import rebrowser, { BrowserContext } from 'patchright'
 import type { MicrosoftRewardsBot } from '../index'
 import { loadSessionData } from '../util/Load'
 import { BrowserEnvironmentPolicy } from '../runtime/environment/BrowserEnvironmentPolicy'
 import { AccountSessionStore } from '../runtime/session/AccountSessionStore'
+import { SessionPathResolver } from '../runtime/session/SessionPathResolver'
 import type { Account, AccountProxy } from '../interface/Account'
 
 export interface BrowserCreationResult {
@@ -70,6 +72,30 @@ class Browser {
         }
     }
 
+    private resolveEdgeExecutablePath(): string | undefined {
+        if (this.bot.config.browserPath && fs.existsSync(this.bot.config.browserPath)) {
+            return this.bot.config.browserPath
+        }
+
+        const candidatePaths: string[] = [
+            '/usr/bin/microsoft-edge',
+            '/usr/bin/microsoft-edge-stable',
+            '/opt/microsoft/msedge/msedge',
+            '/opt/microsoft/msedge/microsoft-edge',
+            '/var/lib/flatpak/exports/bin/com.microsoft.Edge',
+            '/snap/bin/edge'
+        ]
+
+        for (const candidate of candidatePaths) {
+            try {
+                if (fs.existsSync(candidate)) {
+                    return candidate
+                }
+            } catch {}
+        }
+        return undefined
+    }
+
     async createBrowser(account: Account): Promise<BrowserCreationResult> {
         let browser: any
 
@@ -90,12 +116,38 @@ class Browser {
                 }
             }
 
-            browser = await rebrowser.chromium.launch({
+            const edgeExecutable = this.resolveEdgeExecutablePath()
+            const edgeChannel = this.bot.config.browserChannel || this.bot.config.channel || 'msedge'
+
+            const launchOptions: any = {
                 headless: this.bot.config.headless === true,
-                channel: this.bot.config.headless ? undefined : 'chrome',
+                channel: edgeChannel,
                 args: [...Browser.BROWSER_ARGS],
                 proxy: proxyConfig
-            } as any)
+            }
+
+            if (this.bot.config.browserPath && fs.existsSync(this.bot.config.browserPath)) {
+                launchOptions.executablePath = this.bot.config.browserPath
+                delete launchOptions.channel
+            }
+
+            try {
+                browser = await rebrowser.chromium.launch(launchOptions)
+            } catch (primaryLaunchError: any) {
+                // Defensive fallback: if launching with channel failed, try with direct Linux Edge binary
+                if (edgeExecutable && fs.existsSync(edgeExecutable) && launchOptions.channel) {
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'BROWSER',
+                        `Channel '${edgeChannel}' launch failed (${primaryLaunchError?.message}), falling back to executablePath: ${edgeExecutable}`
+                    )
+                    delete launchOptions.channel
+                    launchOptions.executablePath = edgeExecutable
+                    browser = await rebrowser.chromium.launch(launchOptions)
+                } else {
+                    throw primaryLaunchError
+                }
+            }
 
             this.currentBrowser = browser
             this.isHealthy = true
@@ -178,15 +230,95 @@ class Browser {
             }
 
             // Resolve clean environment profile & context options (strict TLS, zero synthetic spoofing)
-            const profile = BrowserEnvironmentPolicy.resolveProfile(this.bot.isMobile ? 'mobile' : 'desktop')
+            const profile = BrowserEnvironmentPolicy.resolveProfile(
+                this.bot.isMobile ? 'mobile' : 'desktop',
+                undefined,
+                this.bot.isMobile ? scope?.deviceProfile : undefined,
+                account?.email
+            )
             const contextOptions = BrowserEnvironmentPolicy.toContextOptions(profile)
             if (storageStateForContext) {
+                // Filter origins agar HANYA meloloskan origin http: dan https: yang valid (buang chrome-error://, about:blank, atau origin rusak)
+                if (Array.isArray(storageStateForContext.origins)) {
+                    storageStateForContext.origins = storageStateForContext.origins.filter((o: any) => {
+                        try {
+                            if (!o || typeof o.origin !== 'string' || !o.origin.trim()) return false
+                            const u = new URL(o.origin)
+                            return u.protocol === 'http:' || u.protocol === 'https:'
+                        } catch {
+                            return false
+                        }
+                    })
+                }
                 contextOptions.storageState = storageStateForContext
             }
 
-            const context = await browser.newContext(contextOptions)
+            let context: any
+            try {
+                context = await browser.newContext(contextOptions)
+            } catch (ctxError: any) {
+                const errStr = String(ctxError?.message || ctxError)
+                const isStorageStateError =
+                    Boolean(contextOptions.storageState) &&
+                    (errStr.includes('storage state') ||
+                     errStr.includes('storageState') ||
+                     errStr.includes('Target page, context or browser has been closed'))
+
+                if (isStorageStateError) {
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'BROWSER',
+                        `⚠️ Inisialisasi storageState gagal (${errStr}). Memindahkan sesi korup ke karantina dan fallback ke clean context...`,
+                        'yellow'
+                    )
+                    if (scope) {
+                        const device = this.bot.isMobile ? 'mobile' : 'desktop'
+                        const modernPath = SessionPathResolver.getModernPath(
+                            scope.storagePaths.sessionDir,
+                            scope.identity.accountId,
+                            device
+                        )
+                        await AccountSessionStore.quarantineCorruptFile(
+                            scope.storagePaths.sessionDir,
+                            scope.identity.accountId,
+                            device,
+                            modernPath,
+                            `browser.newContext failed: ${errStr}`
+                        ).catch(() => {})
+                    }
+                    delete contextOptions.storageState
+                    context = await browser.newContext(contextOptions)
+                } else {
+                    throw ctxError
+                }
+            }
 
             context.setDefaultTimeout(this.bot.utils.stringToNumber(this.bot.config?.globalTimeout ?? 30000))
+
+            // Hardware Concurrency Clamping & WebDriver Stealth (Standardize baseline across all contexts)
+            await (context as any)
+                .addInitScript(() => {
+                    try {
+                        Object.defineProperty(navigator, 'hardwareConcurrency', {
+                            get: () => 8,
+                            configurable: true,
+                            enumerable: true
+                        })
+                    } catch {}
+
+                    try {
+                        Object.defineProperty(navigator, 'webdriver', {
+                            get: () => false,
+                            configurable: true
+                        })
+                    } catch {}
+                })
+                .catch(() => {})
+
+            // Mobile Stealth: Anti-Fingerprint Leak (Mask platform, WebGL vendor/renderer, and apply CDP Client Hints)
+            if (this.bot.isMobile) {
+                await BrowserEnvironmentPolicy.applyMobileStealth(context, scope?.deviceProfile)
+            }
 
             // ==================== ULTRA DATA SAVER (HEMAT KUOTA 80%-90%) ====================
             const routeHandler = (route: any) => {

@@ -26,14 +26,6 @@ export class DailyCheckIn extends Workers {
         )
 
         try {
-            let expectedPoints = 0
-            try {
-                const appEarnable = await this.bot.browser.func.getAppEarnablePoints()
-                if (appEarnable && appEarnable.checkIn > 0) {
-                    expectedPoints = appEarnable.checkIn
-                }
-            } catch {}
-
             // Helper to check if already claimed
             const isAlreadyClaimed = (res: any) => {
                 if (!res) return false
@@ -45,6 +37,89 @@ export class DailyCheckIn extends Workers {
                     bodyStr.includes('processed') ||
                     bodyStr.includes('completed')
                 )
+            }
+
+            // 1. Pengecekan status harian sebelum mengirim request via DAPI / Dashboard
+            let alreadyClaimedToday = false
+            let expectedPoints = 0
+
+            try {
+                const dapiRes = await this.bot.axios.request({
+                    url: 'https://prod.rewardsplatform.microsoft.com/dapi/me?channel=SAAndroid&options=613',
+                    method: 'GET',
+                    headers: {
+                        Authorization: `Bearer ${this.bot.accessToken}`,
+                        'User-Agent': UserAgentManager.DEFAULT_MOBILE_UA,
+                        'X-Rewards-Country': this.bot.userData.geoLocale || 'US',
+                        'X-Rewards-Language': 'en',
+                        'X-Rewards-ismobile': 'true'
+                    },
+                    validateStatus: () => true,
+                    timeout: 7000
+                })
+
+                // Sinkronisasi saldo jika oldBalance masih 0
+                const serverBal = Number(dapiRes.data?.response?.balance ?? 0)
+                if (this.oldBalance === 0 && serverBal > 0) {
+                    this.oldBalance = serverBal
+                    if (!this.bot.userData.currentPoints || this.bot.userData.currentPoints <= 0) {
+                        this.bot.userData.currentPoints = serverBal
+                    }
+                    if (!this.bot.userData.initialPoints || this.bot.userData.initialPoints <= 0) {
+                        this.bot.userData.initialPoints = serverBal
+                    }
+                }
+
+                const promotions: any[] = dapiRes.data?.response?.promotions || []
+                const checkInPromo = promotions.find((p: any) =>
+                    p?.attributes?.offerid === 'Gamification_Sapphire_DailyCheckIn' ||
+                    p?.attributes?.type === 'checkin'
+                )
+
+                if (checkInPromo) {
+                    const attrs = checkInPromo.attributes || {}
+                    const lastUpdated = attrs.last_updated ? new Date(attrs.last_updated) : null
+                    const now = new Date()
+                    const isClaimedDate = lastUpdated && !isNaN(lastUpdated.getTime()) && (
+                        (lastUpdated.getUTCFullYear() === now.getUTCFullYear() &&
+                         lastUpdated.getUTCMonth() === now.getUTCMonth() &&
+                         lastUpdated.getUTCDate() === now.getUTCDate()) ||
+                        (lastUpdated.getFullYear() === now.getFullYear() &&
+                         lastUpdated.getMonth() === now.getMonth() &&
+                         lastUpdated.getDate() === now.getDate())
+                    )
+                    const isComplete = attrs.complete === 'true' || attrs.complete === true
+
+                    const progress = parseInt(attrs.progress ?? '0')
+                    const checkInDay = (progress % 7) + 1
+                    const nextDayKey = `day_${checkInDay}_points`
+                    expectedPoints = parseInt(attrs[nextDayKey] ?? '10') || 10
+
+                    if (isClaimedDate || isComplete) {
+                        alreadyClaimedToday = true
+                    }
+                }
+            } catch {
+                try {
+                    const appEarnable = await this.bot.browser.func.getAppEarnablePoints()
+                    if (appEarnable) {
+                        if (appEarnable.checkIn > 0) {
+                            expectedPoints = appEarnable.checkIn
+                        } else {
+                            alreadyClaimedToday = true
+                        }
+                    }
+                } catch {}
+            }
+
+            if (alreadyClaimedToday) {
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'DAILY-CHECK-IN',
+                    '[DAILY-CHECK-IN] Daily Check-In untuk hari ini sudah selesai diklaim. Melewati.',
+                    'green'
+                )
+                return
             }
 
             // Try type 101 first
@@ -81,8 +156,30 @@ export class DailyCheckIn extends Workers {
 
             if (isSuccess) {
                 const rawServerBalance = Number(response?.data?.response?.balance ?? 0)
-                const gained = expectedPoints > 0 ? expectedPoints : (rawServerBalance > this.oldBalance ? (rawServerBalance - this.oldBalance) : 10)
-                const newBal = Number(this.bot.userData.currentPoints ?? this.oldBalance) + gained
+                let gained = 0
+
+                // Cegah kalkulasi delta balance jika oldBalance === 0:
+                // Jika saldo awal 0, perbarui nilai oldBalance dengan respon saldo resmi dari DAPI agar tidak mencatat penambahan poin abnormal
+                if (this.oldBalance === 0) {
+                    if (rawServerBalance > 0) {
+                        gained = expectedPoints > 0 ? expectedPoints : 10
+                        this.oldBalance = rawServerBalance
+                        if (!this.bot.userData.initialPoints || this.bot.userData.initialPoints <= 0) {
+                            this.bot.userData.initialPoints = Math.max(0, rawServerBalance - gained)
+                        }
+                    } else {
+                        gained = expectedPoints > 0 ? expectedPoints : 10
+                    }
+                } else {
+                    gained = expectedPoints > 0
+                        ? expectedPoints
+                        : (rawServerBalance > this.oldBalance ? (rawServerBalance - this.oldBalance) : 10)
+                }
+
+                const newBal = rawServerBalance > 0
+                    ? rawServerBalance
+                    : (Number(this.bot.userData.currentPoints ?? this.oldBalance) + gained)
+
                 this.bot.userData.currentPoints = newBal
                 this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gained
 
@@ -102,7 +199,7 @@ export class DailyCheckIn extends Workers {
                 this.bot.logger.info(
                     this.bot.isMobile,
                     'DAILY-CHECK-IN',
-                    'Daily Check-In already completed for today! Skipping.',
+                    '[DAILY-CHECK-IN] Daily Check-In untuk hari ini sudah selesai diklaim. Melewati.',
                     'green'
                 )
             } else {

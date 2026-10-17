@@ -6,6 +6,7 @@ import type { MicrosoftRewardsBot } from '../index'
 import { QueryEngine } from '../interface/Config'
 
 export class QueryCore {
+    public static sessionUsedQueries = new Set<string>()
     constructor(private bot: MicrosoftRewardsBot) {}
 
     async queryManager(
@@ -191,7 +192,7 @@ export class QueryCore {
             if (trimmed.length < 5 || !trimmed.includes(' ')) continue
 
             const norm = trimmed.replace(/\s+/g, ' ').toLowerCase()
-            if (seen.has(norm)) continue
+            if (seen.has(norm) || QueryCore.sessionUsedQueries.has(norm)) continue
 
             seen.add(norm)
             out.push(trimmed)
@@ -383,6 +384,10 @@ export class QueryCore {
             const request: AxiosRequestConfig = {
                 url: `https://wikimedia.org/api/rest_v1/metrics/pageviews/top/${langCode}.wikipedia/all-access/${yyyy}/${mm}/${dd}`,
                 method: 'GET',
+                timeout: 3000,
+                'axios-retry': {
+                    retries: 0
+                },
                 headers: {
                     ...(this.bot.fingerprint?.headers ?? {})
                 }

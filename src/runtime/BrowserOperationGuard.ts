@@ -1,4 +1,5 @@
 import type { Page, BrowserContext, Request, Response } from 'patchright'
+import { BrowserEnvironmentPolicy } from './environment/BrowserEnvironmentPolicy'
 
 export type BrowserOperationStage =
     | 'oauth-navigation'
@@ -406,6 +407,7 @@ export interface ManagedPageOptions {
     isMobile?: boolean
     defaultTimeoutMs?: number
     defaultNavTimeoutMs?: number
+    deviceProfile?: any
 }
 
 export async function createManagedPage(options: ManagedPageOptions): Promise<Page> {
@@ -414,11 +416,16 @@ export async function createManagedPage(options: ManagedPageOptions): Promise<Pa
         purpose,
         isMobile = false,
         defaultTimeoutMs = 15_000,
-        defaultNavTimeoutMs = 20_000
+        defaultNavTimeoutMs = 20_000,
+        deviceProfile
     } = options
 
     const page = await context.newPage()
     ;(page as any).__managedMetadata = { purpose, isMobile }
+
+    if (isMobile) {
+        await BrowserEnvironmentPolicy.applyClientHintsOverride(page, deviceProfile)
+    }
 
     try {
         if (typeof page.setDefaultTimeout === 'function') {
@@ -515,7 +522,8 @@ export async function recoverOwnerPage(deps: OwnerPageRecoveryDependencies): Pro
         context,
         accountScope: deps.accountScope,
         purpose: deps.isMobile ? 'recovered-main-mobile' : 'recovered-main-desktop',
-        isMobile: deps.isMobile
+        isMobile: deps.isMobile,
+        deviceProfile: deps.bot?.accountScope?.deviceProfile
     })
 
     if (deps.isMobile) {
@@ -538,4 +546,39 @@ export async function recoverOwnerPage(deps: OwnerPageRecoveryDependencies): Pro
     }
 
     return newPage
+}
+
+/**
+ * Automatically converts an ms-search URI (e.g. ms-search://search/?q=...) to an official Bing web search URL.
+ */
+export function convertMsSearchUri(rawUri: string, fallbackQuery: string = 'Microsoft Rewards'): string {
+    if (!rawUri || typeof rawUri !== 'string') {
+        return `https://www.bing.com/search?q=${encodeURIComponent(fallbackQuery)}&FORM=RWRD1`
+    }
+    const trimmed = rawUri.trim()
+    if (!trimmed.toLowerCase().startsWith('ms-search:')) {
+        return trimmed
+    }
+
+    let query = ''
+    try {
+        const dummy = trimmed.replace(/^ms-search:\/?\/?(search\/?\??)?/i, 'https://dummy.local/?')
+        const parsed = new URL(dummy)
+        query = parsed.searchParams.get('q') || ''
+    } catch {}
+
+    if (!query) {
+        const match = trimmed.match(/[?&]q=([^&]+)/i)
+        if (match && match[1]) {
+            try {
+                query = decodeURIComponent(match[1].replace(/\+/g, ' '))
+            } catch {
+                query = match[1]
+            }
+        }
+    }
+
+    const finalQuery = (query.trim() || fallbackQuery).trim()
+    const encodedQuery = encodeURIComponent(finalQuery).replace(/%20/g, '+')
+    return `https://www.bing.com/search?q=${encodedQuery}&FORM=RWRD1`
 }

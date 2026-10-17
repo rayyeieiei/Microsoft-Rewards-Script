@@ -76,7 +76,7 @@ export class DynamicOutboundProxy {
         this.logger.warn('main', 'NETWORK-GUARD', '=======================================================', 'yellow')
 
         try {
-            require('child_process').exec(`powershell -c (New-Object Media.SoundPlayer "C:\\Windows\\Media\\notify.wav").PlaySync();`);
+            process.stdout.write('\x07')
         } catch {}
 
         while (!ip) {
@@ -86,7 +86,7 @@ export class DynamicOutboundProxy {
 
         this.logger.info('main', 'NETWORK-GUARD', `🚀 SUKSES! Wi-Fi Terhubung Kembali! IP Baru: [ ${ip} ]`, 'green')
         try {
-            require('child_process').exec(`powershell -c (New-Object Media.SoundPlayer "C:\\Windows\\Media\\notify.wav").PlaySync();`);
+            process.stdout.write('\x07')
         } catch {}
 
         this.currentWifiIp = ip

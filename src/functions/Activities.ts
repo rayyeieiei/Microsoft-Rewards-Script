@@ -31,8 +31,8 @@ import type { Promotion } from '../interface/AppDashBoardData'
 export default class Activities {
     constructor(private bot: MicrosoftRewardsBot) {}
 
-    doSearch = async (data: DashboardData, page: Page, isMobile: boolean) =>
-        await new Search(this.bot).doSearch(data, page, isMobile)
+    doSearch = async (data: DashboardData, page: Page, isMobile: boolean, abortSignal?: AbortSignal) =>
+        await new Search(this.bot).doSearch(data, page, isMobile, abortSignal)
 
     doSearchOnBing = async (promotion: BasePromotion, page: Page) =>
         await new SearchOnBing(this.bot).doSearchOnBing(promotion, page)

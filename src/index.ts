@@ -11,7 +11,7 @@ import BrowserUtils from './browser/BrowserUtils'
 
 import { IpcLog, Logger } from './logging/Logger'
 import Utils from './util/Utils'
-import { loadAccounts, loadConfig } from './util/Load'
+import { loadAccounts, loadConfig, getActiveConfigFile } from './util/Load'
 import { checkNodeVersion } from './util/Validator'
 
 import { Login } from './browser/auth/Login'
@@ -30,15 +30,21 @@ import {
     registerIpConfirmCallback,
     registerManualQuestProvider
 } from './util/DashboardServer'
+import { AirplaneMode } from './util/AirplaneMode'
 import { ManualQuestQueue } from './runtime/manual/ManualQuestQueue'
 import { resolveAccountIdentity, validateUniqueAccountIdentities } from './runtime/identity/AccountIdentity'
 import { OnboardingEvidence } from './functions/onboarding/NewAccountOnboardingTypes'
-import { redactAccountKey } from './util/Redaction'
 import { DataSaverManager, mapResourceTypeToCategory } from './util/DataSaver'
 import { Database } from './util/Database'
 import { AccountScope } from './runtime/AccountScope'
 import { AccountDisposer } from './runtime/AccountDisposer'
 import { createManagedPage, recoverOwnerPage } from './runtime/BrowserOperationGuard'
+import { AccountSessionStore } from './runtime/session/AccountSessionStore'
+import { AccountSuspendedError, checkPageSuspension } from './browser/auth/SuspensionDetector'
+import { autoEnrollRewards } from './functions/Onboarding'
+import { UserAgentManager } from './browser/UserAgent'
+
+export { AccountSuspendedError }
 import crypto from 'crypto'
 import {
     validateOwnershipPolicy,
@@ -86,26 +92,63 @@ import type { DashboardData } from './interface/DashboardData'
 import type { AppDashboardData } from './interface/AppDashBoardData'
 import readline from 'readline'
 
-let manualIpConfirmResolver: (() => void) | null = null
+export let manualIpConfirmResolver: (() => void) | null = null
 
-function waitForUserConfirmation(): Promise<void> {
+export function chunkArrayBySize<T>(arr: T[], size: number): T[][] {
+    if (!arr || arr.length === 0) return []
+    const safeSize = Math.max(1, size)
+    const result: T[][] = []
+    for (let i = 0; i < arr.length; i += safeSize) {
+        result.push(arr.slice(i, i + safeSize))
+    }
+    return result
+}
+
+export function calculateDynamicDeadline(
+    estimatedQueries: number = 0,
+    basePreSearchMs: number = 2 * 60 * 1000,
+    remainingPoints?: number
+): number {
+    const isZeroPoints = (remainingPoints !== undefined && remainingPoints <= 0) || (estimatedQueries <= 0 && remainingPoints === 0)
+    if (isZeroPoints) {
+        return 5 * 60 * 1000
+    }
+    const dynamicDeadlineMs = Math.min(
+        25 * 60 * 1000,
+        Math.max(12 * 60 * 1000, basePreSearchMs + (estimatedQueries * 20000) + 4 * 60 * 1000)
+    )
+    return dynamicDeadlineMs
+}
+
+export function waitForManualIpConfirmation(): Promise<void> {
     return new Promise(resolve => {
-        manualIpConfirmResolver = resolve
+        let isResolved = false
 
         const rl = readline.createInterface({
             input: process.stdin,
             output: process.stdout
         })
 
+        const onConfirm = () => {
+            if (isResolved) return
+            isResolved = true
+            manualIpConfirmResolver = null
+            try {
+                rl.close()
+            } catch {}
+            resolve()
+        }
+
+        manualIpConfirmResolver = onConfirm
+
         rl.question('', () => {
-            rl.close()
-            if (manualIpConfirmResolver) {
-                const res = manualIpConfirmResolver
-                manualIpConfirmResolver = null
-                res()
-            }
+            onConfirm()
         })
     })
+}
+
+export function waitForUserConfirmation(): Promise<void> {
+    return waitForManualIpConfirmation()
 }
 
 interface ExecutionContext {
@@ -169,9 +212,53 @@ export class MicrosoftRewardsBot {
     public activities: Activities
     public browser: { func: BrowserFunc; utils: BrowserUtils }
 
-    public mainMobilePage!: Page
-    public mainDesktopPage!: Page
-    public userData: UserData
+    private _mainMobilePage?: Page
+    private _mainDesktopPage?: Page
+    public get mainMobilePage(): Page {
+        return this.accountScope?.mainMobilePage || this._mainMobilePage!
+    }
+    public set mainMobilePage(page: Page) {
+        if (this.accountScope) {
+            this.accountScope.mainMobilePage = page
+        }
+        this._mainMobilePage = page
+    }
+
+    public get mainDesktopPage(): Page {
+        return this.accountScope?.mainDesktopPage || this._mainDesktopPage!
+    }
+    public set mainDesktopPage(page: Page) {
+        if (this.accountScope) {
+            this.accountScope.mainDesktopPage = page
+        }
+        this._mainDesktopPage = page
+    }
+
+    private _userData: UserData
+    public get userData(): UserData {
+        return this.accountScope?.userData || this._userData
+    }
+    public set userData(data: UserData) {
+        if (this.accountScope) {
+            this.accountScope.userData = data
+        }
+        this._userData = data
+    }
+
+    public get currentPoints(): number {
+        return this.userData.currentPoints
+    }
+    public set currentPoints(points: number) {
+        this.userData.currentPoints = points
+    }
+
+    public get initialPoints(): number {
+        return this.userData.initialPoints
+    }
+    public set initialPoints(points: number) {
+        this.userData.initialPoints = points
+    }
+
     public rewardsVersion: 'legacy' | 'modern' = 'legacy'
     public get accessToken(): string {
         return this.accountScope ? this.accountScope.getDapiToken() : ''
@@ -183,7 +270,54 @@ export class MicrosoftRewardsBot {
         this.accountScope.setDapiToken(token)
     }
     public requestToken = ''
-    public cookies: { mobile: Cookie[]; desktop: Cookie[] }
+    private mobileTokenRefreshPromise: Promise<string> | null = null
+
+    public async refreshMobileAccessToken(page?: Page, email?: string): Promise<string> {
+        if (this.mobileTokenRefreshPromise) {
+            this.logger.debug(
+                this.isMobile,
+                'TOKEN-MUTEX',
+                'In-flight mobile access token refresh already in progress, deduplicating request...'
+            )
+            return this.mobileTokenRefreshPromise
+        }
+
+        const targetPage = page || this.mainMobilePage
+        const targetEmail = email || this.activeAccount?.email || ''
+
+        if (!targetPage || targetPage.isClosed()) {
+            this.logger.warn(
+                this.isMobile,
+                'TOKEN-MUTEX',
+                'Cannot refresh mobile access token: target page is missing or closed'
+            )
+            return ''
+        }
+
+        this.mobileTokenRefreshPromise = (async () => {
+            try {
+                const token = await this.login.getAppAccessToken(targetPage, targetEmail)
+                if (token) {
+                    this.accessToken = token
+                }
+                return token
+            } finally {
+                this.mobileTokenRefreshPromise = null
+            }
+        })()
+
+        return this.mobileTokenRefreshPromise
+    }
+    private _cookies: { mobile: Cookie[]; desktop: Cookie[] } = { mobile: [], desktop: [] }
+    public get cookies(): { mobile: Cookie[]; desktop: Cookie[] } {
+        return this.accountScope?.cookies || this._cookies
+    }
+    public set cookies(c: { mobile: Cookie[]; desktop: Cookie[] }) {
+        if (this.accountScope) {
+            this.accountScope.cookies = c
+        }
+        this._cookies = c
+    }
     public fingerprint?: any
     public accounts: Account[] = [] // DIUBAH JADI PUBLIC AGAR DISCORDBOT AMAN
     public workers: Workers // DIUBAH JADI PUBLIC AGAR SEARCHMANAGER AMAN
@@ -194,6 +328,11 @@ export class MicrosoftRewardsBot {
     public runId: string = `run_${Date.now()}`
     public isRunning = false
     public stopRequested = false
+    public sessionStartTime: number = Date.now()
+    public sessionTotalAccounts: number = 0
+    public sessionCompletedAccounts: number = 0
+    public sessionActiveAccountEmail: string = ''
+    private hasLoggedShutdownSummary: boolean = false
     public dashboardServer: DashboardServer | null = null
     private dashboardServerActive = false
     private shutdownPromise: Promise<ShutdownResult> | null = null
@@ -216,15 +355,69 @@ export class MicrosoftRewardsBot {
 
     private activeWorkers: number
     private exitedWorkers: number[]
-    public browserFactory: Browser = new Browser(this)
-    private login = new Login(this)
+    public browserFactory: Browser
+    private login: Login
     private searchManager: SearchManager
     public searchCooldownActive = false
+    public parentBot?: MicrosoftRewardsBot
+    private _batchCircuitBreakerTriggered = false
+    public get batchCircuitBreakerTriggered(): boolean {
+        return this.parentBot ? this.parentBot.batchCircuitBreakerTriggered : this._batchCircuitBreakerTriggered
+    }
+    public set batchCircuitBreakerTriggered(val: boolean) {
+        if (this.parentBot) {
+            this.parentBot.batchCircuitBreakerTriggered = val
+        }
+        this._batchCircuitBreakerTriggered = val
+    }
     public axios!: AxiosClient
 
-    public bandwidthTracker = {
+    public isCircuitBreakerTriggered(): boolean {
+        return this.batchCircuitBreakerTriggered
+    }
+
+    public triggerCircuitBreaker(reason: string): void {
+        this.batchCircuitBreakerTriggered = true
+        this.logger.warn(
+            this.isMobile,
+            'CIRCUIT-BREAKER',
+            `[CIRCUIT-BREAKER] Triggered (${reason}). Halting peer searches in current batch to safeguard accounts and IP reputation!`
+        )
+    }
+
+    public activeWorkerBots: Set<MicrosoftRewardsBot> = new Set<MicrosoftRewardsBot>()
+
+    public async cleanupBrowserResources(): Promise<void> {
+        try {
+            if (this.accountScope) {
+                await AccountDisposer.dispose(this.accountScope).catch(() => {})
+            }
+            if (this.mainMobilePage && !this.mainMobilePage.isClosed()) {
+                await this.mainMobilePage.close().catch(() => {})
+            }
+            if (this.mainDesktopPage && !this.mainDesktopPage.isClosed()) {
+                await this.mainDesktopPage.close().catch(() => {})
+            }
+            if (this.browserFactory) {
+                await this.browserFactory.recycleBrowser().catch(() => {})
+            }
+        } catch (err) {
+            this.logger.debug('main', 'CLEANUP', `cleanupBrowserResources error: ${err}`)
+        }
+    }
+
+    private _bandwidthTracker = {
         totalBytes: 0,
         blockedRequests: 0
+    }
+    public get bandwidthTracker() {
+        return this.accountScope?.bandwidthTracker || this._bandwidthTracker
+    }
+    public set bandwidthTracker(b: { totalBytes: number; blockedRequests: number }) {
+        if (this.accountScope) {
+            this.accountScope.bandwidthTracker = b
+        }
+        this._bandwidthTracker = b
     }
 
     public trackBandwidth(bytes: number, resourceType?: string) {
@@ -240,8 +433,8 @@ export class MicrosoftRewardsBot {
         DataSaverManager.getInstance().recordBlockedRequest()
     }
 
-    constructor() {
-        this.userData = {
+    constructor(parentBot?: MicrosoftRewardsBot) {
+        this._userData = {
             userName: '',
             geoLocale: 'US',
             langCode: 'en',
@@ -250,31 +443,58 @@ export class MicrosoftRewardsBot {
             gainedPoints: 0,
             timezoneOffset: new Date().getTimezoneOffset().toString()
         }
-        this.logger = new Logger(this)
-        this.cookies = { mobile: [], desktop: [] }
-        this.utils = new Utils()
+        this._cookies = { mobile: [], desktop: [] }
+        this.browserFactory = new Browser(this)
+        this.login = new Login(this)
         this.workers = new Workers(this)
         this.searchManager = new SearchManager(this)
         this.browser = {
             func: new BrowserFunc(this),
             utils: new BrowserUtils(this)
         }
-        this.config = loadConfig()
-        this.manualQuestQueue = new ManualQuestQueue({
-            storagePath: `${process.cwd()}/browser/manual_quests.json`,
-            logger: {
-                info: msg => this.logger.info(this.isMobile, 'QUEUE', msg),
-                warn: msg => this.logger.warn(this.isMobile, 'QUEUE', msg),
-                debug: msg => this.logger.debug(this.isMobile, 'QUEUE', msg)
-            }
-        })
         this.activities = new Activities(this)
-        this.activeWorkers = this.config.clusters
-        this.exitedWorkers = []
+
+        if (parentBot) {
+            this.parentBot = parentBot
+            this.config = parentBot.config
+            this.logger = new Logger(this)
+            this.utils = parentBot.utils
+            this.manualQuestQueue = parentBot.manualQuestQueue
+            this.localProxy = parentBot.localProxy
+            this.localProxyPort = parentBot.localProxyPort
+            this.networkRecoveryController = parentBot.networkRecoveryController
+            this.manualNetworkRecoveryAdapter = parentBot.manualNetworkRecoveryAdapter
+            this.adbNetworkRecoveryAdapter = parentBot.adbNetworkRecoveryAdapter
+            this.networkRecoveryAvailable = parentBot.networkRecoveryAvailable
+            this.networkRecoveryPreflightStatus = parentBot.networkRecoveryPreflightStatus
+            this.dashboardServerActive = true
+            this.dashboardServer = parentBot.dashboardServer
+            this.runId = parentBot.runId
+            this.activeWorkers = 1
+            this.exitedWorkers = []
+        } else {
+            this.logger = new Logger(this)
+            this.utils = new Utils()
+            this.config = loadConfig()
+            this.manualQuestQueue = new ManualQuestQueue({
+                storagePath: `${process.cwd()}/browser/manual_quests.json`,
+                logger: {
+                    info: msg => this.logger.info(this.isMobile, 'QUEUE', msg),
+                    warn: msg => this.logger.warn(this.isMobile, 'QUEUE', msg),
+                    debug: msg => this.logger.debug(this.isMobile, 'QUEUE', msg)
+                }
+            })
+            this.activeWorkers = this.config.clusters
+            this.exitedWorkers = []
+        }
     }
 
     public resetAccountState() {
         this.searchCooldownActive = false
+        const isDualMode = this.config?.executionMode === 'dual'
+        if (!isDualMode) {
+            this.batchCircuitBreakerTriggered = false
+        }
         this.userData = {
             userName: '',
             geoLocale: 'US',
@@ -291,6 +511,10 @@ export class MicrosoftRewardsBot {
         this.rewardsVersion = 'legacy'
         if (this.accountScope) {
             this.accountScope.clearDapiToken()
+        }
+        if (this.workers) {
+            this.workers.pass1FoundCoins = false
+            this.workers.hadBrowserActivitiesSincePass1 = false
         }
         this.requestToken = ''
         this.cookies = { mobile: [], desktop: [] }
@@ -536,7 +760,44 @@ export class MicrosoftRewardsBot {
         }
     }
 
+    public logSessionBandwidthSummary(signal: string = 'SIGINT'): void {
+        if (this.hasLoggedShutdownSummary) return
+        this.hasLoggedShutdownSummary = true
+
+        const report = DataSaverManager.getInstance().getSessionReport(
+            undefined,
+            this.sessionTotalAccounts > 0 ? this.sessionTotalAccounts : 1
+        )
+        const b = report.breakdownMb
+        const durationMin = ((Date.now() - this.sessionStartTime) / 60000).toFixed(2)
+        const activeEmail = this.sessionActiveAccountEmail || this.activeAccount?.email || 'None'
+
+        const bannerLines = [
+            `[MAIN] [SHUTDOWN] ================================================================================`,
+            `[MAIN] [SHUTDOWN] 🛑 INTERUPSI TERDETEKSI (${signal} / Operator Stop)`,
+            `[MAIN] [SHUTDOWN] 📊 Total Bandwidth Terpakai : ${report.totalMb} MB / Budget ${report.budgetMb} MB [Status: ${report.budgetResult.status}]`,
+            `[MAIN] [SHUTDOWN] 📁 Rincian Data: doc=${b.document}MB | js=${b.script}MB | xhr=${b['xhr/fetch']}MB | img=${b.image}MB | other=${b.other}MB`,
+            `[MAIN] [SHUTDOWN] ⏱️ Durasi Berjalan         : ${durationMin} menit | Akun Diproses: ${this.sessionCompletedAccounts}/${this.sessionTotalAccounts} (Aktif: ${activeEmail})`,
+            `[MAIN] [SHUTDOWN] 🛡️ Request Diblokir        : ${report.blockedRequests} request hemat kuota`,
+            `[MAIN] [SHUTDOWN] ================================================================================`
+        ]
+
+        for (const line of bannerLines) {
+            console.log(line)
+        }
+
+        if (this.logger && typeof this.logger.warn === 'function') {
+            for (const line of bannerLines) {
+                const stripped = line.replace(/^\[MAIN\]\s+\[SHUTDOWN\]\s+/, '')
+                this.logger.warn('main', 'SHUTDOWN', stripped)
+            }
+        }
+    }
+
     public async requestShutdown(reason: string = 'manual', budgetMs: number = 10000): Promise<ShutdownResult> {
+        if (typeof this.logSessionBandwidthSummary === 'function') {
+            this.logSessionBandwidthSummary(reason === 'manual' ? 'C2-STOP' : reason)
+        }
         if (this.shutdownPromise) {
             return this.shutdownPromise
         }
@@ -650,26 +911,55 @@ export class MicrosoftRewardsBot {
         return getCurrentContext().isMobile
     }
 
-    // 🛡️ MODUL IP CHECKER: AMAN JALUR DNS + SUPER HEMAT DATA PAS DITINGGAL TIDUR
+    // 🛡️ MODUL IP CHECKER: AMAN JALUR DNS + MULTI-PROVIDER FALLBACK RESILIENSI TINGGI
     private async getCurrentIP(localProxyPort?: number): Promise<string> {
         try {
             if (this.localProxy) {
-                await this.localProxy.ensureWifiConnected()
+                await this.localProxy.ensureWifiConnected().catch(() => {})
             }
-            await dns.lookup('bing.com')
-            const config: any = { timeout: 5000 }
-            if (localProxyPort) {
-                config.httpAgent = new HttpProxyAgent(`http://127.0.0.1:${localProxyPort}`)
-                config.httpsAgent = new HttpsProxyAgent(`http://127.0.0.1:${localProxyPort}`)
-            }
-            const res = await axios.get('https://ident.me', config)
-            return res.data.trim()
+            await dns.lookup('bing.com').catch(() => {})
         } catch {
-            return 'UNKNOWN_IP'
+            // DNS connectivity warning, lanjutkan mencoba penyedia IP
         }
+
+        const ipProviders = [
+            'https://api.ipify.org',
+            'https://icanhazip.com',
+            'https://ident.me',
+            'https://checkip.amazonaws.com'
+        ]
+        const ipRegex = /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$|^([0-9a-fA-F]{1,4}:){1,7}[0-9a-fA-F]{1,4}$/
+
+        const config: any = { timeout: 6000 }
+        if (localProxyPort) {
+            config.httpAgent = new HttpProxyAgent(`http://127.0.0.1:${localProxyPort}`)
+            config.httpsAgent = new HttpsProxyAgent(`http://127.0.0.1:${localProxyPort}`)
+        }
+
+        for (const provider of ipProviders) {
+            try {
+                const res = await axios.get(provider, config)
+                const ip = typeof res.data === 'string' ? res.data.trim() : String(res.data).trim()
+                if (ip && ipRegex.test(ip)) {
+                    return ip
+                }
+            } catch {
+                // Fallback otomatis ke provider berikutnya jika gagal atau timeout
+            }
+        }
+
+        return 'UNKNOWN_IP'
     }
 
     async initialize(): Promise<void> {
+        const activeConfigFile = getActiveConfigFile()
+        const channel = this.config.browserChannel || this.config.channel || 'default'
+        this.logger.info(
+            'main',
+            'CONFIG-INIT',
+            `Loaded configuration from ${activeConfigFile} | headless=${this.config.headless} | channel=${channel}`
+        )
+
         this.accounts = loadAccounts()
 
         const enforcementMode: OwnershipEnforcementMode = this.config.identityPolicy?.enforcementMode || 'report-only'
@@ -744,6 +1034,11 @@ export class MicrosoftRewardsBot {
                     'main',
                     'NETWORK-RECOVERY-CONFIG',
                     `enabled=false reason=${disabledReason}`
+                )
+                this.logger.warn(
+                    'main',
+                    'NETWORK-RECOVERY',
+                    '⚠️ PERINGATAN: networkRecovery.enabled bernilai false di config.json! Risiko deteksi mass-ban akibat IP statis tanpa rotasi/recovery jaringan.'
                 )
             }
         } else {
@@ -894,6 +1189,12 @@ export class MicrosoftRewardsBot {
                 useDynamicWifiProxy: !!this.config.useDynamicWifiProxy,
                 useAdbIpRotation: !!this.config.useAdbIpRotation,
                 useGhostCursor: this.config.useGhostCursor ?? true,
+                executionMode: this.config.executionMode === 'sequential' ? 'sequential' : 'dual',
+                staggeredOffsetSeconds:
+                    typeof this.config.staggeredOffsetSeconds === 'number'
+                        ? this.config.staggeredOffsetSeconds
+                        : 45,
+                currentBatch: null,
                 loadedAccounts: this.accounts.map(a => a.email),
                 isRunning: false,
                 startTime: 0
@@ -926,7 +1227,13 @@ export class MicrosoftRewardsBot {
                         return
                     }
                     this.logger.info('main', 'C2-CONTROL', 'Requesting bot execution to stop gracefully...')
+                    this.logSessionBandwidthSummary('C2-STOP')
                     this.stopRequested = true
+                } else if (cmd.action === 'set-execution-mode') {
+                    const mode = (cmd as any).mode === 'sequential' ? 'sequential' : 'dual'
+                    this.config.executionMode = mode
+                    this.updateDashboardGlobal({ executionMode: mode })
+                    this.logger.info('main', 'C2-CONTROL', `Execution mode switched to: ${mode}`)
                 } else if (cmd.action === 'start-single') {
                     if (this.isRunning) {
                         this.logger.warn('main', 'C2-CONTROL', 'Bot is already running!')
@@ -938,14 +1245,14 @@ export class MicrosoftRewardsBot {
                     }
                     const targetAcc = this.accounts.find(a => a.email.toLowerCase() === cmd.email!.toLowerCase())
                     if (!targetAcc) {
-                        this.logger.error('main', 'C2-CONTROL', `Account with email ${redactAccountKey(cmd.email)} not found!`)
+                        this.logger.error('main', 'C2-CONTROL', `Account with email ${cmd.email} not found!`)
                         return
                     }
 
                     this.logger.info(
                         'main',
                         'C2-CONTROL',
-                        `Starting execution for single account: ${redactAccountKey(targetAcc.email)}...`
+                        `Starting execution for single account: ${targetAcc.email}...`
                     )
                     this.isRunning = true
                     this.stopRequested = false
@@ -958,7 +1265,7 @@ export class MicrosoftRewardsBot {
                         this.logger.error(
                             'main',
                             'C2-CONTROL-ERROR',
-                            `Execution failed for ${redactAccountKey(targetAcc.email)}: ${errMsg}`
+                            `Execution failed for ${targetAcc.email}: ${errMsg}`
                         )
                     } finally {
                         this.isRunning = false
@@ -1171,7 +1478,13 @@ export class MicrosoftRewardsBot {
     private async runTasks(accounts: Account[], runStartTime: number): Promise<AccountStats[]> {
         this.runId = `run_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`
         const accountStats: AccountStats[] = []
-        let processedCount = 0
+
+        this.sessionStartTime = runStartTime || Date.now()
+        this.sessionTotalAccounts = accounts.length
+        this.sessionCompletedAccounts = 0
+        this.sessionActiveAccountEmail = ''
+        this.hasLoggedShutdownSummary = false
+        DataSaverManager.getInstance().resetSessionStats()
 
         // Start dynamic outbound local proxy if enabled
         if (this.config.useDynamicWifiProxy) {
@@ -1193,401 +1506,185 @@ export class MicrosoftRewardsBot {
         this.logger.info('main', 'NETWORK', `Current Active IP: [ ${currentIpAddress} ]`)
         this.updateDashboardGlobal({ currentIP: currentIpAddress })
 
-        for (const account of accounts) {
+        // Determine execution mode & staggered offset
+        const execMode = this.config.executionMode === 'dual' ? 'dual' : 'sequential'
+        const staggeredOffsetSec =
+            typeof this.config.staggeredOffsetSeconds === 'number'
+                ? this.config.staggeredOffsetSeconds
+                : 45
+
+        this.updateDashboardGlobal({
+            useDynamicWifiProxy: !!this.config.useDynamicWifiProxy,
+            proxyMode: !!this.localProxyPort,
+            executionMode: execMode,
+            staggeredOffsetSeconds: staggeredOffsetSec
+        })
+
+        // Pembagian antrean akun per-batch (chunk size = 2)
+        const batches: Account[][] = chunkArrayBySize(accounts, 2)
+
+        for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
             if (this.stopRequested) {
                 this.logger.warn('main', 'C2-CONTROL', 'Execution stopped/paused by user request.')
                 break
             }
-            let scope: AccountScope | null = null
-            const accountStartTime = Date.now()
-            const accountEmail = account.email
-            try {
-                this.resetAccountState()
-                scope = await AccountScope.create({
-                    account,
-                    bot: this,
-                    runId: this.runId
-                })
-                this.accountScope = scope
-                this.userData.userName = this.utils.getEmailUsername(accountEmail)
-                this.activeAccount = account
 
-                this.updateDashboardAccount(accountEmail, {
-                    email: accountEmail,
-                    status: 'Stealth Delay',
-                    initialPoints: 0,
-                    collectedPoints: 0,
-                    desktopProgress: '0/0',
-                    mobileProgress: '0/0'
-                })
-                const randomStartDelay = Math.floor(Math.random() * (60000 - 10000 + 1)) + 10000
-                this.logger.info(
-                    'main',
-                    'STEALTH',
-                    `Menunggu ${(randomStartDelay / 1000).toFixed(0)} detik sebelum buka browser biar keliatan natural...`,
-                    'cyan'
-                )
-                this.updateDashboardAccount(accountEmail, { status: 'Stealth Delay' })
-                await this.utils.wait(randomStartDelay)
+            // Reset Circuit Breaker for the new batch
+            this.batchCircuitBreakerTriggered = false
 
-                this.logger.info(
-                    'main',
-                    'ACCOUNT-START',
-                    `[ACCOUNT-START] Starting workflow for: ${redactAccountKey(accountEmail)} | geoLocale: ${account.geoLocale}`
-                )
-                this.updateDashboardAccount(accountEmail, { status: 'Starting Browser' })
-                DataSaverManager.getInstance().beginAccountQuota(accountEmail)
-                this.axios = new AxiosClient(
-                    account.proxy,
-                    this.localProxyPort,
-                    bytes => this.trackBandwidth(bytes),
-                    err => { void this.notifySuspectedConnectivityFailure('axios', err) }
-                )
+            const batch = batches[batchIndex]
+            if (!batch || batch.length === 0) continue
 
-                const result = await this.Main(account, scope).catch(error => {
-                    const errMsg = error instanceof Error ? error.message : String(error)
-                    void this.logger.error(
-                        true,
-                        'FLOW',
-                        `Mobile flow failed for ${redactAccountKey(accountEmail)}: ${errMsg}`
-                    )
-                    this.updateDashboardAccount(accountEmail, { status: 'Error', error: errMsg })
-                    return undefined
-                })
+            this.logger.info(
+                'main',
+                'BATCH-DISPATCHER',
+                `Starting Batch [${batchIndex + 1}/${batches.length}] with ${batch.length} account(s): ${batch.map(a => a.email).join(', ')} (Mode: ${execMode})`
+            )
 
-                const durationSeconds = ((Date.now() - accountStartTime) / 1000).toFixed(1)
-                const mbConsumed = (this.bandwidthTracker.totalBytes / (1024 * 1024)).toFixed(2)
-
-                const quotaReport = DataSaverManager.getInstance().finishAccountQuota(accountEmail)
-                const bRes = quotaReport.budgetResult
-                const statusColor = bRes.status === 'PASS' ? 'cyan' : 'yellow'
-
-                if (result) {
-                    const collectedPoints = result.collectedPoints ?? 0
-                    const accountInitialPoints = result.initialPoints ?? 0
-                    const accountFinalPoints = accountInitialPoints + collectedPoints
-
-                    accountStats.push({
-                        email: accountEmail,
-                        initialPoints: accountInitialPoints,
-                        finalPoints: accountFinalPoints,
-                        collectedPoints: collectedPoints,
-                        duration: parseFloat(durationSeconds),
-                        bandwidthMb: parseFloat(mbConsumed),
-                        success: true
-                    })
-
-                    this.logger.info(
-                        'main',
-                        'ACCOUNT-FINISH',
-                        `[ACCOUNT-FINISH] Completed workflow for: ${redactAccountKey(accountEmail)} | Total: +${collectedPoints} | Old: ${accountInitialPoints} → New: ${accountFinalPoints} | Duration: ${durationSeconds}s`,
-                        'green'
-                    )
-                    this.logger.info(
-                        'main',
-                        'DATA-SAVER',
-                        `[DATA-SAVER] Quota=${bRes.consumedMb.toFixed(2)}MB budget=${bRes.budgetMb.toFixed(2)}MB usage=${bRes.percentage.toFixed(1)}% status=${bRes.status}${bRes.status === 'OVER_BUDGET' ? ` overBy=${bRes.overMb.toFixed(2)}MB` : ''}`,
-                        statusColor
-                    )
-                    const bd = quotaReport.breakdown
-                    this.logger.info(
-                        'main',
-                        'DATA-SAVER',
-                        `[DATA-SAVER] Breakdown: document=${(bd.document.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.document.requests} req) | script=${(bd.script.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.script.requests} req) | xhr/fetch=${(bd['xhr/fetch'].bytes / (1024 * 1024)).toFixed(2)}MB (${bd['xhr/fetch'].requests} req) | image=${(bd.image.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.image.requests} req) | media=${(bd.media.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.media.requests} req) | font=${(bd.font.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.font.requests} req) | other=${(bd.other.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.other.requests} req)`
-                    )
-                    this.updateDashboardAccount(accountEmail, {
-                        status: 'Completed',
-                        collectedPoints: collectedPoints,
-                        bandwidth: `${mbConsumed} MB`
-                    })
-                } else {
-                    this.logger.info(
-                        'main',
-                        'DATA-SAVER',
-                        `[DATA-SAVER] Quota=${bRes.consumedMb.toFixed(2)}MB budget=${bRes.budgetMb.toFixed(2)}MB usage=${bRes.percentage.toFixed(1)}% status=${bRes.status}${bRes.status === 'OVER_BUDGET' ? ` overBy=${bRes.overMb.toFixed(2)}MB` : ''}`,
-                        statusColor
-                    )
-                    const bd = quotaReport.breakdown
-                    this.logger.info(
-                        'main',
-                        'DATA-SAVER',
-                        `[DATA-SAVER] Breakdown: document=${(bd.document.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.document.requests} req) | script=${(bd.script.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.script.requests} req) | xhr/fetch=${(bd['xhr/fetch'].bytes / (1024 * 1024)).toFixed(2)}MB (${bd['xhr/fetch'].requests} req) | image=${(bd.image.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.image.requests} req) | media=${(bd.media.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.media.requests} req) | font=${(bd.font.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.font.requests} req) | other=${(bd.other.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.other.requests} req)`
-                    )
-                    accountStats.push({
-                        email: accountEmail,
-                        initialPoints: 0,
-                        finalPoints: 0,
-                        collectedPoints: 0,
-                        duration: parseFloat(durationSeconds),
-                        bandwidthMb: parseFloat(mbConsumed),
-                        success: false,
-                        error: 'Flow failed'
-                    })
-                    this.updateDashboardAccount(accountEmail, {
-                        status: 'Failed',
-                        error: 'Flow failed',
-                        bandwidth: `${mbConsumed} MB`
-                    })
+            this.updateDashboardGlobal({
+                currentBatch: {
+                    batchIndex,
+                    totalBatches: batches.length,
+                    activeAccounts: batch.map(a => a.email),
+                    staggerCountdown: 0
                 }
-            } catch (error) {
-                const durationSeconds = ((Date.now() - accountStartTime) / 1000).toFixed(1)
-                const errMsg = error instanceof Error ? error.message : String(error)
-                this.logger.error('main', 'ACCOUNT-ERROR', `${redactAccountKey(accountEmail)}: ${errMsg}`)
-                accountStats.push({
-                    email: accountEmail,
-                    initialPoints: 0,
-                    finalPoints: 0,
-                    collectedPoints: 0,
-                    duration: parseFloat(durationSeconds),
-                    success: false,
-                    error: errMsg
-                })
-                this.updateDashboardAccount(accountEmail, {
-                    status: 'Failed',
-                    error: errMsg
-                })
-            } finally {
-                try {
-                    if (scope) {
-                        await AccountDisposer.dispose(scope).catch(err => {
-                            this.logger.error(
-                                'main',
-                                'ACCOUNT-DISPOSE',
-                                `Disposal failed for ${redactAccountKey(accountEmail)}: ${err instanceof Error ? err.message : String(err)}`
-                            )
-                        })
-                    }
-                } finally {
-                    if (this.accountScope === scope) {
-                        this.accountScope = null
-                        this.resetAccountState()
-                    }
-                    DataSaverManager.getInstance().resetAccountQuota(accountEmail)
-                }
+            })
 
-                if (this.pendingOperatorRecovery) {
-                    const pending = this.pendingOperatorRecovery
-                    this.pendingOperatorRecovery = null
-                    const now = Date.now()
-                    if (now - pending.receivedAt <= pending.ttlMs) {
-                        this.logger.info(
-                            'main',
-                            'NETWORK-RECOVERY',
-                            `dequeued checkpoint=account-scope-disposed source=${pending.source}`
-                        )
-                        await this.requestNetworkRecovery('operator-request')
-                    } else {
-                        this.logger.info(
-                            'main',
-                            'NETWORK-RECOVERY',
-                            `discarded reason=expired receivedAt=${pending.receivedAt} ttlMs=${pending.ttlMs}`
-                        )
-                    }
-                }
-            }
+            let processedInBatchCount = 0
 
-            processedCount++
+            if (execMode === 'sequential') {
+                for (const account of batch) {
+                    if (this.stopRequested) break
+                    const isDualMode = this.config?.executionMode === 'dual'
+                    if (isDualMode && this.isCircuitBreakerTriggered()) break
 
-            // =======================================================
-            // 🤖 AUTO-ROTATE DENGAN PROTECTION LOOP + DATA SAVER CLI
-            // =======================================================
-            if (processedCount % 2 === 0 && processedCount < accounts.length) {
-                let ipChanged = false
-                const oldIp = currentIpAddress
-                const isManual = this.config.useDynamicWifiProxy || !this.config.useAdbIpRotation
-
-                while (!ipChanged) {
-                    if (this.stopRequested) {
-                        this.logger.warn('main', 'IP-INTERCEPTOR', 'IP rotation aborted due to user stop request.')
-                        break
-                    }
-
-                    this.logger.warn(
-                        'main',
-                        'IP-INTERCEPTOR',
-                        '=======================================================',
-                        'yellow'
-                    )
-                    this.logger.warn(
-                        'main',
-                        'IP-INTERCEPTOR',
-                        `🔥 BATCH [${processedCount / 2}] SELESAI! ROTASI IP ${isManual ? 'MANUAL (LAN / HOTSPOT)' : 'AUTO (ADB AIRPLANE MODE)'} DIMULAI... 🔥`,
-                        'yellow'
-                    )
-                    this.logger.warn('main', 'IP-INTERCEPTOR', `IP Saat Ini: [ ${oldIp} ]`, 'yellow')
-                    this.logger.warn(
-                        'main',
-                        'IP-INTERCEPTOR',
-                        '=======================================================',
-                        'yellow'
-                    )
-
+                    this.searchCooldownActive = false
+                    this.batchCircuitBreakerTriggered = false
+                    this.activeAccount = account
+                    this.userData.userName = this.utils.getEmailUsername(account.email)
                     try {
-                        if (isManual) {
-                            try {
-                                require('child_process').exec(
-                                    `powershell -c (New-Object Media.SoundPlayer "C:\\Windows\\Media\\notify.wav").PlaySync();`
-                                )
-                            } catch {}
-
-                            this.logger.info(
-                                'main',
-                                'IP-INTERCEPTOR',
-                                '📌 SILAKAN MATIKAN & NYALAKAN MODE PESAWAT / HOTSPOT DI HP ANDA.',
-                                'cyan'
-                            )
-                            this.logger.info(
-                                'main',
-                                'IP-INTERCEPTOR',
-                                '👉 Tekan [ENTER] di terminal atau klik [Confirm IP Rotated] di Web UI setelah selesai...',
-                                'cyan'
-                            )
-
-                            await waitForUserConfirmation()
-
-                            this.logger.info('main', 'IP-INTERCEPTOR', 'Memeriksa perubahan IP publik baru...')
-                        } else {
-                            const execSync = require('child_process').execSync
-                            const serial = this.config.networkRecovery?.adbSerial?.trim()
-                            const adbPrefix = serial ? `adb -s ${serial}` : 'adb'
-
-                            this.logger.info('main', 'IP-INTERCEPTOR', 'ADB -> Mengaktifkan Mode Pesawat...')
-
-                            // 1. Coba cmd connectivity (Android 11+ AOSP)
-                            let airplaneActivated = false
-                            try {
-                                const out = execSync(`${adbPrefix} shell cmd connectivity airplane-mode enable`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] })
-                                const outLower = (out || '').toLowerCase()
-                                if (!outLower.includes('unknown') &&
-                                    !outLower.includes('error') &&
-                                    !outLower.includes('no shell command') &&
-                                    !outLower.includes('can\'t find service') &&
-                                    !outLower.includes('permission')) {
-                                    try {
-                                        const state = execSync(`${adbPrefix} shell settings get global airplane_mode_on`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim()
-                                        if (state === '1') airplaneActivated = true
-                                    } catch {}
-                                }
-                            } catch {}
-
-                            // 2. Fallback: Settings put global 1 + am broadcast (Universal Android)
-                            if (!airplaneActivated) {
-                                try {
-                                    execSync(`${adbPrefix} shell settings put global airplane_mode_on 1`, { stdio: ['pipe', 'pipe', 'pipe'] })
-                                    execSync(`${adbPrefix} shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state true`, { stdio: ['pipe', 'pipe', 'pipe'] })
-                                } catch {}
-                            }
-
-                            // 3. Fallback jika device memiliki akses root (su)
-                            try {
-                                execSync(`${adbPrefix} shell su -c "cmd connectivity airplane-mode enable || (settings put global airplane_mode_on 1 && am broadcast -a android.intent.action.AIRPLANE_MODE --ez state true)"`, { stdio: ['pipe', 'pipe', 'pipe'] })
-                            } catch {}
-
-                            // 4. Force cut radio data (svc data disable) agar koneksi BTS seluler pasti terputus
-                            try {
-                                execSync(`${adbPrefix} shell svc data disable`, { stdio: ['pipe', 'pipe', 'pipe'] })
-                            } catch {}
-
-                            this.logger.info('main', 'IP-INTERCEPTOR', 'Menunggu 8 detik agar sesi IP provider ter-reset...')
-                            await this.utils.wait(8000)
-
-                            this.logger.info(
-                                'main',
-                                'IP-INTERCEPTOR',
-                                'ADB -> Mematikan Mode Pesawat (Mencari Sinyal Baru)...'
-                            )
-
-                            // 1. Coba cmd connectivity disable
-                            try {
-                                execSync(`${adbPrefix} shell cmd connectivity airplane-mode disable`, { stdio: ['pipe', 'pipe', 'pipe'] })
-                            } catch {}
-
-                            // 2. Settings put global 0 + am broadcast
-                            try {
-                                execSync(`${adbPrefix} shell settings put global airplane_mode_on 0`, { stdio: ['pipe', 'pipe', 'pipe'] })
-                                execSync(`${adbPrefix} shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state false`, { stdio: ['pipe', 'pipe', 'pipe'] })
-                            } catch {}
-
-                            // 3. Fallback root (su) disable
-                            try {
-                                execSync(`${adbPrefix} shell su -c "cmd connectivity airplane-mode disable || (settings put global airplane_mode_on 0 && am broadcast -a android.intent.action.AIRPLANE_MODE --ez state false)"`, { stdio: ['pipe', 'pipe', 'pipe'] })
-                            } catch {}
-
-                            // 4. Nyalakan kembali radio data seluler
-                            try {
-                                execSync(`${adbPrefix} shell svc data enable`, { stdio: ['pipe', 'pipe', 'pipe'] })
-                            } catch {}
-
-                            this.logger.info(
-                                'main',
-                                'IP-INTERCEPTOR',
-                                'Menunggu 10 detik agar radio seluler stabil...'
-                            )
-                            await this.utils.wait(10000)
-
-                            // 5. Pastikan USB Tethering / RNDIS aktif kembali
-                            try {
-                                execSync(`${adbPrefix} shell cmd tethering tether usb`, { stdio: ['pipe', 'pipe', 'pipe'] })
-                                execSync(`${adbPrefix} shell svc usb setFunctions rndis`, { stdio: ['pipe', 'pipe', 'pipe'] })
-                            } catch {}
-
-                            this.logger.info(
-                                'main',
-                                'IP-INTERCEPTOR',
-                                'Menunggu 5 detik agar Windows mendeteksi adapter USB Tethering...'
-                            )
-                            await this.utils.wait(5000)
+                        const worker = this.runAccountWorkflow(account)
+                        const [res] = await Promise.allSettled([worker])
+                        processedInBatchCount++
+                        if (res && res.status === 'fulfilled' && res.value) {
+                            accountStats.push(res.value)
                         }
-
-                        const checkNewIp = await this.getCurrentIP(this.localProxyPort || undefined)
-
-                        if (checkNewIp !== oldIp && checkNewIp !== 'UNKNOWN_IP') {
-                            currentIpAddress = checkNewIp
-                            ipChanged = true
-                            this.logger.info(
-                                'main',
-                                'IP-INTERCEPTOR',
-                                `🚀 SUKSES! IP Baru Terdeteksi: [ ${currentIpAddress} ]`,
-                                'green'
-                            )
-                            this.updateDashboardGlobal({ currentIP: currentIpAddress })
-                            await this.utils.wait(3000)
-                        } else {
-                            this.logger.error(
-                                'main',
-                                'IP-INTERCEPTOR',
-                                `❌ GAGAL! IP masih kembar [ ${checkNewIp} ]. Silakan coba matikan/nyalakan ulang hotspot...`,
-                                'red'
-                            )
-                            try {
-                                require('child_process').exec(
-                                    `powershell -c (New-Object Media.SoundPlayer "C:\\Windows\\Media\\notify.wav").PlaySync();`
-                                )
-                            } catch {}
-                            await this.utils.wait(3000)
-                        }
-                    } catch (adbError) {
-                        this.logger.error(
-                            'main',
-                            'IP-INTERCEPTOR',
-                            `🚨 Jalur Jaringan Lemot/IP Glitch / Device ADB Tidak Terdeteksi: ${adbError}`,
-                            'red'
-                        )
-                        try {
-                            require('child_process').exec(
-                                `powershell -c (New-Object Media.SoundPlayer "C:\\Windows\\Media\\notify.wav").PlaySync();`
-                            )
-                        } catch {}
-                        this.logger.info(
-                            'main',
-                            'IP-INTERCEPTOR',
-                            '📌 Pastikan device HP tercolok dan USB debugging aktif, atau ubah IP secara manual...',
-                            'cyan'
-                        )
-                        await this.utils.wait(3000)
+                    } finally {
+                        this.activeAccount = null
+                        this.userData.userName = ''
                     }
                 }
+            } else {
+                // Dual-Worker Staggered Dispatcher
+                const workerPromises: Promise<AccountStats | null>[] = []
+
+                // Worker 1: t = 0s
+                const acc1 = batch[0]
+                if (acc1) {
+                    const worker1 = this.runAccountWorkflow(acc1)
+                    workerPromises.push(worker1)
+                }
+
+                // Worker 2: after staggered offset delay (default 45s)
+                const acc2 = batch[1]
+                if (acc2 && acc1) {
+                    this.logger.info(
+                        'main',
+                        'STAGGERED-DISPATCHER',
+                        `Worker 1 running for ${acc1.email}. Waiting staggered offset (${staggeredOffsetSec}s) before launching Worker 2...`
+                    )
+
+                    for (let sec = staggeredOffsetSec; sec > 0; sec--) {
+                        if (this.stopRequested || this.isCircuitBreakerTriggered()) break
+                        this.updateDashboardGlobal({
+                            currentBatch: {
+                                batchIndex,
+                                totalBatches: batches.length,
+                                activeAccounts: batch.map(a => a.email),
+                                staggerCountdown: sec
+                            }
+                        })
+                        await this.utils.wait(1000)
+                    }
+
+                    if (!this.stopRequested && !this.isCircuitBreakerTriggered()) {
+                        this.updateDashboardGlobal({
+                            currentBatch: {
+                                batchIndex,
+                                totalBatches: batches.length,
+                                activeAccounts: batch.map(a => a.email),
+                                staggerCountdown: 0
+                            }
+                        })
+                        this.logger.info(
+                            'main',
+                            'STAGGERED-DISPATCHER',
+                            `Staggered offset complete. Launching Worker 2 for ${acc2.email}...`
+                        )
+                        const worker2 = this.runAccountWorkflow(acc2)
+                        workerPromises.push(worker2)
+                    } else if (this.isCircuitBreakerTriggered()) {
+                        this.logger.warn(
+                            'main',
+                            'CIRCUIT-BREAKER',
+                            `[CIRCUIT-BREAKER] Aborting launch of Worker 2 for ${acc2.email} due to active circuit breaker on Worker 1.`
+                        )
+                    }
+                }
+
+                // Barrier Synchronization with Dynamic Adaptive Deadline
+                const dynamicDeadlineMs = calculateDynamicDeadline(100, 2 * 60 * 1000)
+                let deadlineTimeout: NodeJS.Timeout | undefined
+                const deadlinePromise = new Promise<{ kind: 'timeout' }>(resolve => {
+                    deadlineTimeout = setTimeout(() => resolve({ kind: 'timeout' }), dynamicDeadlineMs)
+                })
+
+                const barrierPromise = Promise.allSettled(workerPromises).then(results => ({
+                    kind: 'completed' as const,
+                    results
+                }))
+
+                const raceResult = await Promise.race([barrierPromise, deadlinePromise])
+                if (deadlineTimeout) clearTimeout(deadlineTimeout)
+
+                if (raceResult.kind === 'timeout') {
+                    this.logger.error(
+                        'main',
+                        'ACCOUNT-DEADLINE',
+                        `[ACCOUNT-DEADLINE-EXCEEDED] Batch [${batchIndex + 1}/${batches.length}] melebihi batas waktu adaptif ${(dynamicDeadlineMs / 60000).toFixed(0)} menit! Memutus barrier untuk mencegah zombie worker runner deadlock.`
+                    )
+                    for (const bot of this.activeWorkerBots) {
+                        try {
+                            bot.accountScope?.abortController.abort()
+                            await bot.cleanupBrowserResources()
+                        } catch {}
+                    }
+                    try {
+                        this.accountScope?.abortController.abort()
+                        await this.cleanupBrowserResources()
+                    } catch {}
+
+                    // Bounded Join saat timeout akun: await hingga promise eksekusi akun lama benar-benar keluar sebelum memulai akun berikutnya
+                    await Promise.race([
+                        Promise.allSettled(workerPromises),
+                        new Promise(resolve => setTimeout(resolve, 10000))
+                    ])
+                } else {
+                    for (const res of raceResult.results) {
+                        if (res.status === 'fulfilled' && res.value) {
+                            accountStats.push(res.value)
+                        }
+                    }
+                }
+                processedInBatchCount = workerPromises.length
             }
+
+            this.updateDashboardGlobal({
+                currentBatch: null
+            })
+
+            // Hook onBatchComplete: only invoked after barrier wait tuntas
+            await this.onBatchComplete(batchIndex, batch, batches.length, processedInBatchCount)
         }
 
         if (this.config.clusters <= 1 && cluster.isPrimary) {
@@ -1621,9 +1718,446 @@ export class MicrosoftRewardsBot {
         return accountStats
     }
 
+    public async runAccountWorkflow(account: Account): Promise<AccountStats | null> {
+        const workerBot = new MicrosoftRewardsBot(this)
+        this.activeWorkerBots.add(workerBot)
+        try {
+            return await workerBot.executeAccountScopeWorkflow(account)
+        } finally {
+            this.activeWorkerBots.delete(workerBot)
+        }
+    }
+
+    public async executeAccountScopeWorkflow(account: Account): Promise<AccountStats | null> {
+        let scope: AccountScope | null = null
+        const accountStartTime = Date.now()
+        const accountEmail = account.email
+
+        // 0. Proactive fast-skip if account was previously quarantined / suspended
+        if (AccountSessionStore.isAccountSuspended(this.config.sessionPath, accountEmail)) {
+            this.logger.warn(
+                'main',
+                'ACCOUNT-SUSPENDED',
+                `⚡ [ACCOUNT-SUSPENDED] Akun ${accountEmail} telah dikarantina (SUSPENDED). Melewati eksekusi otomatis.`
+            )
+            this.updateDashboardAccount(accountEmail, {
+                status: 'SUSPENDED',
+                error: 'Account Suspended/Banned'
+            })
+            return {
+                email: accountEmail,
+                initialPoints: 0,
+                finalPoints: 0,
+                collectedPoints: 0,
+                duration: 0,
+                bandwidthMb: 0,
+                success: false,
+                error: 'Account Suspended'
+            }
+        }
+
+        try {
+            this.resetAccountState()
+            scope = await AccountScope.create({
+                account,
+                bot: this,
+                runId: this.runId
+            })
+            this.accountScope = scope
+            this.userData = {
+                userName: this.utils.getEmailUsername(accountEmail),
+                geoLocale: (account.geoLocale && account.geoLocale !== 'auto') ? account.geoLocale : 'US',
+                langCode: 'en',
+                initialPoints: 0,
+                currentPoints: 0,
+                gainedPoints: 0,
+                timezoneOffset: new Date().getTimezoneOffset().toString()
+            }
+            this.activeAccount = account
+            this.sessionActiveAccountEmail = accountEmail
+
+            this.updateDashboardAccount(accountEmail, {
+                email: accountEmail,
+                status: 'Stealth Delay',
+                initialPoints: 0,
+                collectedPoints: 0,
+                desktopProgress: '0/0',
+                mobileProgress: '0/0'
+            })
+            const randomStartDelay = Math.floor(Math.random() * (60000 - 10000 + 1)) + 10000
+            this.logger.info(
+                'main',
+                'STEALTH',
+                `Menunggu ${(randomStartDelay / 1000).toFixed(0)} detik sebelum buka browser biar keliatan natural...`,
+                'cyan'
+            )
+            this.updateDashboardAccount(accountEmail, { status: 'Stealth Delay' })
+            await this.utils.wait(randomStartDelay)
+
+            this.logger.info(
+                'main',
+                'ACCOUNT-START',
+                `[ACCOUNT-START] Starting workflow for: ${accountEmail} | geoLocale: ${account.geoLocale}`
+            )
+            this.updateDashboardAccount(accountEmail, { status: 'Starting Browser' })
+            DataSaverManager.getInstance().beginAccountQuota(accountEmail)
+            this.axios = new AxiosClient(
+                account.proxy,
+                this.localProxyPort,
+                bytes => this.trackBandwidth(bytes),
+                err => {
+                    void this.notifySuspectedConnectivityFailure('axios', err)
+                }
+            )
+
+            let result: any = null
+            try {
+                result = await this.Main(account, scope)
+            } catch (error) {
+                if (error instanceof AccountSuspendedError || (error as any)?.name === 'AccountSuspendedError') {
+                    throw error
+                }
+                const errMsg = error instanceof Error ? error.message : String(error)
+                void this.logger.error(
+                    true,
+                    'FLOW',
+                    `Mobile flow failed for ${accountEmail}: ${errMsg}`
+                )
+                const lowerErr = errMsg.toLowerCase()
+                if (lowerErr.includes('locked') || lowerErr.includes('suspended') || lowerErr.includes('banned')) {
+                    this.triggerCircuitBreaker(`Account security penalty detected on ${accountEmail}: ${errMsg}`)
+                }
+                this.updateDashboardAccount(accountEmail, { status: 'Error', error: errMsg })
+                result = undefined
+            }
+
+            const durationSeconds = ((Date.now() - accountStartTime) / 1000).toFixed(1)
+            const mbConsumed = (this.bandwidthTracker.totalBytes / (1024 * 1024)).toFixed(2)
+
+            const quotaReport = DataSaverManager.getInstance().finishAccountQuota(accountEmail)
+            const bRes = quotaReport.budgetResult
+            const statusColor = bRes.status === 'PASS' ? 'cyan' : 'yellow'
+
+            if (result) {
+                const collectedPoints = result.collectedPoints ?? 0
+                const accountInitialPoints = result.initialPoints ?? 0
+                const accountFinalPoints = accountInitialPoints + collectedPoints
+
+                this.logger.info(
+                    'main',
+                    'ACCOUNT-FINISH',
+                    `[ACCOUNT-FINISH] Completed workflow for: ${accountEmail} | Total: +${collectedPoints} | Old: ${accountInitialPoints} → New: ${accountFinalPoints} | Duration: ${durationSeconds}s`,
+                    'green'
+                )
+                this.logger.info(
+                    'main',
+                    'DATA-SAVER',
+                    `[DATA-SAVER] Quota=${bRes.consumedMb.toFixed(2)}MB budget=${bRes.budgetMb.toFixed(2)}MB usage=${bRes.percentage.toFixed(1)}% status=${bRes.status}${bRes.status === 'OVER_BUDGET' ? ` overBy=${bRes.overMb.toFixed(2)}MB` : ''}`,
+                    statusColor
+                )
+                const bd = quotaReport.breakdown
+                this.logger.info(
+                    'main',
+                    'DATA-SAVER',
+                    `[DATA-SAVER] Breakdown: document=${(bd.document.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.document.requests} req) | script=${(bd.script.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.script.requests} req) | xhr/fetch=${(bd['xhr/fetch'].bytes / (1024 * 1024)).toFixed(2)}MB (${bd['xhr/fetch'].requests} req) | image=${(bd.image.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.image.requests} req) | media=${(bd.media.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.media.requests} req) | font=${(bd.font.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.font.requests} req) | other=${(bd.other.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.other.requests} req)`
+                )
+                this.updateDashboardAccount(accountEmail, {
+                    status: 'Completed',
+                    collectedPoints: collectedPoints,
+                    bandwidth: `${mbConsumed} MB`
+                })
+
+                return {
+                    email: accountEmail,
+                    initialPoints: accountInitialPoints,
+                    finalPoints: accountFinalPoints,
+                    collectedPoints: collectedPoints,
+                    duration: parseFloat(durationSeconds),
+                    bandwidthMb: parseFloat(mbConsumed),
+                    success: true
+                }
+            } else {
+                this.logger.info(
+                    'main',
+                    'DATA-SAVER',
+                    `[DATA-SAVER] Quota=${bRes.consumedMb.toFixed(2)}MB budget=${bRes.budgetMb.toFixed(2)}MB usage=${bRes.percentage.toFixed(1)}% status=${bRes.status}${bRes.status === 'OVER_BUDGET' ? ` overBy=${bRes.overMb.toFixed(2)}MB` : ''}`,
+                    statusColor
+                )
+                const bd = quotaReport.breakdown
+                this.logger.info(
+                    'main',
+                    'DATA-SAVER',
+                    `[DATA-SAVER] Breakdown: document=${(bd.document.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.document.requests} req) | script=${(bd.script.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.script.requests} req) | xhr/fetch=${(bd['xhr/fetch'].bytes / (1024 * 1024)).toFixed(2)}MB (${bd['xhr/fetch'].requests} req) | image=${(bd.image.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.image.requests} req) | media=${(bd.media.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.media.requests} req) | font=${(bd.font.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.font.requests} req) | other=${(bd.other.bytes / (1024 * 1024)).toFixed(2)}MB (${bd.other.requests} req)`
+                )
+                this.updateDashboardAccount(accountEmail, {
+                    status: 'Failed',
+                    error: 'Flow failed',
+                    bandwidth: `${mbConsumed} MB`
+                })
+                return {
+                    email: accountEmail,
+                    initialPoints: 0,
+                    finalPoints: 0,
+                    collectedPoints: 0,
+                    duration: parseFloat(durationSeconds),
+                    bandwidthMb: parseFloat(mbConsumed),
+                    success: false,
+                    error: 'Flow failed'
+                }
+            }
+        } catch (error) {
+            const durationSeconds = ((Date.now() - accountStartTime) / 1000).toFixed(1)
+            const isSuspended = error instanceof AccountSuspendedError || (error as any)?.name === 'AccountSuspendedError'
+
+            if (isSuspended) {
+                const errMsg = error instanceof Error ? error.message : String(error)
+                this.logger.error(
+                    'main',
+                    'ACCOUNT-SUSPENDED',
+                    `🚨 [ACCOUNT-SUSPENDED] Akun ${accountEmail} TERBUKTI DITANGGUHKAN (BANNED) oleh Microsoft!`
+                )
+
+                // 1. Quarantining session files & writing marker
+                await AccountSessionStore.quarantineSuspendedAccount(this.config.sessionPath, accountEmail, errMsg).catch(qErr => {
+                    this.logger.error('main', 'QUARANTINE', `Failed to quarantine session for ${accountEmail}: ${qErr}`)
+                })
+
+                // 2. Immediate dispose of open contexts
+                if (scope) {
+                    await AccountDisposer.dispose(scope).catch(() => {})
+                }
+
+                // 3. Log required summary
+                this.logger.warn(
+                    'main',
+                    'ACCOUNT-FINISH',
+                    `[ACCOUNT-FINISH] Dilewati secara instan akibat suspensi. | ${accountEmail} | Duration: ${durationSeconds}s`
+                )
+
+                // 4. Update status in dashboard & internal database
+                this.updateDashboardAccount(accountEmail, {
+                    status: 'SUSPENDED',
+                    error: errMsg
+                })
+
+                return {
+                    email: accountEmail,
+                    initialPoints: 0,
+                    finalPoints: 0,
+                    collectedPoints: 0,
+                    duration: parseFloat(durationSeconds),
+                    bandwidthMb: parseFloat((this.bandwidthTracker.totalBytes / (1024 * 1024)).toFixed(2)),
+                    success: false,
+                    error: 'Account Suspended'
+                }
+            }
+
+            const errMsg = error instanceof Error ? error.message : String(error)
+            this.logger.error('main', 'ACCOUNT-ERROR', `${accountEmail}: ${errMsg}`)
+            this.updateDashboardAccount(accountEmail, {
+                status: 'Failed',
+                error: errMsg
+            })
+            return {
+                email: accountEmail,
+                initialPoints: 0,
+                finalPoints: 0,
+                collectedPoints: 0,
+                duration: parseFloat(durationSeconds),
+                success: false,
+                error: errMsg
+            }
+        } finally {
+            try {
+                if (scope) {
+                    await AccountDisposer.dispose(scope).catch(err => {
+                        this.logger.error(
+                            'main',
+                            'ACCOUNT-DISPOSE',
+                            `Disposal failed for ${accountEmail}: ${err instanceof Error ? err.message : String(err)}`
+                        )
+                    })
+                }
+                if (this.browserFactory) {
+                    await this.browserFactory.recycleBrowser().catch(() => {})
+                }
+            } finally {
+                if (this.accountScope === scope) {
+                    this.accountScope = null
+                    this.resetAccountState()
+                }
+                this.sessionCompletedAccounts++
+                this.sessionActiveAccountEmail = ''
+                DataSaverManager.getInstance().resetAccountQuota(accountEmail)
+            }
+
+            if (this.pendingOperatorRecovery) {
+                const pending = this.pendingOperatorRecovery
+                this.pendingOperatorRecovery = null
+                const now = Date.now()
+                if (now - pending.receivedAt <= pending.ttlMs) {
+                    this.logger.info(
+                        'main',
+                        'NETWORK-RECOVERY',
+                        `dequeued checkpoint=account-scope-disposed source=${pending.source}`
+                    )
+                    await this.requestNetworkRecovery('operator-request')
+                } else {
+                    this.logger.info(
+                        'main',
+                        'NETWORK-RECOVERY',
+                        `discarded reason=expired receivedAt=${pending.receivedAt} ttlMs=${pending.ttlMs}`
+                    )
+                }
+            }
+        }
+    }
+
+    private async onBatchComplete(
+        batchIndex: number,
+        batch: Account[],
+        totalBatches: number,
+        processedInBatchCount?: number
+    ): Promise<void> {
+        if (batchIndex >= totalBatches - 1) {
+            return
+        }
+
+        if (this.stopRequested) {
+            this.logger.warn('main', 'IP-INTERCEPTOR', 'IP rotation skipped due to user stop request.')
+            return
+        }
+
+        const actualProcessedCount = typeof processedInBatchCount === 'number' ? processedInBatchCount : batch.length
+        const isManual = this.config.useDynamicWifiProxy || !this.config.useAdbIpRotation
+        const oldIp = await this.getCurrentIP(this.localProxyPort || undefined)
+
+        if (isManual) {
+            this.logger.warn(
+                'main',
+                'IP-INTERCEPTOR',
+                '=======================================================',
+                'yellow'
+            )
+            this.logger.warn(
+                'main',
+                'IP-INTERCEPTOR',
+                `🔥 BATCH [${batchIndex + 1}/${totalBatches}] SELESAI (${actualProcessedCount} akun diproses)! 🔥`,
+                'yellow'
+            )
+            this.logger.warn(
+                'main',
+                'IP-INTERCEPTOR',
+                `🚨 [MANUAL IP ROTATION] Silakan ubah IP di HP/Hotspot! Tekan ENTER di terminal atau klik "Confirm IP Rotated" di Dashboard (http://localhost:4000)...`,
+                'yellow'
+            )
+            this.logger.warn('main', 'IP-INTERCEPTOR', `IP Saat Ini: [ ${oldIp} ]`, 'yellow')
+            this.logger.warn(
+                'main',
+                'IP-INTERCEPTOR',
+                '=======================================================',
+                'yellow'
+            )
+            process.stdout.write('\x07')
+
+            this.updateDashboardGlobal({
+                manualIpRotationActive: true
+            })
+
+            await waitForManualIpConfirmation()
+
+            this.updateDashboardGlobal({
+                manualIpRotationActive: false
+            })
+
+            const newIp = await this.getCurrentIP(this.localProxyPort || undefined)
+            this.logger.info(
+                'main',
+                'IP-INTERCEPTOR',
+                `🚀 Konfirmasi diterima! Melanjutkan ke Batch berikutnya | IP Aktif: [ ${newIp} ]`,
+                'green'
+            )
+            this.updateDashboardGlobal({ currentIP: newIp })
+            await this.utils.wait(1000)
+            return
+        }
+
+        let ipChanged = false
+        while (!ipChanged) {
+            if (this.stopRequested) {
+                this.logger.warn('main', 'IP-INTERCEPTOR', 'IP rotation aborted due to user stop request.')
+                break
+            }
+
+            this.logger.warn(
+                'main',
+                'IP-INTERCEPTOR',
+                '=======================================================',
+                'yellow'
+            )
+            this.logger.warn(
+                'main',
+                'IP-INTERCEPTOR',
+                `🔥 BATCH [${batchIndex + 1}/${totalBatches}] SELESAI (${actualProcessedCount} akun diproses)! ROTASI IP AUTO (ADB AIRPLANE MODE) DIMULAI... 🔥`,
+                'yellow'
+            )
+            this.logger.warn('main', 'IP-INTERCEPTOR', `IP Saat Ini: [ ${oldIp} ]`, 'yellow')
+            this.logger.warn(
+                'main',
+                'IP-INTERCEPTOR',
+                '=======================================================',
+                'yellow'
+            )
+
+            try {
+                this.logger.info('main', 'IP-INTERCEPTOR', 'ADB -> Menjalankan rotasi IP via Airplane Mode di Linux...')
+                await AirplaneMode.toggle(8000, 15000)
+
+                    const checkNewIp = await this.getCurrentIP(this.localProxyPort || undefined)
+
+                    if (checkNewIp !== oldIp && checkNewIp !== 'UNKNOWN_IP') {
+                        ipChanged = true
+                        this.logger.info(
+                            'main',
+                            'IP-INTERCEPTOR',
+                            `🚀 SUKSES! IP Baru Terdeteksi: [ ${checkNewIp} ]`,
+                            'green'
+                        )
+                        this.updateDashboardGlobal({ currentIP: checkNewIp })
+                        await this.utils.wait(3000)
+                    } else {
+                        this.logger.error(
+                            'main',
+                            'IP-INTERCEPTOR',
+                            `❌ GAGAL! IP masih kembar [ ${checkNewIp} ]. Silakan periksa USB Tethering di HP...`,
+                            'red'
+                        )
+                        process.stdout.write('\x07')
+                        await this.utils.wait(3000)
+                    }
+                } catch (adbError) {
+                    const errMsg = adbError instanceof Error ? adbError.message : String(adbError)
+                    this.logger.error(
+                        'main',
+                        'IP-INTERCEPTOR',
+                        `🚨 Jalur Jaringan Lemot/IP Glitch / Device ADB Tidak Terdeteksi: ${errMsg}`,
+                        'red'
+                    )
+                    process.stdout.write('\x07')
+                    this.logger.info(
+                        'main',
+                        'IP-INTERCEPTOR',
+                        '📌 Pastikan device HP tercolok dan USB debugging aktif, atau ubah IP secara manual...',
+                        'cyan'
+                    )
+                    await this.utils.wait(3000)
+                }
+            }
+        }
+
     async Main(account: Account, scope?: AccountScope): Promise<{ initialPoints: number; collectedPoints: number }> {
         const accountEmail = account.email
-        this.logger.info('main', 'FLOW', `Starting session for ${redactAccountKey(accountEmail)}`)
+        this.logger.info('main', 'FLOW', `Starting session for ${accountEmail}`)
 
         // Zero Leakage: Reset token and completed offers set for clean per-account isolation
         if (this.accountScope) {
@@ -1644,22 +2178,129 @@ export class MicrosoftRewardsBot {
                     context: initialContext,
                     accountScope: accountEmail,
                     purpose: 'main-mobile-owner',
-                    isMobile: true
+                    isMobile: true,
+                    deviceProfile: this.accountScope?.deviceProfile
                 })
                 this.accountScope?.trackPage(this.mainMobilePage)
 
-                this.logger.info('main', 'BROWSER', `Mobile Browser started | ${redactAccountKey(accountEmail)}`)
+                this.logger.info('main', 'BROWSER', `Mobile Browser started | ${accountEmail}`)
 
                 await this.login.login(this.mainMobilePage, account)
 
-                try {
-                    this.accessToken = await this.login.getAppAccessToken(this.mainMobilePage, accountEmail)
-                } catch (error) {
-                    this.logger.error(
+                // Auto-enrollment sebelum penukaran token DAPI
+                const enrolled = await autoEnrollRewards(this.mainMobilePage, this)
+                const currentMobileUrl = this.mainMobilePage.url()
+                const isStillAbout =
+                    currentMobileUrl.includes('rewards.bing.com/about') ||
+                    currentMobileUrl.includes('rewards.bing.com/welcome')
+
+                if (isStillAbout && !enrolled) {
+                    this.logger.warn(
                         'main',
-                        'FLOW',
-                        `Failed to get mobile access token: ${error instanceof Error ? error.message : String(error)}`
+                        'ONBOARDING',
+                        `Akun masih berada di ${currentMobileUrl} (belum enrolled). Melewati penukaran token DAPI untuk mencegah HTTP 401 Unauthorized.`
                     )
+                } else {
+                    try {
+                        this.accessToken = await this.refreshMobileAccessToken(this.mainMobilePage, accountEmail)
+                    } catch (error) {
+                        this.logger.error(
+                            'main',
+                            'FLOW',
+                            `Failed to get mobile access token: ${error instanceof Error ? error.message : String(error)}`
+                        )
+                    }
+                }
+
+                // Immediate Execution Pipeline: begitu token mobile diterima, langsung panggil doDailyCheckIn() dan doReadToEarn()
+                let immediateMobileExecuted = false
+                if (this.accessToken) {
+                    this.logger.info(
+                        'main',
+                        'IMMEDIATE-PIPELINE',
+                        'Mobile access token received. Triggering immediate Daily Check-In & Read to Earn...'
+                    )
+
+                    // Pastikan saldo awal akun diambil terlebih dahulu secara valid sebelum menjalankan aktivitas:
+                    if (this.currentPoints <= 0) {
+                        let startingPoints = 0
+
+                        // 1. Ambil saldo akun via DAPI user endpoint (GET /dapi/me/user)
+                        try {
+                            const userRes = await this.axios.request({
+                                url: 'https://prod.rewardsplatform.microsoft.com/dapi/me/user',
+                                method: 'GET',
+                                headers: {
+                                    Authorization: `Bearer ${this.accessToken}`,
+                                    'User-Agent': UserAgentManager.DEFAULT_MOBILE_UA,
+                                    'X-Rewards-Country': this.userData.geoLocale || 'US',
+                                    'X-Rewards-Language': 'en',
+                                    'X-Rewards-ismobile': 'true'
+                                },
+                                validateStatus: () => true,
+                                timeout: 7000
+                            })
+                            startingPoints = Number(userRes?.data?.response?.balance ?? userRes?.data?.balance ?? 0)
+                        } catch {}
+
+                        // 2. Fallback: DAPI status profil / getAppDashboardData
+                        if (startingPoints <= 0) {
+                            try {
+                                const appData = await this.browser.func.getAppDashboardData().catch(() => null)
+                                startingPoints = Number(appData?.response?.balance ?? 0)
+                            } catch {}
+                        }
+
+                        // 3. Fallback: Tunggu dashboard termuat jika DAPI belum menghasilkan saldo
+                        if (startingPoints <= 0 && this.mainMobilePage && !this.mainMobilePage.isClosed()) {
+                            try {
+                                const currentUrl = this.mainMobilePage.url()
+                                if (!currentUrl.includes('rewards.bing.com')) {
+                                    await this.mainMobilePage
+                                        .goto(this.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 15000 })
+                                        .catch(() => {})
+                                }
+                                startingPoints = await this.browser.func.getCurrentPoints(this.mainMobilePage).catch(() => 0)
+                            } catch {}
+                        }
+
+                        if (startingPoints > 0) {
+                            this.initialPoints = startingPoints
+                            this.currentPoints = startingPoints
+                            this.updateDashboardAccount(accountEmail, { initialPoints: startingPoints })
+                            this.logger.info(
+                                'main',
+                                'IMMEDIATE-PIPELINE',
+                                `[IMMEDIATE-PIPELINE] Saldo awal berhasil diinisialisasi via DAPI/Dashboard: ${startingPoints} Pts | ${accountEmail}`
+                            )
+                        }
+                    }
+                    if (this.config.workers.doDailyCheckIn) {
+                        try {
+                            this.updateDashboardAccount(accountEmail, { status: 'Daily Check-in' })
+                            await this.activities.doDailyCheckIn()
+                        } catch (checkInErr) {
+                            this.logger.warn(
+                                'main',
+                                'DAILY-CHECKIN',
+                                `Immediate Daily Check-in failed: ${checkInErr instanceof Error ? checkInErr.message : String(checkInErr)}`
+                            )
+                        }
+                    }
+
+                    if (this.config.workers.doReadToEarn) {
+                        try {
+                            this.updateDashboardAccount(accountEmail, { status: 'Read to Earn' })
+                            await this.activities.doReadToEarn()
+                        } catch (readErr) {
+                            this.logger.warn(
+                                'main',
+                                'READ-TO-EARN',
+                                `Immediate Read to Earn failed: ${readErr instanceof Error ? readErr.message : String(readErr)}`
+                            )
+                        }
+                    }
+                    immediateMobileExecuted = true
                 }
 
                 // Pastikan browser owner page tetap sehat di Dashboard Rewards & sinkronisasi cookies aktif
@@ -1680,21 +2321,66 @@ export class MicrosoftRewardsBot {
                 }
                 await this.utils.wait(2000)
 
+                if (this.mainMobilePage && !this.mainMobilePage.isClosed()) {
+                    const suspension = await checkPageSuspension(this.mainMobilePage)
+                    if (suspension.isSuspended) {
+                        this.logger.error(
+                            true,
+                            'ACCOUNT-SUSPENDED',
+                            `🚨 [ACCOUNT-SUSPENDED] Akun ${accountEmail} TERBUKTI DITANGGUHKAN (BANNED) oleh Microsoft!`
+                        )
+                        throw new AccountSuspendedError(accountEmail, suspension.reason)
+                    }
+                }
+
                 this.cookies.mobile = await initialContext.cookies()
                 this.fingerprint = mobileSession.fingerprint
 
                 let appData: AppDashboardData | null = null
                 try {
                     appData = await this.browser.func.getAppDashboardData()
-                } catch {}
+                } catch (error) {
+                    if (error instanceof AccountSuspendedError || (error as any)?.name === 'AccountSuspendedError') {
+                        throw error
+                    }
+                }
 
                 const detectedCountry = (appData?.response?.profile?.attributes?.country || 'ID').toUpperCase()
                 this.userData.geoLocale =
                     account.geoLocale === 'auto' ? detectedCountry : account.geoLocale.toLowerCase()
 
-                const data: DashboardData = await this.browser.func.getDashboardData()
+                let data: DashboardData
+                try {
+                    data = await this.browser.func.getDashboardData()
+                } catch (dashErr) {
+                    this.logger.warn(
+                        'main',
+                        'GET-DASHBOARD-DATA',
+                        `Gagal mengambil dashboard data via browser (${dashErr instanceof Error ? dashErr.message : String(dashErr)}), beralih ke fallback DAPI appData...`
+                    )
+                    const fallbackData = appData ? this.browser.func.mapAppDataToDashboard(appData) : null
+                    if (fallbackData) {
+                        data = fallbackData
+                    } else {
+                        const availPts = appData?.response?.balance ?? this.userData.initialPoints ?? 0
+                        data = {
+                            userStatus: {
+                                availablePoints: availPts,
+                                counters: {
+                                    pcSearch: [{ pointProgress: 0, pointProgressMax: 90 }],
+                                    mobileSearch: [{ pointProgress: 0, pointProgressMax: 60 }]
+                                }
+                            },
+                            dailySetPromotions: {},
+                            morePromotions: [],
+                            punchCards: []
+                        } as unknown as DashboardData
+                    }
+                }
 
-                this.userData.initialPoints = data.userStatus.availablePoints
+                if (!this.userData.initialPoints || this.userData.initialPoints <= 0) {
+                    this.userData.initialPoints = data.userStatus.availablePoints
+                }
                 this.userData.currentPoints = data.userStatus.availablePoints
                 const initialPoints = this.userData.initialPoints ?? 0
 
@@ -1717,12 +2403,105 @@ export class MicrosoftRewardsBot {
                     status: 'Processing Tasks'
                 })
 
-                const browserEarnable = await this.browser.func.getBrowserEarnablePoints()
+                const browserEarnable = await this.browser.func.getBrowserEarnablePoints(data)
                 this.logger.info(
                     'main',
                     'POINTS',
-                    `Earnable today | Mobile: ${browserEarnable.mobileSearchPoints} | Desktop: ${browserEarnable.desktopSearchPoints} | Daily Set: ${browserEarnable.dailySetPoints} | More: ${browserEarnable.morePromotionsPoints} | Total: ${browserEarnable.totalEarnablePoints} | ${redactAccountKey(accountEmail)}`
+                    `Earnable today | Mobile: ${browserEarnable.mobileSearchPoints} | Desktop: ${browserEarnable.desktopSearchPoints} | Daily Set: ${browserEarnable.dailySetPoints} | More: ${browserEarnable.morePromotionsPoints} | Total: ${browserEarnable.totalEarnablePoints} | ${accountEmail}`
                 )
+
+                // Fetch DAPI app-earnable points if access token is available
+                let appEarnable: any = null
+                if (this.accessToken) {
+                    try {
+                        appEarnable = await this.browser.func.getAppEarnablePoints()
+                    } catch {}
+                }
+
+                // --- 1. Fast-Path Early Exit Evaluation ---
+                const now = new Date()
+                const todayLocal = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`
+                const todayUtc = `${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, '0')}${String(now.getUTCDate()).padStart(2, '0')}`
+                const validDates = new Set([todayLocal, todayUtc])
+
+                const dailySetMapItems: any[] = Object.values(data?.dailySetPromotions ?? {}).flat()
+                const fallbackPromos = [
+                    ...(data?.promotionalItems ?? []),
+                    ...(data?.morePromotions ?? []),
+                    ...(data?.morePromotionsWithoutPromotionalItems ?? [])
+                ].filter(x => (x?.offerId ?? '').toLowerCase().includes('dailyset'))
+                const allDailySetItems = [...new Map([...dailySetMapItems, ...fallbackPromos].map(p => [p.offerId, p])).values()].filter(x => {
+                    if (!x) return false
+                    const offerIdLower = (x.offerId ?? '').toLowerCase()
+                    if (offerIdLower.includes('locked')) return false
+                    const dateMatch = (x.offerId ?? '').match(/DailySet_(\d{8})/i)
+                    if (dateMatch && dateMatch[1] && !validDates.has(dateMatch[1])) return false
+                    return true
+                })
+                const isDailySetComplete = (browserEarnable.dailySetPoints === 0) && (
+                    allDailySetItems.length === 0 || allDailySetItems.every(x => x.complete || (x.pointProgressMax > 0 && (x.pointProgress ?? 0) >= x.pointProgressMax))
+                )
+
+                let isReadToEarnDone = true
+                if (this.config.workers.doReadToEarn) {
+                    if (appEarnable) {
+                        isReadToEarnDone = appEarnable.readToEarn === 0
+                    } else if (appData?.response?.promotions) {
+                        const readPromo = appData.response.promotions.find(p => p.attributes?.type === 'msnreadearn' || (p.attributes?.offerid ?? '').includes('readarticle'))
+                        isReadToEarnDone = readPromo ? (parseInt(readPromo.attributes?.pointmax ?? '0') <= parseInt(readPromo.attributes?.pointprogress ?? '0')) : false
+                    }
+                }
+
+                let isCheckInDone = true
+                if (this.config.workers.doDailyCheckIn) {
+                    if (appEarnable) {
+                        isCheckInDone = appEarnable.checkIn === 0
+                    } else if (appData?.response?.promotions) {
+                        const checkInPromo = appData.response.promotions.find(p => p.attributes?.type === 'checkin' || (p.attributes?.offerid ?? '').includes('CheckIn'))
+                        const lastUpdated = checkInPromo?.attributes?.last_updated ? new Date(checkInPromo.attributes.last_updated) : null
+                        isCheckInDone = Boolean(lastUpdated && (
+                            (lastUpdated.getUTCFullYear() === now.getUTCFullYear() &&
+                             lastUpdated.getUTCMonth() === now.getUTCMonth() &&
+                             lastUpdated.getUTCDate() === now.getUTCDate()) ||
+                            (lastUpdated.getFullYear() === now.getFullYear() &&
+                             lastUpdated.getMonth() === now.getMonth() &&
+                             lastUpdated.getDate() === now.getDate())
+                        ))
+                    }
+                }
+
+                const isDesktopSearchDone = browserEarnable.desktopSearchPoints === 0
+                const isMobileSearchDone = browserEarnable.mobileSearchPoints === 0
+
+                if (isDailySetComplete && isReadToEarnDone && isCheckInDone && isDesktopSearchDone && isMobileSearchDone) {
+                    this.logger.info(
+                        'main',
+                        'FAST-PATH',
+                        '⚡ [FAST-PATH] Akun sudah 100% selesai untuk hari ini. Melewati seluruh pipeline dalam hitungan detik.',
+                        'green'
+                    )
+
+                    if (mobileSession?.context) {
+                        try {
+                            await executionContext.run({ isMobile: true, account }, async () => {
+                                const isClosed = typeof (mobileSession!.context as any).isClosed === 'function'
+                                    ? (mobileSession!.context as any).isClosed()
+                                    : (mobileSession!.context as any).__isClosed === true
+                                if (!isClosed) {
+                                    await this.browser.func.closeBrowser(mobileSession!.context, accountEmail)
+                                }
+                            })
+                        } catch {}
+                        mobileContextClosed = true
+                    }
+
+                    this.updateDashboardAccount(accountEmail, {
+                        status: 'Completed',
+                        collectedPoints: 0
+                    })
+
+                    return { initialPoints, collectedPoints: 0 }
+                }
 
                 const accountIdentity = resolveAccountIdentity(this.activeAccount || { email: accountEmail })
 
@@ -1781,12 +2560,12 @@ export class MicrosoftRewardsBot {
                     await this.workers.doClaimBonusPoints(data)
                 }
 
-                if (this.config.workers.doDailyCheckIn) {
+                if (!immediateMobileExecuted && this.config.workers.doDailyCheckIn) {
                     this.updateDashboardAccount(accountEmail, { status: 'Daily Check-in' })
                     await this.activities.doDailyCheckIn()
                 }
 
-                if (this.config.workers.doReadToEarn) {
+                if (!immediateMobileExecuted && this.config.workers.doReadToEarn) {
                     this.updateDashboardAccount(accountEmail, { status: 'Read to Earn' })
                     await this.activities.doReadToEarn()
                 }
@@ -1848,7 +2627,8 @@ export class MicrosoftRewardsBot {
                     missingSearchPoints,
                     mobileSession,
                     account,
-                    accountEmail
+                    accountEmail,
+                    scope?.abortController.signal
                 )
 
                 // Post-Search Re-Evaluation: Re-fetch dashboard data to claim punchcards completed by searches (e.g. 4-day search challenges) and any remaining pending points!
@@ -1891,7 +2671,7 @@ export class MicrosoftRewardsBot {
                 this.logger.info(
                     'main',
                     'FLOW',
-                    `Collected: +${collectedPoints} | Mobile: +${mobilePoints} | Desktop: +${desktopPoints} | ${redactAccountKey(accountEmail)}`
+                    `Collected: +${collectedPoints} | Mobile: +${mobilePoints} | Desktop: +${desktopPoints} | ${accountEmail}`
                 )
 
                 return { initialPoints, collectedPoints: collectedPoints || 0 }
@@ -1923,11 +2703,13 @@ async function main(): Promise<void> {
         void flushAllWebhooks()
     })
     process.on('SIGINT', async () => {
+        rewardsBot.logSessionBandwidthSummary('SIGINT')
         rewardsBot.logger.warn('main', 'PROCESS', 'SIGINT received, executing graceful shutdown...')
         await rewardsBot.requestShutdown('SIGINT', 10000).catch(() => {})
         process.exit(130)
     })
     process.on('SIGTERM', async () => {
+        rewardsBot.logSessionBandwidthSummary('SIGTERM')
         rewardsBot.logger.warn('main', 'PROCESS', 'SIGTERM received, executing graceful shutdown...')
         await rewardsBot.requestShutdown('SIGTERM', 10000).catch(() => {})
         process.exit(143)
