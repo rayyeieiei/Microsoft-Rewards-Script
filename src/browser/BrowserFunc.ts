@@ -491,8 +491,16 @@ export default class BrowserFunc {
         }
     }
 
-    private cachedCounters: Counters | null = null
-    private syncCounter: number = 0
+    public cachedCounters: Counters | null = null
+    public syncCounter: number = 0
+
+    public setCachedCounters(counters: Counters): void {
+        this.cachedCounters = counters
+    }
+
+    public getCachedCounters(): Counters | null {
+        return this.cachedCounters
+    }
 
     public resetCounters(): void {
         this.cachedCounters = null

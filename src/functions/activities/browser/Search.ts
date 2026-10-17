@@ -93,7 +93,10 @@ export class Search extends Workers {
         let totalGainedPoints = 0
 
         try {
-            let searchCounters: Counters = await this.bot.browser.func.getSearchPoints()
+            if (data?.userStatus?.counters && !this.bot.browser.func.cachedCounters) {
+                this.bot.browser.func.cachedCounters = data.userStatus.counters
+            }
+            let searchCounters: Counters = await this.bot.browser.func.getSearchPoints(page, false, isMobile)
             const missingPoints = this.bot.browser.func.missingSearchPoints(searchCounters, isMobile)
             let missingPointsTotal = missingPoints.totalPoints
 
@@ -197,7 +200,6 @@ export class Search extends Workers {
             let stagnantLoop = 0
             const stagnantLoopMax = 3
             let isCooldownDetected = false
-            let queriesSinceLastBreak = 0
 
             const isAborted = () => Boolean(
                 this.bot.abortController?.signal?.aborted ||
@@ -383,20 +385,6 @@ export class Search extends Workers {
                         `All required ${isMobile ? 'Mobile' : 'Desktop'} search points earned, stopping search loop`
                     )
                     break
-                }
-
-                queriesSinceLastBreak++
-                if (queriesSinceLastBreak >= 5 && missingPointsTotal > 0 && !isAborted()) {
-                    const breakDelayMs = Math.floor(Math.random() * (35000 - 20000 + 1)) + 20000
-                    this.bot.logger.info(
-                        isMobile,
-                        'SEARCH-STEALTH',
-                        `[MICRO-BREAK] Mengambil jeda istirahat natural selama ${Math.round(breakDelayMs / 1000)} detik setelah 5 kueri berturut-turut...`,
-                        'cyan'
-                    )
-                    const breakSignal = this.bot.accountScope?.abortController?.signal || this.bot.abortController?.signal
-                    await interruptibleWait(breakDelayMs, breakSignal)
-                    queriesSinceLastBreak = 0
                 }
 
                 // Topical Chaining: Ekstrak related search keywords dari SERP Bing dan masukkan ke antrean kueri
@@ -619,20 +607,6 @@ export class Search extends Workers {
                                 'All required search points earned during extra searches'
                             )
                             break
-                        }
-
-                        queriesSinceLastBreak++
-                        if (queriesSinceLastBreak >= 5 && missingPointsTotal > 0 && !isAborted()) {
-                            const breakDelayMs = Math.floor(Math.random() * (35000 - 20000 + 1)) + 20000
-                            this.bot.logger.info(
-                                isMobile,
-                                'SEARCH-STEALTH',
-                                `[MICRO-BREAK] Mengambil jeda istirahat natural selama ${Math.round(breakDelayMs / 1000)} detik setelah 5 kueri berturut-turut...`,
-                                'cyan'
-                            )
-                            const breakSignal = this.bot.accountScope?.abortController?.signal || this.bot.abortController?.signal
-                            await interruptibleWait(breakDelayMs, breakSignal)
-                            queriesSinceLastBreak = 0
                         }
                     }
 
@@ -978,6 +952,11 @@ export class Search extends Workers {
         }
 
         // 2. Fallback network check (failOnStatusCode: false, no thrown errors)
+        // Guard: Do not execute network getuserinfo on desktop (_isMobile === false) to eliminate HTTP 400 spam
+        if (!_isMobile) {
+            return { verifiedGained: false }
+        }
+
         try {
             const ctx = page.context()
             if (ctx && ctx.request) {
