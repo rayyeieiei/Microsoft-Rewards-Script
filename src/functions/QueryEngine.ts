@@ -6,28 +6,40 @@ import type { MicrosoftRewardsBot } from '../index'
 import { QueryEngine } from '../interface/Config'
 
 export class QueryCore {
-    private static globalUsedQueries: Set<string> = new Set<string>()
+    private static sessionUsedQueries: Set<string> = new Set<string>()
 
     public static recordUsedQuery(query: string): void {
         if (!query) return
         const norm = query.trim().replace(/\s+/g, ' ').toLowerCase()
         if (norm) {
-            QueryCore.globalUsedQueries.add(norm)
+            QueryCore.sessionUsedQueries.add(norm)
         }
     }
 
     public static isQueryUsedGlobally(query: string): boolean {
         if (!query) return false
         const norm = query.trim().replace(/\s+/g, ' ').toLowerCase()
-        return QueryCore.globalUsedQueries.has(norm)
+        return QueryCore.sessionUsedQueries.has(norm)
+    }
+
+    public static isQueryUsedInSession(query: string): boolean {
+        return QueryCore.isQueryUsedGlobally(query)
     }
 
     public static getGlobalUsedQueriesCount(): number {
-        return QueryCore.globalUsedQueries.size
+        return QueryCore.sessionUsedQueries.size
+    }
+
+    public static getSessionUsedQueriesCount(): number {
+        return QueryCore.sessionUsedQueries.size
     }
 
     public static clearGlobalUsedQueries(): void {
-        QueryCore.globalUsedQueries.clear()
+        QueryCore.sessionUsedQueries.clear()
+    }
+
+    public static clearSessionUsedQueries(): void {
+        QueryCore.sessionUsedQueries.clear()
     }
 
     constructor(private bot: MicrosoftRewardsBot) {}
@@ -428,6 +440,8 @@ export class QueryCore {
             const request: AxiosRequestConfig = {
                 url: `https://wikimedia.org/api/rest_v1/metrics/pageviews/top/${langCode}.wikipedia/all-access/${yyyy}/${mm}/${dd}`,
                 method: 'GET',
+                timeout: 3000,
+                ...({ 'axios-retry': { retries: 0 } } as any),
                 headers: {
                     ...(this.bot.fingerprint?.headers ?? {})
                 }
