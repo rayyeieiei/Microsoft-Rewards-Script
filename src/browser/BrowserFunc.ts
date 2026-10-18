@@ -512,8 +512,14 @@ export default class BrowserFunc {
      * @param {Page} [page] Optional active page to extract fast in-page counters from
      * @param {boolean} [forceNetwork] Force network sync with dashboard API
      * @param {boolean} [isMobile] Current search mode for optimistic counter progression
+     * @param {boolean} [allowOptimisticIncrement] Allow +3 optimistic delta only after an actual search query
      */
-    async getSearchPoints(page?: Page, forceNetwork: boolean = false, isMobile?: boolean): Promise<Counters> {
+    async getSearchPoints(
+        page?: Page,
+        forceNetwork: boolean = false,
+        isMobile?: boolean,
+        allowOptimisticIncrement: boolean = false
+    ): Promise<Counters> {
         // 1. Fast in-page evaluation if on rewards.bing.com
         if (page && !page.isClosed() && page.url().includes('rewards.bing.com')) {
             const inPageCounters = await page.evaluate(() => {
@@ -589,7 +595,7 @@ export default class BrowserFunc {
         // Avoid heavy cascading HTTP fallback (getDashboardData) on every single query
         this.syncCounter++
         if (!forceNetwork && this.cachedCounters && this.syncCounter < 4) {
-            if (typeof isMobile === 'boolean') {
+            if (allowOptimisticIncrement && typeof isMobile === 'boolean') {
                 const targetList = isMobile ? this.cachedCounters.mobileSearch : this.cachedCounters.pcSearch
                 if (targetList && targetList.length > 0 && targetList[0]) {
                     const currentProgress = targetList[0].pointProgress || 0
@@ -607,19 +613,21 @@ export default class BrowserFunc {
         // during Desktop search (isMobile === false) or while active page is on bing.com!
         if (isMobile === false || (page && !page.isClosed() && page.url().includes('bing.com'))) {
             if (this.cachedCounters) {
-                const targetList = isMobile ? this.cachedCounters.mobileSearch : this.cachedCounters.pcSearch
-                if (targetList && targetList[0]) {
-                    const currentProgress = targetList[0].pointProgress || 0
-                    const maxProgress = targetList[0].pointProgressMax || (isMobile ? 60 : 90)
-                    if (currentProgress < maxProgress) {
-                        targetList[0].pointProgress = Math.min(maxProgress, currentProgress + 3)
+                if (allowOptimisticIncrement) {
+                    const targetList = isMobile ? this.cachedCounters.mobileSearch : this.cachedCounters.pcSearch
+                    if (targetList && targetList[0]) {
+                        const currentProgress = targetList[0].pointProgress || 0
+                        const maxProgress = targetList[0].pointProgressMax || (isMobile ? 60 : 90)
+                        if (currentProgress < maxProgress) {
+                            targetList[0].pointProgress = Math.min(maxProgress, currentProgress + 3)
+                        }
                     }
                 }
                 return this.cachedCounters
             }
 
             const fallbackCounters = {
-                pcSearch: [{ pointProgress: 3, pointProgressMax: 90 }],
+                pcSearch: [{ pointProgress: 0, pointProgressMax: 90 }],
                 mobileSearch: []
             } as unknown as Counters
             this.cachedCounters = fallbackCounters

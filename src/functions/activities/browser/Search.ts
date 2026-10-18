@@ -96,7 +96,7 @@ export class Search extends Workers {
             if (data?.userStatus?.counters && !this.bot.browser.func.cachedCounters) {
                 this.bot.browser.func.cachedCounters = data.userStatus.counters
             }
-            let searchCounters: Counters = await this.bot.browser.func.getSearchPoints(page, false, isMobile)
+            let searchCounters: Counters = await this.bot.browser.func.getSearchPoints(page, false, isMobile, false)
             const missingPoints = this.bot.browser.func.missingSearchPoints(searchCounters, isMobile)
             let missingPointsTotal = missingPoints.totalPoints
 
@@ -307,6 +307,10 @@ export class Search extends Workers {
                         )
                         effectiveGained = baselineGained
                         effectiveMissingPointsTotal = decrementedRemaining
+                        if (this.bot.browser.func.cachedCounters?.pcSearch?.[0]) {
+                            const max = this.bot.browser.func.cachedCounters.pcSearch[0].pointProgressMax || 90
+                            this.bot.browser.func.cachedCounters.pcSearch[0].pointProgress = Math.max(0, max - decrementedRemaining)
+                        }
                     }
                 }
 
@@ -540,6 +544,10 @@ export class Search extends Workers {
                                 )
                                 effectiveGained = baselineGained
                                 effectiveMissingPointsTotal = decrementedRemaining
+                                if (this.bot.browser.func.cachedCounters?.pcSearch?.[0]) {
+                                    const max = this.bot.browser.func.cachedCounters.pcSearch[0].pointProgressMax || 90
+                                    this.bot.browser.func.cachedCounters.pcSearch[0].pointProgress = Math.max(0, max - decrementedRemaining)
+                                }
                             }
                         }
 
@@ -780,7 +788,7 @@ export class Search extends Workers {
                     }
                 }
 
-                const counters = await this.bot.browser.func.getSearchPoints(searchPage, false, isMobile)
+                const counters = await this.bot.browser.func.getSearchPoints(searchPage, false, isMobile, true)
 
                 this.bot.logger.debug(
                     isMobile,
