@@ -8,7 +8,8 @@ import {
     performBoundedSafeScroll,
     isLocalAppUri,
     extractHttpUrlFromAppUri,
-    isDocumentNotFound
+    isDocumentNotFound,
+    ensureOnRewardsDashboard
 } from '../../../runtime/BrowserOperationGuard'
 
 export class UrlReward extends Workers {
@@ -113,16 +114,8 @@ export class UrlReward extends Workers {
                 }
 
                 if (isDailySet) {
-                    if (
-                        !currentUrl.endsWith('rewards.bing.com/') &&
-                        !currentUrl.endsWith('rewards.bing.com') &&
-                        !currentUrl.includes('/dashboard')
-                    ) {
-                        await page
-                            .goto('https://rewards.bing.com', { waitUntil: 'domcontentloaded', timeout: 15000 })
-                            .catch(() => {})
-                        await this.bot.utils.wait(1500)
-                    }
+                    await ensureOnRewardsDashboard(page, 15000)
+                    await this.bot.utils.wait(1000)
                 } else {
                     if (!punchCard) {
                         if (!currentUrl.includes('/earn')) {

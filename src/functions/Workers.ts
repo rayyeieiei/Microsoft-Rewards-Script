@@ -9,7 +9,8 @@ import {
     isLocalAppUri,
     extractHttpUrlFromAppUri,
     isAppExclusiveUri,
-    isDocumentNotFound
+    isDocumentNotFound,
+    ensureOnRewardsDashboard
 } from '../runtime/BrowserOperationGuard'
 import { ManualQuestQueue } from '../runtime/manual/ManualQuestQueue'
 import { resolveAccountIdentity } from '../runtime/identity/AccountIdentity'
@@ -256,6 +257,17 @@ export class Workers {
                     'DASHBOARD',
                     `${prefix}⚠️ Re-check mendeteksi masih ada ${(finalVerify as any).remaining} koin pending di dashboard.`
                 )
+
+                if (!isRecheck && !finalVerify.isClean && (finalVerify as any).remaining > 0) {
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'DASHBOARD',
+                        `[CLAIM-RETRY] Koin masih pending (+${(finalVerify as any).remaining} pts), melakukan jeda 2.5s dan mencoba klaim ulang 1x...`,
+                        'yellow'
+                    )
+                    await this.bot.utils.wait(2500)
+                    return await this.doClaimPendingPoints(page, true)
+                }
             }
             return true
         } catch {
@@ -265,6 +277,10 @@ export class Workers {
     }
 
     public async doDailySet(data: DashboardData, page: Page) {
+        if (page && !page.isClosed()) {
+            await ensureOnRewardsDashboard(page, 12000)
+        }
+
         // 1. Ambil item Daily Set secara presisi dari tanggal hari ini (API)
         const now = new Date()
         const todayFormatted = this.bot.utils.getFormattedDate() // "MM/DD/YYYY"
@@ -337,13 +353,8 @@ export class Workers {
         // 2. Fallback: HANYA jika dari API sama sekali tidak ditemukan item Daily Set hari ini, periksa Live DOM Dashboard
         if (uniqueDailySet.length === 0 && activitiesUncompleted.length === 0) {
             try {
-                const currentUrl = page.url().toLowerCase()
-                if (!currentUrl.includes('rewards.bing.com')) {
-                    await page
-                        .goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 15000 })
-                        .catch(() => {})
-                    await this.bot.utils.wait(2000)
-                }
+                await ensureOnRewardsDashboard(page, 15000)
+                await this.bot.utils.wait(1500)
 
                 const liveDailySetCards: BasePromotion[] = await page
                     .evaluate(() => {
@@ -494,7 +505,7 @@ export class Workers {
             // 3. Ambil SATU server snapshot setelah batch
             await this.bot.utils.wait(2000)
             const refreshedData: DashboardData | null = await this.bot.browser.func.getDashboardData().catch(() => null)
-            const updatedBalance =
+            let updatedBalance =
                 refreshedData?.userStatus?.availablePoints ??
                 (await this.bot.browser.func.getCurrentPoints().catch(() => startBalance))
             const observedBalanceDelta = Math.max(0, updatedBalance - startBalance)
@@ -555,7 +566,7 @@ export class Workers {
             }
 
             // 5. Buat summary dari hasil reconciliation
-            const allResults = Array.from(executionMap.values())
+            let allResults = Array.from(executionMap.values())
             const summary: ActivityBatchSummary = {
                 total: allResults.length,
                 verifiedComplete: allResults.filter(r => r.status === 'verified-complete').length,
@@ -564,6 +575,86 @@ export class Workers {
                 skipped: allResults.filter(r => r.status === 'skipped').length,
                 failed: allResults.filter(r => r.status === 'failed').length,
                 observedAccountBalanceDelta: observedBalanceDelta
+            }
+
+            // 6. Targeted 1x Auto-Retry untuk item yang berstatus processed-unverified akibat blip sinyal
+            const isAborted = () => Boolean(
+                this.bot.abortController?.signal?.aborted ||
+                this.bot.accountScope?.abortController?.signal?.aborted ||
+                page.isClosed()
+            )
+
+            if (summary.processedUnverified > 0 && !isAborted()) {
+                const unverifiedItems = activitiesUncompleted.filter(a => {
+                    const res = executionMap.get(a.offerId || a.title)
+                    return res && res.status === 'processed-unverified'
+                })
+
+                if (unverifiedItems.length > 0) {
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'DAILY-SET',
+                        `[DAILY-SET-RETRY] Mencoba ulang ${unverifiedItems.length} item Daily Set yang belum terverifikasi akibat blip jaringan: "${unverifiedItems.map(i => i.title).join(', ')}"...`,
+                        'yellow'
+                    )
+                    await this.bot.utils.wait(2000)
+                    await this.solveActivities(unverifiedItems, page)
+
+                    // Re-fetch snapshot kedua
+                    await this.bot.utils.wait(2000)
+                    const retryRefreshedData: DashboardData | null = await this.bot.browser.func.getDashboardData().catch(() => null)
+                    const retryUpdatedBalance =
+                        retryRefreshedData?.userStatus?.availablePoints ??
+                        (await this.bot.browser.func.getCurrentPoints().catch(() => updatedBalance))
+                    const retryObservedBalanceDelta = Math.max(0, retryUpdatedBalance - startBalance)
+
+                    const retryFreshItems: BasePromotion[] = retryRefreshedData?.dailySetPromotions
+                        ? (Object.values(retryRefreshedData.dailySetPromotions).flat() as BasePromotion[])
+                        : []
+                    const retryFallbackFresh: BasePromotion[] = retryRefreshedData
+                        ? ([...(retryRefreshedData.promotionalItems ?? []), ...(retryRefreshedData.morePromotions ?? [])].filter(x =>
+                              (x?.offerId ?? '').toLowerCase().includes('dailyset')
+                          ) as BasePromotion[])
+                        : []
+                    const retryAllFreshDailySet = [...retryFreshItems, ...retryFallbackFresh]
+
+                    for (const [key, result] of executionMap.entries()) {
+                        if (result.status === 'verified-complete') continue
+                        const freshMatch = retryAllFreshDailySet.find(
+                            f =>
+                                f &&
+                                (f.offerId === result.offerId ||
+                                    (f.title && f.title.toLowerCase().trim() === result.title.toLowerCase().trim()))
+                        )
+                        const isVerifiedInSession = Boolean(
+                            (result.offerId && this.verifiedOffersInSession.has(result.offerId)) ||
+                            (result.title && this.verifiedOffersInSession.has(result.title.toLowerCase().trim()))
+                        )
+                        const isServerComplete = Boolean(
+                            isVerifiedInSession ||
+                            (freshMatch &&
+                                (freshMatch.complete === true ||
+                                    (freshMatch.pointProgressMax > 0 &&
+                                        (freshMatch.pointProgress ?? 0) >= freshMatch.pointProgressMax)))
+                        )
+
+                        if (isServerComplete) {
+                            executionMap.set(key, {
+                                ...result,
+                                status: 'verified-complete',
+                                serverCompleted: true,
+                                completionEvidence: 'server-dashboard-state',
+                                observedBalanceDelta: retryObservedBalanceDelta
+                            })
+                        }
+                    }
+
+                    allResults = Array.from(executionMap.values())
+                    summary.verifiedComplete = allResults.filter(r => r.status === 'verified-complete').length
+                    summary.processedUnverified = allResults.filter(r => r.status === 'processed-unverified').length
+                    summary.observedAccountBalanceDelta = retryObservedBalanceDelta
+                    updatedBalance = Math.max(updatedBalance, retryUpdatedBalance)
+                }
             }
 
             this.bot.userData.currentPoints = Math.max(this.bot.userData.currentPoints ?? 0, updatedBalance)
@@ -1377,7 +1468,7 @@ export class Workers {
                             if (targetChildOfferId) this.completedOffersInSession.add(targetChildOfferId)
                             this.bot.accountScope?.recordAttempt(offerId, targetChildOfferId, 'execution-unavailable')
                             stepsProcessed++
-                            continue
+                            break
                         }
 
                         const currentTaskCounts = this.getPunchCardTaskCounts(card)

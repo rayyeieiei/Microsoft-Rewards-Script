@@ -38,7 +38,7 @@ import { DataSaverManager, mapResourceTypeToCategory } from './util/DataSaver'
 import { Database } from './util/Database'
 import { AccountScope } from './runtime/AccountScope'
 import { AccountDisposer } from './runtime/AccountDisposer'
-import { createManagedPage, recoverOwnerPage, interruptibleWait } from './runtime/BrowserOperationGuard'
+import { createManagedPage, recoverOwnerPage, interruptibleWait, ensureOnRewardsDashboard } from './runtime/BrowserOperationGuard'
 import crypto from 'crypto'
 import {
     validateOwnershipPolicy,
@@ -2357,18 +2357,7 @@ export class MicrosoftRewardsBot {
                                     accountScope: accountEmail
                                 })
                             } else {
-                                const currentUrl = this.mainMobilePage.url()
-                                if (
-                                    !currentUrl.includes('rewards.bing.com/dashboard') &&
-                                    !currentUrl.includes('rewards.bing.com')
-                                ) {
-                                    await this.mainMobilePage
-                                        .goto(this.config.baseURL, {
-                                            waitUntil: 'domcontentloaded',
-                                            timeout: 10000
-                                        })
-                                        .catch(() => {})
-                                }
+                                await ensureOnRewardsDashboard(this.mainMobilePage, 12000)
                             }
                             await this.utils.wait(2000)
 

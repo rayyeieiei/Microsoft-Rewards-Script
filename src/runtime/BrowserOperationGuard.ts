@@ -657,3 +657,44 @@ export async function recoverOwnerPage(deps: OwnerPageRecoveryDependencies): Pro
 
     return newPage
 }
+
+/**
+ * Guarantees that the active page is navigated to the authenticated Rewards dashboard
+ * rather than getting stuck on marketing landing pages such as /about or /welcome.
+ */
+export async function ensureOnRewardsDashboard(page?: Page, timeoutMs = 15000): Promise<boolean> {
+    if (!page || (typeof page.isClosed === 'function' && page.isClosed())) {
+        return false
+    }
+    try {
+        const rawUrl = typeof page.url === 'function' ? page.url() : ''
+        const currentUrl = rawUrl.toLowerCase()
+        const isOnDashboard =
+            currentUrl.includes('rewards.bing.com/dashboard') &&
+            !currentUrl.includes('/about') &&
+            !currentUrl.includes('/welcome')
+
+        if (isOnDashboard) {
+            return true
+        }
+
+        // Force direct navigation to authenticated dashboard
+        const targetDashboard = 'https://rewards.bing.com/dashboard'
+        await page.goto(targetDashboard, {
+            waitUntil: 'domcontentloaded',
+            timeout: timeoutMs
+        }).catch(() => {})
+
+        // Short wait for cards / daily set container to attach to DOM
+        await page
+            .waitForSelector(
+                '#dailyset, [data-bi-area*="DailySet"], .daily-set, [id*="daily-set"], a#id_rh, .mee-icon-CheckMark',
+                { timeout: 3500 }
+            )
+            .catch(() => {})
+
+        return true
+    } catch {
+        return false
+    }
+}
