@@ -1076,6 +1076,109 @@ export async function runChapter30ZombieWorkerAndPunchCardResolverTests(): Promi
         console.log('✅ Test 17 Passed: Stealth & Security Hardening (Cross-Account Query Isolation, Stop Desktop Search HTTP 400 Spam, Deterministic Viewport, & PunchCard Session Cache) verified')
     }
 
+    // Test 18: Unified C2 Log Stream Sync, /about Dashboard Guard, Desktop Search Counter Accuracy, & Punch Card Early Break
+    {
+        const { broadcastC2Log, getC2LogHistory, clearC2LogHistory } = await import('../src/util/DashboardServer')
+        const { ensureOnRewardsDashboard } = await import('../src/runtime/BrowserOperationGuard')
+        const BrowserFunc = (await import('../src/browser/BrowserFunc')).default
+        const { Workers } = await import('../src/functions/Workers')
+
+        // 18a: Unified C2 Log Stream Ring Buffer & Multiline Splitting
+        clearC2LogHistory()
+        assert.strictEqual(getC2LogHistory().length, 0)
+
+        broadcastC2Log('[INFO] First test line')
+        broadcastC2Log('\n🔍 [ADB-NETWORK] Mengecek IP...\n🌍 [ADB-NETWORK] IP Lama: [ 1.2.3.4 ]\n')
+        
+        const history = getC2LogHistory()
+        assert.strictEqual(history.length, 3, 'Multiline logs must be cleanly split into separate ring buffer lines')
+        assert.strictEqual(history[0], '[INFO] First test line')
+        assert.strictEqual(history[1], '🔍 [ADB-NETWORK] Mengecek IP...')
+        assert.strictEqual(history[2], '🌍 [ADB-NETWORK] IP Lama: [ 1.2.3.4 ]')
+
+        // Test ring buffer cap
+        for (let i = 0; i < 1050; i++) {
+            broadcastC2Log(`[LOG-${i}]`)
+        }
+        assert.strictEqual(getC2LogHistory().length, 1000, 'Ring buffer must clamp strictly to 1000 lines max')
+        clearC2LogHistory()
+
+        // 18b: ensureOnRewardsDashboard Guard (Redirect /about to /dashboard)
+        let navigatedUrls: string[] = []
+        const mockAboutPage: any = {
+            isClosed: () => false,
+            url: () => 'https://rewards.bing.com/about',
+            goto: async (url: string) => {
+                navigatedUrls.push(url)
+            },
+            waitForSelector: async () => {}
+        }
+
+        const resAbout = await ensureOnRewardsDashboard(mockAboutPage, 5000)
+        assert.strictEqual(resAbout, true)
+        assert.strictEqual(navigatedUrls.length, 1)
+        assert.strictEqual(navigatedUrls[0], 'https://rewards.bing.com/dashboard', 'Must force direct navigation to /dashboard when on /about')
+
+        // Clean dashboard URL should not trigger goto
+        navigatedUrls = []
+        const mockDashboardPage: any = {
+            isClosed: () => false,
+            url: () => 'https://rewards.bing.com/dashboard',
+            goto: async (url: string) => {
+                navigatedUrls.push(url)
+            },
+            waitForSelector: async () => {},
+            evaluate: async () => null
+        }
+        const resDash = await ensureOnRewardsDashboard(mockDashboardPage, 5000)
+        assert.strictEqual(resDash, true)
+        assert.strictEqual(navigatedUrls.length, 0, 'Page already on /dashboard must not trigger redundant navigation')
+
+        // 18c: Desktop Search Initial Counter Accuracy (no 3-pt optimistic drop on initial inspection)
+        const mockBot: any = {
+            isMobile: false,
+            userData: { currentPoints: 5000 },
+            logger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} },
+            utils: { wait: async () => {}, randomDelay: () => 0 }
+        }
+        const bf = new BrowserFunc(mockBot)
+        const testCounters = {
+            pcSearch: [{ pointProgress: 36, pointProgressMax: 90 }],
+            mobileSearch: []
+        }
+        bf.setCachedCounters(JSON.parse(JSON.stringify(testCounters)))
+
+        // Initial inspection (allowOptimisticIncrement = false): pointProgress MUST remain 36
+        const initialInspection = await bf.getSearchPoints(mockDashboardPage, false, false, false)
+        assert.strictEqual(initialInspection.pcSearch?.[0]?.pointProgress, 36, 'Initial quota inspection must not increment progress')
+        const missingInitial = bf.missingSearchPoints(initialInspection, false)
+        assert.strictEqual(missingInitial.totalPoints, 54, 'Missing points must remain exactly 54 (90 - 36), without 3pt false deduction')
+
+        // Post-search inspection (allowOptimisticIncrement = true): pointProgress advances to 39
+        const postSearchInspection = await bf.getSearchPoints(mockDashboardPage, false, false, true)
+        assert.strictEqual(postSearchInspection.pcSearch?.[0]?.pointProgress, 39, 'Post-search inspection must increment progress by 3')
+
+        // 18d: Cached Counters Baseline Sync Validation
+        if (bf.cachedCounters?.pcSearch?.[0]) {
+            const max = bf.cachedCounters.pcSearch[0].pointProgressMax || 90
+            const decrementedRemaining = 48
+            bf.cachedCounters.pcSearch[0].pointProgress = Math.max(0, max - decrementedRemaining)
+        }
+        assert.strictEqual(bf.cachedCounters?.pcSearch?.[0]?.pointProgress, 42)
+        const missingAfterSync = bf.missingSearchPoints(bf.cachedCounters!, false)
+        assert.strictEqual(missingAfterSync.totalPoints, 48, 'Cached counter sync must match decrementedRemaining')
+
+        // 18e: Punch Card Broken / Unverified Step Cache & Early Break State
+        const testBrokenStep = 'broken_step_18'
+        Workers.recordUnverifiedPunchCardStep(testBrokenStep)
+        assert.strictEqual(Workers.isPunchCardStepUnverified(testBrokenStep), true, 'Unverified punchcard step must be recorded in session cache')
+        assert.strictEqual(Workers.isPunchCardStepBroken(testBrokenStep), true, 'Broken check must return true for unverified step')
+        Workers.clearBrokenPunchCardSteps()
+        assert.strictEqual(Workers.isPunchCardStepUnverified(testBrokenStep), false, 'Cache clear must remove recorded broken step')
+
+        console.log('✅ Test 18 Passed: Unified C2 Log Stream Sync, /about Dashboard Guard, Desktop Search Counter Accuracy, & Punch Card Early Break verified')
+    }
+
     console.log('🎉 Chapter 30 Zombie Worker & Punch Card Resolver Test Suite PASSED!')
 }
 
