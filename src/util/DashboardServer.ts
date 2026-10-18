@@ -6,6 +6,32 @@ import { EventEmitter } from 'events'
 import { Database } from './Database'
 
 export const logEmitter = new EventEmitter()
+logEmitter.setMaxListeners(100)
+
+const MAX_LOG_RING_BUFFER = 1000
+const logRingBuffer: string[] = []
+
+export function broadcastC2Log(msg: string): void {
+    if (!msg) return
+    const lines = String(msg).split(/\r?\n/)
+    for (const rawLine of lines) {
+        const line = rawLine.trim()
+        if (!line) continue
+        logRingBuffer.push(line)
+        if (logRingBuffer.length > MAX_LOG_RING_BUFFER) {
+            logRingBuffer.shift()
+        }
+        logEmitter.emit('log', line)
+    }
+}
+
+export function getC2LogHistory(): string[] {
+    return [...logRingBuffer]
+}
+
+export function clearC2LogHistory(): void {
+    logRingBuffer.length = 0
+}
 
 export interface AccountDashboardStatus {
     email: string
@@ -1011,6 +1037,11 @@ const htmlPage = `<!DOCTYPE html>
                 div.innerText = logText;
                 terminal.appendChild(div);
                 
+                // Limit terminal DOM elements to 1200 for peak UI responsiveness
+                while (terminal.childNodes.length > 1200) {
+                    terminal.removeChild(terminal.firstChild);
+                }
+                
                 // Keep terminal scrolled to bottom
                 terminal.parentNode.scrollTop = terminal.parentNode.scrollHeight;
             };
@@ -1190,9 +1221,19 @@ export class DashboardServer {
                         // Stream connection header
                         res.write('data: Nexus C2 Log stream initialized\n\n')
 
+                        // Replay historical ring buffer logs immediately upon client connection
+                        for (const historicalLine of logRingBuffer) {
+                            res.write(`data: ${historicalLine}\n\n`)
+                        }
+
                         const onLog = (msg: string) => {
-                            const cleanMsg = msg.replace(/\n/g, ' ')
-                            res.write(`data: ${cleanMsg}\n\n`)
+                            const lines = String(msg).split(/\r?\n/)
+                            for (const line of lines) {
+                                const cleanMsg = line.trim()
+                                if (cleanMsg) {
+                                    res.write(`data: ${cleanMsg}\n\n`)
+                                }
+                            }
                         }
 
                         logEmitter.on('log', onLog)

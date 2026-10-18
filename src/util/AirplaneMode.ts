@@ -1,4 +1,5 @@
 import { exec } from 'child_process';
+import { broadcastC2Log } from './DashboardServer';
 
 const execAsync = (cmd: string): Promise<{ stdout: string; stderr: string }> => {
     return new Promise((resolve, reject) => {
@@ -10,6 +11,17 @@ const execAsync = (cmd: string): Promise<{ stdout: string; stderr: string }> => 
 };
 
 export class AirplaneMode {
+
+    private static log(msg: string, isError = false): void {
+        if (isError) {
+            console.error(msg);
+        } else {
+            console.log(msg);
+        }
+        try {
+            broadcastC2Log(msg);
+        } catch {}
+    }
 
     private static async wait(ms: number) {
         return new Promise(resolve => setTimeout(resolve, ms));
@@ -53,15 +65,15 @@ export class AirplaneMode {
             // 0. Preflight check: Pastikan device terdeteksi
             const devCheck = await this.checkDevice(serial);
             if (!devCheck.ready) {
-                console.error(`🚨  [ADB-ERROR] Device ADB tidak terdeteksi (${devCheck.reason}). deviceCount=${devCheck.deviceCount}`);
+                this.log(`🚨  [ADB-ERROR] Device ADB tidak terdeteksi (${devCheck.reason}). deviceCount=${devCheck.deviceCount}`, true);
                 return false;
             }
 
-            console.log('\n🔍  [ADB-NETWORK] Mengecek IP (Jalur USB Tethering)...');
+            this.log('\n🔍  [ADB-NETWORK] Mengecek IP (Jalur USB Tethering)...');
             const ipSebelum = await this.checkIP();
-            console.log(`🌍  [ADB-NETWORK] IP Lama kamu: [ ${ipSebelum} ]`);
+            this.log(`🌍  [ADB-NETWORK] IP Lama kamu: [ ${ipSebelum} ]`);
 
-            console.log('\n✈️  [ADB-NETWORK] Menyalakan Airplane Mode (Membunuh sinyal data)...');
+            this.log('\n✈️  [ADB-NETWORK] Menyalakan Airplane Mode (Membunuh sinyal data)...');
 
             // 1. Coba cmd connectivity (Android 11+ AOSP)
             let airplaneActivated = false;
@@ -100,10 +112,10 @@ export class AirplaneMode {
                 await execAsync(`${adbPrefix} shell svc data disable`).catch(() => {});
             } catch {}
 
-            console.log(`⏳  [ADB-NETWORK] Nunggu ${delayBetweenMs / 1000} detik biar IP provider keriset...`);
+            this.log(`⏳  [ADB-NETWORK] Nunggu ${delayBetweenMs / 1000} detik biar IP provider keriset...`);
             await this.wait(delayBetweenMs);
 
-            console.log('📶  [ADB-NETWORK] Mematikan Airplane Mode (Mencari sinyal 4G/5G baru)...');
+            this.log('📶  [ADB-NETWORK] Mematikan Airplane Mode (Mencari sinyal 4G/5G baru)...');
 
             // 1. Coba cmd connectivity disable
             try {
@@ -126,33 +138,33 @@ export class AirplaneMode {
                 await execAsync(`${adbPrefix} shell svc data enable`).catch(() => {});
             } catch {}
 
-            console.log(`⏳  [ADB-NETWORK] Nunggu 8 detik biar sinyal radio HP stabil...`);
+            this.log(`⏳  [ADB-NETWORK] Nunggu 8 detik biar sinyal radio HP stabil...`);
             await this.wait(8000);
 
-            console.log('🔌  [ADB-NETWORK] Memastikan USB Tethering tetap menyala...');
+            this.log('🔌  [ADB-NETWORK] Memastikan USB Tethering tetap menyala...');
             // Ada dua command sakti, kita tembak dua-duanya biar Samsung/Xiaomi/Oppo/Vivo nurut
             await execAsync(`${adbPrefix} shell cmd tethering tether usb`).catch(() => {});
             await execAsync(`${adbPrefix} shell svc usb setFunctions rndis`).catch(() => {});
 
-            console.log(`⏳  [ADB-NETWORK] Nunggu ${postDelayMs / 1000} detik biar PC Windows ngebaca jaringan USB...`);
+            this.log(`⏳  [ADB-NETWORK] Nunggu ${postDelayMs / 1000} detik biar PC Windows ngebaca jaringan USB...`);
             await this.wait(postDelayMs);
 
-            console.log('\n🔍  [ADB-NETWORK] Mengecek IP setelah rotasi...');
+            this.log('\n🔍  [ADB-NETWORK] Mengecek IP setelah rotasi...');
             const ipSesudah = await this.checkIP();
-            console.log(`🌍  [ADB-NETWORK] IP Baru kamu: [ ${ipSesudah} ]`);
+            this.log(`🌍  [ADB-NETWORK] IP Baru kamu: [ ${ipSesudah} ]`);
 
             if (ipSebelum !== ipSesudah && ipSesudah !== 'Gagal_Cek_IP') {
-                console.log('\n✅  [ADB-NETWORK] SUCCESS! IP berhasil rotasi via USB Kabel! Koneksi dewa!\n');
+                this.log('\n✅  [ADB-NETWORK] SUCCESS! IP berhasil rotasi via USB Kabel! Koneksi dewa!\n');
                 return true;
             } else if (ipSebelum === ipSesudah) {
-                console.log('\n⚠️  [ADB-NETWORK] WARNING: IP kamu masih sama! Provider masih menahan sesi IP.\n');
+                this.log('\n⚠️  [ADB-NETWORK] WARNING: IP kamu masih sama! Provider masih menahan sesi IP.\n');
                 return false;
             } else {
-                console.log('\n❌  [ADB-NETWORK] ERROR: Gagal cek IP. Pastikan saklar USB Tethering di HP kamu nyala.\n');
+                this.log('\n❌  [ADB-NETWORK] ERROR: Gagal cek IP. Pastikan saklar USB Tethering di HP kamu nyala.\n');
                 return false;
             }
         } catch (error) {
-            console.error('🚨  [ADB-ERROR] Waduh, gagal ngeksekusi command ADB:', error);
+            this.log(`🚨  [ADB-ERROR] Waduh, gagal ngeksekusi command ADB: ${error instanceof Error ? error.message : String(error)}`, true);
             return false;
         }
     }

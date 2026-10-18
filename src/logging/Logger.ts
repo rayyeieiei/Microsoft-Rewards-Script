@@ -5,7 +5,7 @@ import { sendNtfy } from './Ntfy'
 import type { MicrosoftRewardsBot } from '../index'
 import { errorDiagnostic } from '../util/ErrorDiagnostic'
 import type { LogFilter } from '../interface/Config'
-import { logEmitter } from '../util/DashboardServer'
+import { broadcastC2Log } from '../util/DashboardServer'
 import { Database } from '../util/Database'
 import { sanitizeLogMessage } from '../util/Redaction'
 
@@ -88,7 +88,7 @@ export class Logger {
             `[${now}] [${userName}] [${levelTag}] ${platformText(isMobile)} [${title}] ${formatted}`,
             false
         )
-        logEmitter.emit('log', cleanMsg)
+        broadcastC2Log(cleanMsg)
 
         if (level === 'error' || level === 'warn') {
             void Database.getInstance().insertSystemLog(level, title, formatted)
