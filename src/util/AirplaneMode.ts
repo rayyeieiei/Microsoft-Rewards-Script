@@ -1,5 +1,6 @@
 import { exec } from 'child_process'
 import { promisify } from 'util'
+import dns from 'dns'
 import { broadcastC2Log } from './DashboardServer'
 
 const execAsync = promisify(exec)
@@ -164,11 +165,39 @@ export class AirplaneMode {
                 process.stdout.write('\x07')
             }
 
+            // DNS Readiness Guard Pasca Rotasi IP ADB: pastikan tabel DNS pulih sebelum melanjutkan ke akun berikutnya
+            await this.ensureDnsReady('rewards.bing.com')
+
             return ipSebelum !== ipSesudah && ipSesudah !== 'Gagal_Cek_IP'
         } catch (error) {
             errorAdb('🚨  [ADB-ERROR] Waduh, gagal ngeksekusi command ADB:', error)
             process.stdout.write('\x07')
             return false
         }
+    }
+
+    /**
+     * DNS Readiness Guard Pasca Rotasi IP ADB:
+     * Memastikan resolver DNS Linux (systemd-resolved / NetworkManager) telah pulih
+     * dan dapat me-resolve rewards.bing.com sebelum melanjutkan ke akun berikutnya.
+     */
+    public static async ensureDnsReady(
+        host: string = 'rewards.bing.com',
+        maxRetries: number = 5,
+        retryDelayMs: number = 1500
+    ): Promise<boolean> {
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                await dns.promises.lookup(host)
+                logAdb('🌐 [ADB-NETWORK] DNS Resolver Linux aktif & siap digunakan!')
+                return true
+            } catch {
+                if (attempt < maxRetries) {
+                    await this.wait(retryDelayMs)
+                }
+            }
+        }
+        logAdb(`⚠️ [ADB-NETWORK] DNS Resolver belum merespons untuk ${host} setelah ${maxRetries} percobaan.`)
+        return false
     }
 }
