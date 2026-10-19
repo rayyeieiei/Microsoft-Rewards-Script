@@ -54,7 +54,7 @@ class Browser {
                 await Promise.race([
                     this.currentBrowser.close(),
                     new Promise((_, reject) =>
-                        setTimeout(() => reject(new Error('Browser recycle timeout')), 3000)
+                        setTimeout(() => reject(new Error('Browser recycle timeout')), 5000)
                     )
                 ])
             } catch {
@@ -62,6 +62,8 @@ class Browser {
                     const proc = this.currentBrowser.process?.()
                     if (proc && !proc.killed && typeof proc.kill === 'function') {
                         proc.kill('SIGKILL')
+                    } else if (proc?.pid) {
+                        process.kill(proc.pid, 'SIGKILL')
                     }
                 } catch {}
             } finally {

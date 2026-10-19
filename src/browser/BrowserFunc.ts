@@ -719,8 +719,13 @@ export default class BrowserFunc {
         }
     }
 
-    async closeBrowser(browser: BrowserContext, email: string) {
-        const rootBrowser = (browser as any).browser?.() || null
+    async closeBrowser(browser: BrowserContext, email: string, closeTimeoutMs: number = 5000) {
+        const rootBrowser = (browser as any).browser?.() || (browser as any)._browser || null
+        const browserProcess =
+            (typeof rootBrowser?.process === 'function' ? rootBrowser.process() : rootBrowser?.process) ||
+            (typeof (browser as any).process === 'function' ? (browser as any).process() : (browser as any).process) ||
+            null
+        const browserPid: number | undefined = browserProcess?.pid
 
         try {
             const isClosed = typeof (browser as any).isClosed === 'function'
@@ -749,16 +754,47 @@ export default class BrowserFunc {
         } catch (error) {
             this.bot.logger.error(this.bot.isMobile, 'CLOSE-BROWSER', `Failed to save session: ${error}`)
         } finally {
+            let closeTimedOut = false
             try {
                 (browser as any).__isClosed = true
-                await browser.close()
+
+                // Bounded context close
+                await Promise.race([
+                    browser.close(),
+                    new Promise((_, reject) =>
+                        setTimeout(() => reject(new Error('Browser context close timeout')), closeTimeoutMs)
+                    )
+                ]).catch(err => {
+                    closeTimedOut = true
+                    throw err
+                })
 
                 if (rootBrowser) {
-                    await rootBrowser.close().catch(() => {})
+                    // Bounded root browser close
+                    await Promise.race([
+                        rootBrowser.close(),
+                        new Promise((_, reject) =>
+                            setTimeout(() => reject(new Error('Root browser close timeout')), closeTimeoutMs)
+                        )
+                    ]).catch(err => {
+                        closeTimedOut = true
+                        throw err
+                    })
                 }
 
                 this.bot.logger.info(this.bot.isMobile, 'CLOSE-BROWSER', 'All browser resources closed.')
             } catch (closeError) {
+                // Orphan process reaper di Linux jika close timeout atau gagal
+                if ((closeTimedOut || process.platform === 'linux') && (browserProcess || browserPid)) {
+                    try {
+                        if (browserProcess && !browserProcess.killed && typeof browserProcess.kill === 'function') {
+                            browserProcess.kill('SIGKILL')
+                        } else if (browserPid) {
+                            process.kill(browserPid, 'SIGKILL')
+                        }
+                    } catch {}
+                }
+
                 this.bot.logger.warn(
                     this.bot.isMobile,
                     'CLOSE-BROWSER',

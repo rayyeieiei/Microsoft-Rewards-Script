@@ -393,10 +393,16 @@ export class MicrosoftRewardsBot {
                 await AccountDisposer.dispose(this.accountScope).catch(() => {})
             }
             if (this.mainMobilePage && !this.mainMobilePage.isClosed()) {
-                await this.mainMobilePage.close().catch(() => {})
+                await Promise.race([
+                    this.mainMobilePage.close(),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('Mobile page close timeout')), 5000))
+                ]).catch(() => {})
             }
             if (this.mainDesktopPage && !this.mainDesktopPage.isClosed()) {
-                await this.mainDesktopPage.close().catch(() => {})
+                await Promise.race([
+                    this.mainDesktopPage.close(),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('Desktop page close timeout')), 5000))
+                ]).catch(() => {})
             }
             if (this.browserFactory) {
                 await this.browserFactory.recycleBrowser().catch(() => {})
