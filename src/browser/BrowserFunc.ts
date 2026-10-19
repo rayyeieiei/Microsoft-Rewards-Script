@@ -355,13 +355,21 @@ export default class BrowserFunc {
      * @param {Page} [page] Optional active page to extract fast in-page counters from
      * @param {boolean} [forceDapi=false] If true, bypasses in-memory cached counters
      * @param {boolean} [isMobile] Context indicator
+     * @param {boolean} [allowOptimisticIncrement=false] Allow optimistic counter increment (+3)
      */
-    async getSearchPoints(page?: Page, forceDapi: boolean = false, isMobile?: boolean): Promise<Counters> {
+    async getSearchPoints(
+        page?: Page,
+        forceDapi: boolean = false,
+        isMobile?: boolean,
+        allowOptimisticIncrement: boolean = false
+    ): Promise<Counters> {
+        let counters: Counters | null = null
+
         if (!forceDapi && this.cachedCounters) {
-            return this.cachedCounters
+            counters = this.cachedCounters
         }
 
-        if (page && !page.isClosed()) {
+        if (!counters && page && !page.isClosed()) {
             const inPageData = await page.evaluate(() => {
                 const dash = (window as any).dashboard
                 if (dash?.userStatus?.counters) return { counters: dash.userStatus.counters }
@@ -372,41 +380,62 @@ export default class BrowserFunc {
 
             if (inPageData?.counters) {
                 this.cachedCounters = inPageData.counters
-                return inPageData.counters
+                counters = inPageData.counters
             }
             if (inPageData?.rcPoints) {
                 this.bot.userData.currentPoints = inPageData.rcPoints
             }
         }
 
-        try {
-            const dashboardData = await this.getDashboardData()
-            const counters = dashboardData?.userStatus?.counters
-            if (counters && (counters.pcSearch?.length || counters.mobileSearch?.length)) {
-                this.cachedCounters = counters
-                return counters
-            }
-            const dailySearchPts = Number(dashboardData?.userStatus?.levelInfo?.bingSearchDailyPoints || 0)
-            if (dailySearchPts > 0) {
-                const res = {
-                    pcSearch: [{ pointProgress: 0, pointProgressMax: dailySearchPts }],
+        if (!counters) {
+            try {
+                const dashboardData = await this.getDashboardData()
+                const dCounters = dashboardData?.userStatus?.counters
+                if (dCounters && (dCounters.pcSearch?.length || dCounters.mobileSearch?.length)) {
+                    this.cachedCounters = dCounters
+                    counters = dCounters
+                } else {
+                    const dailySearchPts = Number(dashboardData?.userStatus?.levelInfo?.bingSearchDailyPoints || 0)
+                    if (dailySearchPts > 0) {
+                        const res = {
+                            pcSearch: [{ pointProgress: 0, pointProgressMax: dailySearchPts }],
+                            mobileSearch: []
+                        } as unknown as Counters
+                        this.cachedCounters = res
+                        counters = res
+                    } else {
+                        const res = dCounters || ({
+                            pcSearch: [{ pointProgress: 0, pointProgressMax: 60 }],
+                            mobileSearch: []
+                        } as unknown as Counters)
+                        this.cachedCounters = res
+                        counters = res
+                    }
+                }
+            } catch {
+                counters = {
+                    pcSearch: [{ pointProgress: 0, pointProgressMax: 60 }],
                     mobileSearch: []
                 } as unknown as Counters
-                this.cachedCounters = res
-                return res
             }
-            const res = counters || ({
-                pcSearch: [{ pointProgress: 0, pointProgressMax: 60 }],
-                mobileSearch: []
-            } as unknown as Counters)
-            this.cachedCounters = res
-            return res
-        } catch {
-            return {
-                pcSearch: [{ pointProgress: 0, pointProgressMax: 60 }],
-                mobileSearch: []
-            } as unknown as Counters
         }
+
+        if (allowOptimisticIncrement && counters) {
+            if (isMobile && counters.mobileSearch?.[0]) {
+                counters.mobileSearch[0].pointProgress = Math.min(
+                    counters.mobileSearch[0].pointProgressMax,
+                    (counters.mobileSearch[0].pointProgress || 0) + 3
+                )
+            } else if (!isMobile && counters.pcSearch?.[0]) {
+                counters.pcSearch[0].pointProgress = Math.min(
+                    counters.pcSearch[0].pointProgressMax,
+                    (counters.pcSearch[0].pointProgress || 0) + 3
+                )
+            }
+            this.cachedCounters = counters
+        }
+
+        return counters
     }
 
     missingSearchPoints(counters: Counters, isMobile?: boolean): MissingSearchPoints {

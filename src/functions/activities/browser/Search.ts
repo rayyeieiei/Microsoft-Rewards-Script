@@ -29,7 +29,7 @@ export class Search extends Workers {
             if (data?.userStatus?.counters) {
                 this.bot.browser.func.cachedCounters = JSON.parse(JSON.stringify(data.userStatus.counters))
             }
-            let searchCounters: Counters = await this.bot.browser.func.getSearchPoints(page, false, isMobile)
+            let searchCounters: Counters = await this.bot.browser.func.getSearchPoints(page, false, isMobile, false)
             const missingPoints = this.bot.browser.func.missingSearchPoints(searchCounters, isMobile)
             let missingPointsTotal = missingPoints.totalPoints
 
@@ -251,7 +251,16 @@ export class Search extends Workers {
                             `[COUNTER-ANOMALY] Terdeteksi lonjakan counter delta ${counterDelta} > 3! Mengunci penambahan poin sebesar baseline (+3 poin).`
                         )
                         gainedPoints = 3
-                        newMissingPointsTotal = Math.max(0, missingPointsTotal - 3)
+                        const decrementedRemaining = Math.max(0, missingPointsTotal - 3)
+                        newMissingPointsTotal = decrementedRemaining
+                        if (!isMobile && this.bot.browser.func.cachedCounters?.pcSearch?.[0]) {
+                            const max = this.bot.browser.func.cachedCounters.pcSearch[0].pointProgressMax
+                            this.bot.browser.func.cachedCounters.pcSearch[0].pointProgress = Math.max(0, max - decrementedRemaining)
+                        }
+                        if (!isMobile && searchCounters?.pcSearch?.[0]) {
+                            const max = searchCounters.pcSearch[0].pointProgressMax
+                            searchCounters.pcSearch[0].pointProgress = Math.max(0, max - decrementedRemaining)
+                        }
                     } else {
                         gainedPoints = Math.max(0, counterDelta)
                     }
@@ -460,7 +469,16 @@ export class Search extends Workers {
                                     `[COUNTER-ANOMALY] Terdeteksi lonjakan counter delta ${counterDelta} > 3! Mengunci penambahan poin sebesar baseline (+3 poin).`
                                 )
                                 gainedPoints = 3
-                                newMissingPointsTotal = Math.max(0, missingPointsTotal - 3)
+                                const decrementedRemaining = Math.max(0, missingPointsTotal - 3)
+                                newMissingPointsTotal = decrementedRemaining
+                                if (!isMobile && this.bot.browser.func.cachedCounters?.pcSearch?.[0]) {
+                                    const max = this.bot.browser.func.cachedCounters.pcSearch[0].pointProgressMax
+                                    this.bot.browser.func.cachedCounters.pcSearch[0].pointProgress = Math.max(0, max - decrementedRemaining)
+                                }
+                                if (!isMobile && searchCounters?.pcSearch?.[0]) {
+                                    const max = searchCounters.pcSearch[0].pointProgressMax
+                                    searchCounters.pcSearch[0].pointProgress = Math.max(0, max - decrementedRemaining)
+                                }
                             } else {
                                 gainedPoints = Math.max(0, counterDelta)
                             }
