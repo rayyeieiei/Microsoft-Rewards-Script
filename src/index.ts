@@ -15,7 +15,7 @@ import { loadAccounts, loadConfig, getActiveConfigFile } from './util/Load'
 import { checkNodeVersion } from './util/Validator'
 
 import { Login } from './browser/auth/Login'
-import { Workers } from './functions/Workers'
+import { Workers, ensureOnRewardsDashboard } from './functions/Workers'
 import Activities from './functions/Activities'
 import { SearchManager } from './functions/SearchManager'
 import { HttpProxyAgent } from 'http-proxy-agent'
@@ -2349,6 +2349,10 @@ export class MicrosoftRewardsBot {
                 this.userData.geoLocale =
                     account.geoLocale === 'auto' ? detectedCountry : account.geoLocale.toLowerCase()
 
+                if (this.mainMobilePage) {
+                    await ensureOnRewardsDashboard(this.mainMobilePage)
+                }
+
                 let data: DashboardData
                 try {
                     data = await this.browser.func.getDashboardData()
@@ -2542,6 +2546,7 @@ export class MicrosoftRewardsBot {
                 }
 
                 if (this.config.workers.doDailySet && data && this.mainMobilePage) {
+                    await ensureOnRewardsDashboard(this.mainMobilePage)
                     this.updateDashboardAccount(accountEmail, { status: 'Daily Set' })
                     await this.workers.doDailySet(data, this.mainMobilePage)
                 }
