@@ -10,6 +10,7 @@ import {
 import { StickyDeviceProfile } from '../src/runtime/environment/StickyDeviceProfile'
 import BrowserFunc from '../src/browser/BrowserFunc'
 import { broadcastC2Log, logRingBuffer, MAX_LOG_RING_BUFFER_SIZE } from '../src/util/DashboardServer'
+import { AirplaneMode } from '../src/util/AirplaneMode'
 import type { DashboardData } from '../src/interface/DashboardData'
 import type { AppDashboardData } from '../src/interface/AppDashBoardData'
 
@@ -325,6 +326,69 @@ export async function runChapter30ZombieWorkerAndPunchCardResolverTests(): Promi
         const dirtyVerify = { isClean: false }
         assert.strictEqual(cleanVerify.isClean, true)
         assert.strictEqual(dirtyVerify.isClean, false, 'Uncleaned pending claim triggers 1x retry when !isRecheck')
+
+        // 6. WebGL Direct3D / ANGLE Spoofing for Desktop Sessions on Linux
+        assert.strictEqual(
+            BrowserEnvironmentPolicy.DEFAULT_DESKTOP_WEBGL_VENDOR,
+            'Google Inc. (Intel)',
+            'Desktop WebGL vendor must default to Google Inc. (Intel)'
+        )
+        assert.strictEqual(
+            BrowserEnvironmentPolicy.DEFAULT_DESKTOP_WEBGL_RENDERER,
+            'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+            'Desktop WebGL renderer must default to ANGLE Direct3D11'
+        )
+
+        const desktopInitScripts: any[] = []
+        const mockDesktopContext = {
+            addInitScript: async (fn: any, args: any) => {
+                desktopInitScripts.push({ fn, args })
+            },
+            on: () => {},
+            pages: () => []
+        }
+        await BrowserEnvironmentPolicy.applyDesktopStealth(mockDesktopContext)
+        assert.strictEqual(desktopInitScripts.length, 1, 'applyDesktopStealth must register init script')
+        assert.strictEqual(desktopInitScripts[0].args.vendor, 'Google Inc. (Intel)')
+        assert.strictEqual(
+            desktopInitScripts[0].args.renderer,
+            'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)'
+        )
+
+        // 7. DNS Readiness Guard Pasca Rotasi ADB
+        const dnsReady = await AirplaneMode.ensureDnsReady('localhost', 2, 50)
+        assert.strictEqual(dnsReady, true, 'ensureDnsReady must resolve valid host')
+        assert.ok(
+            logRingBuffer.some(l => l.includes('DNS Resolver Linux aktif & siap digunakan!')),
+            'ensureDnsReady must log readiness to C2 buffer'
+        )
+
+        const dnsFail = await AirplaneMode.ensureDnsReady('invalid.domain.that.does.not.exist.test', 2, 20)
+        assert.strictEqual(dnsFail, false, 'ensureDnsReady must return false when domain cannot be resolved')
+
+        // 8. Bounded Browser Close & Orphan Process Reaper on Linux
+        let killedWithSignal = ''
+        const mockProcess = {
+            pid: 12345,
+            killed: false,
+            kill: (sig: string) => {
+                killedWithSignal = sig
+            }
+        }
+        const mockHangingBrowser = {
+            _browser: {
+                process: () => mockProcess,
+                close: async () => {
+                    await new Promise(r => setTimeout(r, 500))
+                }
+            },
+            isClosed: () => true,
+            cookies: async () => [],
+            close: async () => {}
+        } as any
+
+        await browserFunc.closeBrowser(mockHangingBrowser, 'test_reaper@outlook.com', 50)
+        assert.strictEqual(killedWithSignal, 'SIGKILL', 'Orphan process reaper must send SIGKILL when close times out')
 
         console.log('  ✔ Test 18: Linux Hardening, C2 Log Ring Buffer, /about Guard, PunchCard Break & Baseline Sync verified')
     }
