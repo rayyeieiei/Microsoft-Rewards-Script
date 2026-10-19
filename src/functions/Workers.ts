@@ -19,6 +19,25 @@ import {
     evaluatePunchCardRun
 } from './activities/ActivitySemantics'
 import { isLocalSystemProtocol, resolvePunchCardExecutionUrl } from './activities/api/UrlProtocolGuard'
+export { isLocalSystemProtocol, resolvePunchCardExecutionUrl }
+
+export async function ensureOnRewardsDashboard(page: Page): Promise<void> {
+    if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return
+    try {
+        const currentUrl = typeof page.url === 'function' ? page.url() : ''
+        if (currentUrl.includes('/about') || !currentUrl.includes('rewards.bing.com/dashboard')) {
+            await page
+                .goto('https://rewards.bing.com/dashboard', { waitUntil: 'domcontentloaded', timeout: 15000 })
+                .catch(() => {})
+            await page
+                .waitForSelector(
+                    '#daily-sets, [data-bi-area*="DailySet"], #dailyset, .daily-set, [id*="dashboard"], [class*="dashboard"]',
+                    { timeout: 4000 }
+                )
+                .catch(() => {})
+        }
+    } catch {}
+}
 
 export function isQuizPromotion(activity: Partial<BasePromotion> | Record<string, any>): boolean {
     if (!activity) return false
@@ -117,7 +136,7 @@ export class Workers {
         }
     }
 
-    public async doClaimPendingPoints(page: Page, isRecheck: boolean = false) {
+    public async doClaimPendingPoints(page: Page, isRecheck: boolean = false): Promise<void> {
         if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return
         await this.checkAccountSuspended(page)
 
@@ -342,6 +361,33 @@ export class Workers {
                     'green'
                 )
             }
+
+            // Final verify: apakah masih ada koin pending / card nyangkut yang tersisa?
+            const remainingCardCount = await page
+                .locator('div, section, article, [class*="card"], [class*="tile"], [class*="item"], [role="region"]')
+                .filter({ hasText: cardRegex })
+                .count()
+                .catch(() => 0)
+
+            const remainingDirectBtns = await page
+                .locator('button:has-text("Claim"), [role="button"]:has-text("Claim"), button.c-action-trigger, button:has-text("Klaim"), [role="button"]:has-text("Klaim")')
+                .count()
+                .catch(() => 0)
+
+            const finalVerify = {
+                isClean: remainingCardCount === 0 && remainingDirectBtns === 0
+            }
+
+            if (finalVerify.isClean === false && !isRecheck) {
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'DASHBOARD',
+                    `[CLAIM-RETRY] Terdeteksi koin pending masih belum bersih (isClean=false). Menunggu 2500ms untuk 1x retry klaim ulang...`,
+                    'yellow'
+                )
+                await this.bot.utils.wait(2500)
+                return await this.doClaimPendingPoints(page, true)
+            }
         } catch {
             this.bot.logger.debug(this.bot.isMobile, 'DASHBOARD', 'Pengecekan koin nyangkut selesai.')
         }
@@ -350,6 +396,7 @@ export class Workers {
     public async doDailySet(data: DashboardData, page: Page) {
         if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return
         await this.checkAccountSuspended(page)
+        await ensureOnRewardsDashboard(page)
 
         // 1. Ambil dari seluruh tanggal di dailySetPromotions (API)
         const dailySetMapItems: BasePromotion[] = Object.values(data.dailySetPromotions ?? {}).flat() as BasePromotion[]
@@ -404,10 +451,8 @@ export class Workers {
         if (todayDailySetItems.length === 0 && activitiesUncompleted.length === 0) {
             try {
                 const currentUrl = page.url().toLowerCase()
-                if (!currentUrl.includes('rewards.bing.com')) {
-                    await page
-                        .goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 15000 })
-                        .catch(() => {})
+                if (currentUrl.includes('/about') || !currentUrl.includes('rewards.bing.com/dashboard')) {
+                    await ensureOnRewardsDashboard(page)
                     await this.bot.utils.wait(2000)
                 }
 
@@ -556,11 +601,8 @@ export class Workers {
 
             // Pastikan halaman dashboard dalam kondisi bersih dan bebas overlay sebelum eksekusi kartu
             if (page && !page.isClosed()) {
-                const currentUrl = page.url().toLowerCase()
-                if (!currentUrl.endsWith('rewards.bing.com') && !currentUrl.endsWith('rewards.bing.com/')) {
-                    await page.goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {})
-                    await this.bot.utils.wait(1000)
-                }
+                await ensureOnRewardsDashboard(page)
+                await this.bot.utils.wait(1000)
             }
 
             // 2. Selesaikan batch seperti flow lama
@@ -590,8 +632,8 @@ export class Workers {
             if (page && !page.isClosed()) {
                 try {
                     const curUrl = page.url().toLowerCase()
-                    if (!curUrl.includes('rewards.bing.com')) {
-                        await page.goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {})
+                    if (curUrl.includes('/about') || !curUrl.includes('rewards.bing.com/dashboard')) {
+                        await ensureOnRewardsDashboard(page)
                         await this.bot.utils.wait(1500)
                     }
                     domCheckmarkMap = await page.evaluate(() => {
@@ -712,6 +754,141 @@ export class Workers {
                 }
             }
 
+            // Auto-Retry 1x khusus untuk item yang berstatus 'processed-unverified'
+            const unverifiedItems = activitiesUncompleted.filter(act => {
+                const key = act.offerId || act.title
+                return executionMap.get(key)?.status === 'processed-unverified'
+            })
+
+            let finalUpdatedBalance = updatedBalance
+            let finalObservedDelta = observedBalanceDelta
+
+            if (unverifiedItems.length > 0 && page && !page.isClosed()) {
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'DAILY-SET',
+                    `[AUTO-RETRY] Ditemukan ${unverifiedItems.length} item Daily Set berstatus 'processed-unverified'. Menjalankan 1x auto-retry...`,
+                    'yellow'
+                )
+                await this.bot.utils.wait(2000)
+                await ensureOnRewardsDashboard(page)
+                await this.solveActivities(unverifiedItems, page)
+
+                // Re-fetch snapshot setelah auto-retry
+                await this.bot.utils.wait(2000)
+                const retryRefreshedData: DashboardData | null = await this.bot.browser.func.getDashboardData().catch(() => null)
+                if (retryRefreshedData?.userStatus?.availablePoints) {
+                    finalUpdatedBalance = Math.max(
+                        finalUpdatedBalance,
+                        retryRefreshedData.userStatus.availablePoints
+                    )
+                }
+                finalObservedDelta = Math.max(0, finalUpdatedBalance - startBalance)
+
+                const retryFreshItems: BasePromotion[] = retryRefreshedData?.dailySetPromotions
+                    ? (Object.values(retryRefreshedData.dailySetPromotions).flat() as BasePromotion[])
+                    : []
+                const retryFallbackFresh: BasePromotion[] = retryRefreshedData
+                    ? ([...(retryRefreshedData.promotionalItems ?? []), ...(retryRefreshedData.morePromotions ?? [])].filter(x =>
+                          (x?.offerId ?? '').toLowerCase().includes('dailyset')
+                      ) as BasePromotion[])
+                    : []
+                const retryAllFresh = [...retryFreshItems, ...retryFallbackFresh]
+
+                let retryDomCheckmarkMap: Record<string, boolean> = {}
+                try {
+                    await ensureOnRewardsDashboard(page)
+                    retryDomCheckmarkMap = await page.evaluate(() => {
+                        const statusMap: Record<string, boolean> = {}
+                        const dailyContainers = Array.from(
+                            document.querySelectorAll('#daily-sets, [data-bi-area*="DailySet"], section#dailyset, .daily-set, .daily-sets, [id*="daily-set"]')
+                        )
+                        const candidateCards: Element[] = []
+                        if (dailyContainers.length > 0) {
+                            for (const c of dailyContainers) {
+                                candidateCards.push(
+                                    ...Array.from(
+                                        c.querySelectorAll('.c-card, .p-card, a, [role="button"], [class*="card"], [class*="tile"], div:has(> [class*="title"]), div:has(> [class*="heading"])')
+                                    )
+                                )
+                            }
+                        }
+                        if (candidateCards.length === 0) {
+                            candidateCards.push(
+                                ...Array.from(
+                                    document.querySelectorAll('#daily-sets .c-card, #daily-sets .p-card, [data-bi-area*="DailySet"] .c-card, .c-card, .p-card, a, [role="button"], [class*="card"]')
+                                )
+                            )
+                        }
+
+                        for (const card of candidateCards) {
+                            const titleEl = card.querySelector('h3, h4, h5, .title, .c-heading, [class*="title"], [class*="heading"]')
+                            const rawTitle = (titleEl?.textContent || card.getAttribute('aria-label') || '').trim().toLowerCase()
+                            const lines = (card.textContent || '').split('\n').map(l => l.trim().toLowerCase()).filter(Boolean)
+                            const title = rawTitle || lines[0] || ''
+                            const hasCheck =
+                                card.querySelector(
+                                    '.mee-icon-CheckMark, [data-icon-name="CheckMark"], .c-glyph.f-checkmark, .c-icon-check, .complete-check, svg[aria-label*="Complete"], [class*="check"]'
+                                ) !== null ||
+                                card.classList.contains('completed') ||
+                                card.classList.contains('complete') ||
+                                card.getAttribute('aria-checked') === 'true' ||
+                                (card.textContent || '').toLowerCase().includes('completed') ||
+                                (card.textContent || '').toLowerCase().includes('selesai')
+                            if (title) statusMap[title] = hasCheck
+                        }
+                        return statusMap
+                    }).catch(() => ({} as Record<string, boolean>))
+                } catch {}
+
+                for (const act of unverifiedItems) {
+                    const key = act.offerId || act.title
+                    const existingResult = executionMap.get(key)
+                    if (!existingResult) continue
+
+                    const freshMatch = retryAllFresh.find(
+                        f =>
+                            f &&
+                            (f.offerId === existingResult.offerId ||
+                                (f.title && f.title.toLowerCase().trim() === existingResult.title.toLowerCase().trim()))
+                    )
+                    const isServerComplete = Boolean(
+                        freshMatch &&
+                        (freshMatch.complete === true ||
+                            (freshMatch.pointProgressMax > 0 &&
+                                (freshMatch.pointProgress ?? 0) >= freshMatch.pointProgressMax))
+                    )
+                    const titleKey = (existingResult.title || '').toLowerCase().trim()
+                    const isDomComplete = Boolean(
+                        retryDomCheckmarkMap[titleKey] ||
+                        Object.entries(retryDomCheckmarkMap).some(([k, v]) => v && (k.includes(titleKey) || titleKey.includes(k)))
+                    )
+
+                    if (isServerComplete || isDomComplete) {
+                        const evidence = isServerComplete ? 'server-dashboard-state' : 'dom-checkmark'
+                        const attributed =
+                            finalObservedDelta === existingResult.advertisedPoints && existingResult.advertisedPoints > 0
+                                ? existingResult.advertisedPoints
+                                : null
+
+                        executionMap.set(key, {
+                            ...existingResult,
+                            status: 'verified-complete',
+                            serverCompleted: true,
+                            completionEvidence: evidence,
+                            observedBalanceDelta: finalObservedDelta,
+                            attributedPoints: attributed
+                        })
+                        this.bot.logger.info(
+                            this.bot.isMobile,
+                            'DAILY-SET',
+                            `[AUTO-RETRY] Berhasil memverifikasi "${existingResult.title}" pasca-retry! (evidence=${evidence})`,
+                            'green'
+                        )
+                    }
+                }
+            }
+
             // 5. Buat summary dari hasil reconciliation
             const allResults = Array.from(executionMap.values())
             const summary: ActivityBatchSummary = {
@@ -721,16 +898,19 @@ export class Workers {
                 pending: allResults.filter(r => r.status === 'pending').length,
                 skipped: allResults.filter(r => r.status === 'skipped').length,
                 failed: allResults.filter(r => r.status === 'failed').length,
-                observedAccountBalanceDelta: observedBalanceDelta
+                observedAccountBalanceDelta: finalObservedDelta
             }
 
-            this.bot.userData.currentPoints = Math.max(this.bot.userData.currentPoints ?? 0, updatedBalance)
+            this.bot.userData.currentPoints = Math.max(
+                Number(this.bot.userData.currentPoints ?? 0),
+                finalUpdatedBalance
+            )
 
             const advertisedTotal = allResults.reduce((sum, r) => sum + r.advertisedPoints, 0)
             this.bot.logger.info(
                 this.bot.isMobile,
                 'DAILY-SET',
-                `[DAILY-SET] Batch reconciliation | advertisedTotal=${advertisedTotal} observedAccountBalanceDelta=${observedBalanceDelta} verified=${summary.verifiedComplete}/${summary.total}`
+                `[DAILY-SET] Batch reconciliation | advertisedTotal=${advertisedTotal} observedAccountBalanceDelta=${finalObservedDelta} verified=${summary.verifiedComplete}/${summary.total}`
             )
 
             this.bot.logger.info(
@@ -743,7 +923,7 @@ export class Workers {
                 this.bot.logger.info(
                     this.bot.isMobile,
                     'DAILY-SET',
-                    `🎉 All Daily Set items completed! | verified=${summary.verifiedComplete}/${summary.total} | observedBalanceDelta=+${observedBalanceDelta} | oldBalance=${startBalance} | newBalance=${updatedBalance}`,
+                    `🎉 All Daily Set items completed! | verified=${summary.verifiedComplete}/${summary.total} | observedBalanceDelta=+${finalObservedDelta} | oldBalance=${startBalance} | newBalance=${finalUpdatedBalance}`,
                     'green'
                 )
             }
@@ -1451,7 +1631,7 @@ export class Workers {
                             'PUNCHCARD',
                             `[PUNCHCARD-CACHE] Melewati langkah "${stepTitle}" (tercatat gagal verifikasi pada sesi ini)`
                         )
-                        continue
+                        break
                     }
 
                     const childBeforeSnapshot = createPunchCardSnapshot(card, targetChildOfferId)
@@ -1710,7 +1890,7 @@ export class Workers {
                         'PUNCHCARD',
                         `[PUNCHCARD-CACHE] Melewati langkah "${title}" (tercatat gagal verifikasi pada sesi ini)`
                     )
-                    continue
+                    break
                 }
 
                 this.bot.logger.info(
