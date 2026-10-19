@@ -316,30 +316,63 @@ export class BrowserEnvironmentPolicy {
         } catch {}
     }
 
+    public static readonly DEFAULT_DESKTOP_WEBGL_VENDOR = 'Google Inc. (Intel)'
+    public static readonly DEFAULT_DESKTOP_WEBGL_RENDERER =
+        'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)'
+
     /**
      * Injects anti-fingerprint hardening scripts for desktop Windows emulation on Linux/POSIX:
      * - Guarantees navigator.platform is 'Win32'
      * - Guarantees navigator.webdriver is false
+     * - Spoofs WebGL vendor & renderer to Direct3D11 ANGLE ('Google Inc. (Intel)', 'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)')
+     *   preventing Mesa / llvmpipe driver leak on Linux
      * - Synchronizes Sec-CH-UA-Platform: "Windows" (Windows NT 10.0) via CDP override
      */
-    public static async applyDesktopStealth(context: any): Promise<void> {
+    public static async applyDesktopStealth(
+        context: any,
+        customRenderer?: string
+    ): Promise<void> {
         if (!context) return
-        if (typeof context.addInitScript === 'function') {
-            await context.addInitScript(() => {
-                try {
-                    Object.defineProperty(navigator, 'platform', {
-                        get: () => 'Win32',
-                        configurable: true
-                    })
-                } catch {}
+        const vendor = BrowserEnvironmentPolicy.DEFAULT_DESKTOP_WEBGL_VENDOR
+        const renderer = customRenderer || BrowserEnvironmentPolicy.DEFAULT_DESKTOP_WEBGL_RENDERER
 
-                try {
-                    Object.defineProperty(navigator, 'webdriver', {
-                        get: () => false,
-                        configurable: true
-                    })
-                } catch {}
-            }).catch(() => {})
+        if (typeof context.addInitScript === 'function') {
+            await context.addInitScript(
+                ({ vendor, renderer }: { vendor: string; renderer: string }) => {
+                    try {
+                        Object.defineProperty(navigator, 'platform', {
+                            get: () => 'Win32',
+                            configurable: true
+                        })
+                    } catch {}
+
+                    try {
+                        Object.defineProperty(navigator, 'webdriver', {
+                            get: () => false,
+                            configurable: true
+                        })
+                    } catch {}
+
+                    try {
+                        const getParam = WebGLRenderingContext.prototype.getParameter
+                        WebGLRenderingContext.prototype.getParameter = function (param: number) {
+                            if (param === 37445) return vendor
+                            if (param === 37446) return renderer
+                            return getParam.apply(this, arguments as any)
+                        }
+
+                        if (typeof WebGL2RenderingContext !== 'undefined') {
+                            const getParam2 = WebGL2RenderingContext.prototype.getParameter
+                            WebGL2RenderingContext.prototype.getParameter = function (param: number) {
+                                if (param === 37445) return vendor
+                                if (param === 37446) return renderer
+                                return getParam2.apply(this, arguments as any)
+                            }
+                        }
+                    } catch {}
+                },
+                { vendor, renderer }
+            ).catch(() => {})
         }
 
         if (typeof context.on === 'function') {
