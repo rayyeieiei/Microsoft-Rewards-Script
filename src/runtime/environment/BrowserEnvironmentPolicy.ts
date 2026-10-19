@@ -169,7 +169,8 @@ export class BrowserEnvironmentPolicy {
 
     /**
      * Resolves synchronized Chrome DevTools Protocol Client Hints metadata.
-     * Prevents Sec-CH-UA-Platform: "Linux" leakage on mobile emulation sessions.
+     * Prevents Sec-CH-UA-Platform: "Linux" leakage on mobile emulation sessions
+     * and maintains Windows platform consistency (Win32 / Windows NT 10.0) on Desktop sessions.
      */
     public static getClientHintsMetadata(
         kind: BrowserContextKind,
@@ -225,19 +226,80 @@ export class BrowserEnvironmentPolicy {
     }
 
     /**
+     * Resolves synchronized Chrome DevTools Protocol Client Hints metadata for desktop Windows sessions.
+     * Enforces platform: 'Windows', platformVersion: '10.0.0', architecture: 'x86', mobile: false.
+     */
+    public static getDesktopClientHintsMetadata(): {
+        platform: string
+        userAgent: string
+        userAgentMetadata: {
+            brands: Array<{ brand: string; version: string }>
+            fullVersion: string
+            platform: string
+            platformVersion: string
+            architecture: string
+            model: string
+            mobile: boolean
+            bitness: string
+            wow64: boolean
+        }
+    } {
+        const userAgent = UserAgentManager.DEFAULT_DESKTOP_UA
+        const edgeVersionMatch = userAgent.match(/Edg\/([0-9.]+)/)
+        const fullVersion: string = (edgeVersionMatch && edgeVersionMatch[1]) ? edgeVersionMatch[1] : '128.0.2708.57'
+        const majorVersion: string = fullVersion.split('.')[0] || '128'
+
+        return {
+            platform: 'Windows',
+            userAgent,
+            userAgentMetadata: {
+                brands: [
+                    { brand: 'Chromium', version: majorVersion },
+                    { brand: 'Not=A?Brand', version: '24' },
+                    { brand: 'Microsoft Edge', version: majorVersion }
+                ],
+                fullVersion,
+                platform: 'Windows',
+                platformVersion: '10.0.0',
+                architecture: 'x86',
+                model: '',
+                mobile: false,
+                bitness: '64',
+                wow64: false
+            }
+        }
+    }
+
+    /**
      * Applies native Chrome DevTools Protocol userAgent and Client Hints overrides to a page.
-     * Guarantees synchronized Sec-CH-UA-Platform: "Android", Sec-CH-UA-Model, and Sec-CH-UA-Mobile: ?1
+     * Guarantees synchronized Sec-CH-UA-Platform: "Android" or "Windows", Sec-CH-UA-Model, and Sec-CH-UA-Mobile.
      */
     public static async applyClientHintsOverride(
         page: any,
-        stickyProfile?: StickyDeviceProfileData
+        stickyProfileOrKind?: StickyDeviceProfileData | BrowserContextKind,
+        explicitStickyProfile?: StickyDeviceProfileData
     ): Promise<void> {
         if (!page) return
         try {
             const context = typeof page.context === 'function' ? page.context() : undefined
             if (!context || typeof context.newCDPSession !== 'function') return
 
-            const clientHints = BrowserEnvironmentPolicy.getClientHintsMetadata('mobile', stickyProfile)
+            const kind: BrowserContextKind =
+                stickyProfileOrKind === 'desktop'
+                    ? 'desktop'
+                    : stickyProfileOrKind === 'mobile'
+                      ? 'mobile'
+                      : 'mobile'
+
+            const stickyProfile: StickyDeviceProfileData | undefined =
+                typeof stickyProfileOrKind === 'object' && stickyProfileOrKind !== null
+                    ? (stickyProfileOrKind as StickyDeviceProfileData)
+                    : explicitStickyProfile
+
+            const clientHints =
+                kind === 'desktop'
+                    ? BrowserEnvironmentPolicy.getDesktopClientHintsMetadata()
+                    : BrowserEnvironmentPolicy.getClientHintsMetadata(kind, stickyProfile)
             if (!clientHints) return
 
             const cdp = await context.newCDPSession(page)
@@ -252,6 +314,45 @@ export class BrowserEnvironmentPolicy {
                 userAgentMetadata: clientHints.userAgentMetadata
             }).catch(() => {})
         } catch {}
+    }
+
+    /**
+     * Injects anti-fingerprint hardening scripts for desktop Windows emulation on Linux/POSIX:
+     * - Guarantees navigator.platform is 'Win32'
+     * - Guarantees navigator.webdriver is false
+     * - Synchronizes Sec-CH-UA-Platform: "Windows" (Windows NT 10.0) via CDP override
+     */
+    public static async applyDesktopStealth(context: any): Promise<void> {
+        if (!context) return
+        if (typeof context.addInitScript === 'function') {
+            await context.addInitScript(() => {
+                try {
+                    Object.defineProperty(navigator, 'platform', {
+                        get: () => 'Win32',
+                        configurable: true
+                    })
+                } catch {}
+
+                try {
+                    Object.defineProperty(navigator, 'webdriver', {
+                        get: () => false,
+                        configurable: true
+                    })
+                } catch {}
+            }).catch(() => {})
+        }
+
+        if (typeof context.on === 'function') {
+            context.on('page', async (page: any) => {
+                await BrowserEnvironmentPolicy.applyClientHintsOverride(page, 'desktop')
+            })
+        }
+
+        if (typeof context.pages === 'function') {
+            for (const p of context.pages()) {
+                await BrowserEnvironmentPolicy.applyClientHintsOverride(p, 'desktop')
+            }
+        }
     }
 
     /**

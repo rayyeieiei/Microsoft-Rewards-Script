@@ -19,6 +19,7 @@ class Browser {
 
     private static readonly BROWSER_ARGS = [
         '--no-sandbox',
+        '--disable-dev-shm-usage',
         '--mute-audio',
         '--disable-setuid-sandbox',
         '--no-first-run',
@@ -315,9 +316,11 @@ class Browser {
                 })
                 .catch(() => {})
 
-            // Mobile Stealth: Anti-Fingerprint Leak (Mask platform, WebGL vendor/renderer, and apply CDP Client Hints)
+            // Mobile & Desktop Stealth: Anti-Fingerprint Leak (Mask platform, WebGL vendor/renderer, and apply CDP Client Hints)
             if (this.bot.isMobile) {
                 await BrowserEnvironmentPolicy.applyMobileStealth(context, scope?.deviceProfile)
+            } else {
+                await BrowserEnvironmentPolicy.applyDesktopStealth(context)
             }
 
             // ==================== ULTRA DATA SAVER (HEMAT KUOTA 80%-90%) ====================
