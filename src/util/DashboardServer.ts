@@ -7,6 +7,21 @@ import { Database } from './Database'
 
 export const logEmitter = new EventEmitter()
 
+export const logRingBuffer: string[] = []
+export const MAX_LOG_RING_BUFFER_SIZE = 1000
+
+export function broadcastC2Log(msg: string): void {
+    if (typeof msg !== 'string') return
+    const lines = msg.split(/\r?\n/)
+    for (const line of lines) {
+        logRingBuffer.push(line)
+        if (logRingBuffer.length > MAX_LOG_RING_BUFFER_SIZE) {
+            logRingBuffer.shift()
+        }
+    }
+    logEmitter.emit('log', msg)
+}
+
 export interface AccountDashboardStatus {
     email: string
     status: string
@@ -1036,6 +1051,9 @@ const htmlPage = `<!DOCTYPE html>
                 
                 div.innerText = logText;
                 terminal.appendChild(div);
+                while (terminal.childNodes.length > 1200) {
+                    terminal.removeChild(terminal.firstChild);
+                }
                 
                 // Keep terminal scrolled to bottom
                 terminal.parentNode.scrollTop = terminal.parentNode.scrollHeight;
@@ -1216,9 +1234,16 @@ export class DashboardServer {
                         // Stream connection header
                         res.write('data: Nexus C2 Log stream initialized\n\n')
 
+                        // Replay entire logRingBuffer for new / refreshing clients
+                        for (const bufferedLine of logRingBuffer) {
+                            res.write(`data: ${bufferedLine}\n\n`)
+                        }
+
                         const onLog = (msg: string) => {
-                            const cleanMsg = msg.replace(/\n/g, ' ')
-                            res.write(`data: ${cleanMsg}\n\n`)
+                            const lines = msg.split(/\r?\n/)
+                            for (const line of lines) {
+                                res.write(`data: ${line}\n\n`)
+                            }
                         }
 
                         logEmitter.on('log', onLog)
@@ -1366,13 +1391,12 @@ export class DashboardServer {
                             onConfigCommand()
 
                             // Emit logs to reflect update
-                            logEmitter.emit(
-                                'log',
+                            broadcastC2Log(
                                 `[CONFIG] Configuration updated via C2 Web UI: ${JSON.stringify(body)}`
                             )
                         } catch (err) {
                             const errMsg = err instanceof Error ? err.message : String(err)
-                            logEmitter.emit('log', `[ERROR] Failed to save config to config.json: ${errMsg}`)
+                            broadcastC2Log(`[ERROR] Failed to save config to config.json: ${errMsg}`)
                         }
                         return
                     }

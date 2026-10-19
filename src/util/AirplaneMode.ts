@@ -1,7 +1,19 @@
 import { exec } from 'child_process'
 import { promisify } from 'util'
+import { broadcastC2Log } from './DashboardServer'
 
 const execAsync = promisify(exec)
+
+function logAdb(msg: string) {
+    console.log(msg)
+    broadcastC2Log(msg)
+}
+
+function errorAdb(msg: string, ...args: any[]) {
+    console.error(msg, ...args)
+    const extra = args.length > 0 ? ' ' + args.map(a => (a instanceof Error ? `${a.message}\n${a.stack || ''}` : String(a))).join(' ') : ''
+    broadcastC2Log(`${msg}${extra}`)
+}
 
 export class AirplaneMode {
     private static async wait(ms: number) {
@@ -45,11 +57,11 @@ export class AirplaneMode {
         const adbPrefix = adbSerial ? `adb -s ${adbSerial}` : 'adb'
 
         try {
-            console.log('\n🔍  [ADB-NETWORK] Mengecek IP (Jalur USB Tethering)...')
+            logAdb('\n🔍  [ADB-NETWORK] Mengecek IP (Jalur USB Tethering)...')
             const ipSebelum = await this.checkIP()
-            console.log(`🌍  [ADB-NETWORK] IP Lama kamu: [ ${ipSebelum} ]`)
+            logAdb(`🌍  [ADB-NETWORK] IP Lama kamu: [ ${ipSebelum} ]`)
 
-            console.log('\n✈️  [ADB-NETWORK] Menyalakan Airplane Mode (Membunuh sinyal data)...')
+            logAdb('\n✈️  [ADB-NETWORK] Menyalakan Airplane Mode (Membunuh sinyal data)...')
 
             // 1. Coba cmd connectivity (Android 11+ AOSP)
             let airplaneActivated = false
@@ -94,10 +106,10 @@ export class AirplaneMode {
                 await execAsync(`${adbPrefix} shell svc data disable`).catch(() => {})
             } catch {}
 
-            console.log(`⏳  [ADB-NETWORK] Nunggu ${delayBetweenMs / 1000} detik biar IP provider keriset...`)
+            logAdb(`⏳  [ADB-NETWORK] Nunggu ${delayBetweenMs / 1000} detik biar IP provider keriset...`)
             await this.wait(delayBetweenMs)
 
-            console.log('📶  [ADB-NETWORK] Mematikan Airplane Mode (Mencari sinyal 4G/5G baru)...')
+            logAdb('📶  [ADB-NETWORK] Mematikan Airplane Mode (Mencari sinyal 4G/5G baru)...')
 
             // 1. Coba cmd connectivity disable
             try {
@@ -124,29 +136,29 @@ export class AirplaneMode {
                 await execAsync(`${adbPrefix} shell svc data enable`).catch(() => {})
             } catch {}
 
-            console.log(`⏳  [ADB-NETWORK] Nunggu 8 detik biar sinyal radio HP stabil...`)
+            logAdb(`⏳  [ADB-NETWORK] Nunggu 8 detik biar sinyal radio HP stabil...`)
             await this.wait(8000)
 
-            console.log('🔌  [ADB-NETWORK] Memastikan USB Tethering tetap menyala...')
+            logAdb('🔌  [ADB-NETWORK] Memastikan USB Tethering tetap menyala...')
             await execAsync(`${adbPrefix} shell cmd tethering tether usb`).catch(() => {})
             await execAsync(`${adbPrefix} shell svc usb setFunctions rndis`).catch(() => {})
 
-            console.log(
+            logAdb(
                 `⏳  [ADB-NETWORK] Nunggu ${postDelayMs / 1000} detik biar interface Linux (usb0 / rndis0) re-binding...`
             )
             await this.wait(postDelayMs)
 
-            console.log('\n🔍  [ADB-NETWORK] Mengecek IP setelah rotasi...')
+            logAdb('\n🔍  [ADB-NETWORK] Mengecek IP setelah rotasi...')
             const ipSesudah = await this.checkIP()
-            console.log(`🌍  [ADB-NETWORK] IP Baru kamu: [ ${ipSesudah} ]`)
+            logAdb(`🌍  [ADB-NETWORK] IP Baru kamu: [ ${ipSesudah} ]`)
 
             if (ipSebelum !== ipSesudah && ipSesudah !== 'Gagal_Cek_IP') {
-                console.log('\n✅  [ADB-NETWORK] SUCCESS! IP berhasil rotasi via USB Kabel! Koneksi dewa!\n')
+                logAdb('\n✅  [ADB-NETWORK] SUCCESS! IP berhasil rotasi via USB Kabel! Koneksi dewa!\n')
             } else if (ipSebelum === ipSesudah) {
-                console.log('\n⚠️  [ADB-NETWORK] WARNING: IP kamu masih sama! Provider masih menahan sesi IP.\n')
+                logAdb('\n⚠️  [ADB-NETWORK] WARNING: IP kamu masih sama! Provider masih menahan sesi IP.\n')
                 process.stdout.write('\x07')
             } else {
-                console.log(
+                logAdb(
                     '\n❌  [ADB-NETWORK] ERROR: Gagal cek IP. Pastikan saklar USB Tethering di HP kamu nyala.\n'
                 )
                 process.stdout.write('\x07')
@@ -154,7 +166,7 @@ export class AirplaneMode {
 
             return ipSebelum !== ipSesudah && ipSesudah !== 'Gagal_Cek_IP'
         } catch (error) {
-            console.error('🚨  [ADB-ERROR] Waduh, gagal ngeksekusi command ADB:', error)
+            errorAdb('🚨  [ADB-ERROR] Waduh, gagal ngeksekusi command ADB:', error)
             process.stdout.write('\x07')
             return false
         }
