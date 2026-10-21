@@ -4,6 +4,7 @@ import { loadSessionData } from '../util/Load'
 import { BrowserEnvironmentPolicy } from '../runtime/environment/BrowserEnvironmentPolicy'
 import { AccountSessionStore } from '../runtime/session/AccountSessionStore'
 import type { Account, AccountProxy } from '../interface/Account'
+import type { AccountScope } from '../runtime/AccountScope'
 
 export interface BrowserCreationResult {
     context: BrowserContext
@@ -366,6 +367,84 @@ class Browser {
             }
             throw error
         }
+    }
+
+    async createManualBrowser(account: Account, scope: AccountScope): Promise<{ browser: any; context: any; page: any }> {
+        if (process.platform === 'linux' && !process.env.DISPLAY) {
+            throw new Error('Display server tidak terdeteksi. Buka terminal desktop GUI Lubuntu.')
+        }
+
+        let proxyConfig: any = undefined
+        if (account.proxy.url) {
+            proxyConfig = {
+                server: this.formatProxyServer(account.proxy),
+                ...(account.proxy.username &&
+                    account.proxy.password && {
+                        username: account.proxy.username,
+                        password: account.proxy.password
+                    })
+            }
+        } else if (this.bot.localProxyPort) {
+            proxyConfig = {
+                server: `http://127.0.0.1:${this.bot.localProxyPort}`
+            }
+        }
+
+        let storageStateForContext: any = undefined
+        const sessionResult = await AccountSessionStore.loadSession(
+            scope,
+            'desktop',
+            { legacyEmail: account.email }
+        )
+
+        if (sessionResult.status === 'loaded') {
+            const cleanCookies = (sessionResult.state.cookies || []).filter(c => {
+                const name = (c.name || '').toLowerCase()
+                const val = c.value || ''
+                if (name === 'ak_bmsc' || name === 'bm_sv' || name === 'ai_session') return false
+                if (name === 'usrloc' && val.includes('BLOCK=')) return false
+                if (name === '_rwbf' && (val.includes('c=MY') || val.includes('c=US'))) return false
+                return true
+            })
+            storageStateForContext = {
+                cookies: cleanCookies,
+                origins: sessionResult.state.origins || []
+            }
+        }
+
+        const deviceProfile = scope.deviceProfile
+        const profile = BrowserEnvironmentPolicy.resolveProfile(
+            'desktop',
+            undefined,
+            deviceProfile,
+            account.email
+        )
+        const contextOptions = BrowserEnvironmentPolicy.toContextOptions(profile)
+        if (storageStateForContext) {
+            contextOptions.storageState = storageStateForContext
+        }
+
+        let browser: any
+        try {
+            browser = await rebrowser.chromium.launch({
+                headless: false,
+                channel: 'chrome',
+                args: [...Browser.BROWSER_ARGS],
+                proxy: proxyConfig
+            } as any)
+        } catch {
+            browser = await rebrowser.chromium.launch({
+                headless: false,
+                args: [...Browser.BROWSER_ARGS],
+                proxy: proxyConfig
+            } as any)
+        }
+
+        const context = await browser.newContext(contextOptions)
+        const page = await context.newPage()
+        await page.goto('https://rewards.bing.com/dashboard', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {})
+
+        return { browser, context, page }
     }
 
     private formatProxyServer(proxy: AccountProxy): string {
