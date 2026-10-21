@@ -69,6 +69,13 @@ export interface DashboardState {
     loadedAccounts: string[]
     accounts: Record<string, AccountDashboardStatus>
     manualQuests?: Record<string, AppOnlyManualRequiredEvent[]>
+    manualSession?: ManualSessionStatus
+}
+
+export interface ManualSessionStatus {
+    isActive: boolean
+    email: string | null
+    openedAt: number | null
 }
 
 export let dashboardState: DashboardState = {
@@ -83,7 +90,12 @@ export let dashboardState: DashboardState = {
     startTime: 0,
     loadedAccounts: [],
     accounts: {},
-    manualQuests: {}
+    manualQuests: {},
+    manualSession: {
+        isActive: false,
+        email: null,
+        openedAt: null
+    }
 }
 
 logEmitter.on('app-only-manual-required', (event: AppOnlyManualRequiredEvent) => {
@@ -130,6 +142,11 @@ export function updateDashboardGlobal(update: Partial<Omit<DashboardState, 'acco
         ...dashboardState,
         ...update
     }
+}
+
+export function updateManualSessionStatus(status: ManualSessionStatus): void {
+    dashboardState.manualSession = status
+    logEmitter.emit('manual-session-changed', status)
 }
 
 export let onControlCommand: (cmd: { action: string; email?: string }) => Promise<void> = async () => {}
@@ -622,7 +639,15 @@ const htmlPage = `<!DOCTYPE html>
                     <select id="single-email" class="text-input" style="cursor: pointer;">
                         <option value="">-- Select Account --</option>
                     </select>
-                    <button class="btn-secondary" onclick="runSingle()">Start Single</button>
+                    <button id="btn-start-single" class="btn-secondary" onclick="runSingle()">Start Single</button>
+                    <button id="btn-manual-browser" class="btn-secondary" style="background-color: #f59e0b;" onclick="openManualBrowser()">Buka Browser Manual</button>
+                </div>
+                <div id="manual-session-banner" style="display:none; margin-top:0.75rem; padding:0.6rem 1rem; background-color:#1e293b; border:1px solid #f59e0b; border-radius:8px; align-items:center; justify-content:space-between;">
+                    <div style="font-size:0.85rem; color:#f1f5f9;">
+                        🌐 Sesi Manual: <strong id="manual-session-email" style="color:#f59e0b;">-</strong>
+                        <span id="manual-session-time" style="font-size:0.75rem; color:#94a3b8; margin-left:0.5rem;"></span>
+                    </div>
+                    <button class="btn-danger" style="padding:0.3rem 0.75rem; font-size:0.75rem;" onclick="closeManualBrowser()">Simpan & Tutup Browser</button>
                 </div>
             </div>
 
@@ -715,6 +740,39 @@ const htmlPage = `<!DOCTYPE html>
             const email = document.getElementById('single-email').value.trim();
             if (email) {
                 sendControl('start-single', email);
+            }
+        }
+
+        async function openManualBrowser() {
+            const email = document.getElementById('single-email').value.trim();
+            if (!email) {
+                alert('Pilih akun terlebih dahulu dari dropdown!');
+                return;
+            }
+            const btn = document.getElementById('btn-manual-browser');
+            if (btn) btn.disabled = true;
+            try {
+                await fetch('/api/control', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'open-manual-browser', email })
+                });
+            } catch(e) {
+                console.error(e);
+            } finally {
+                setTimeout(() => { if (btn && !isBotRunning) btn.disabled = false; }, 2000);
+            }
+        }
+
+        async function closeManualBrowser() {
+            try {
+                await fetch('/api/control', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'close-manual-browser' })
+                });
+            } catch(e) {
+                console.error(e);
             }
         }
 
@@ -857,9 +915,48 @@ const htmlPage = `<!DOCTYPE html>
                 if (data.isRunning) {
                     pulseDot.className = 'pulse-dot';
                     statusText.innerText = 'C2 Running';
+                } else if (data.manualSession && data.manualSession.isActive) {
+                    pulseDot.className = 'pulse-dot';
+                    pulseDot.style.backgroundColor = '#f59e0b';
+                    pulseDot.style.boxShadow = '0 0 8px #f59e0b';
+                    statusText.innerText = 'Manual Inspection Active';
                 } else {
                     pulseDot.className = 'pulse-dot idle';
+                    pulseDot.style.backgroundColor = '';
+                    pulseDot.style.boxShadow = '';
                     statusText.innerText = 'C2 Standby';
+                }
+
+                // Update Manual Session Banner & Button Lock State
+                const manualSession = data.manualSession || { isActive: false, email: null, openedAt: null };
+                const manualBanner = document.getElementById('manual-session-banner');
+                const manualEmailSpan = document.getElementById('manual-session-email');
+                const manualTimeSpan = document.getElementById('manual-session-time');
+                const startAllBtn = document.querySelector('button[onclick="sendControl(\\'start\\')"]');
+                const startSingleBtn = document.getElementById('btn-start-single');
+                const manualBrowserBtn = document.getElementById('btn-manual-browser');
+
+                if (manualSession.isActive) {
+                    if (manualBanner) manualBanner.style.display = 'flex';
+                    if (manualEmailSpan) manualEmailSpan.innerText = manualSession.email || 'Active';
+                    if (manualTimeSpan && manualSession.openedAt) {
+                        const elapsedMin = Math.floor((Date.now() - manualSession.openedAt) / 60000);
+                        manualTimeSpan.innerText = '(' + elapsedMin + 'm lalu / max 20m auto-close)';
+                    }
+                    if (startAllBtn) startAllBtn.disabled = true;
+                    if (startSingleBtn) startSingleBtn.disabled = true;
+                    if (manualBrowserBtn) manualBrowserBtn.disabled = true;
+                } else {
+                    if (manualBanner) manualBanner.style.display = 'none';
+                    if (data.isRunning) {
+                        if (startAllBtn) startAllBtn.disabled = true;
+                        if (startSingleBtn) startSingleBtn.disabled = true;
+                        if (manualBrowserBtn) manualBrowserBtn.disabled = true;
+                    } else {
+                        if (startAllBtn) startAllBtn.disabled = false;
+                        if (startSingleBtn) startSingleBtn.disabled = false;
+                        if (manualBrowserBtn) manualBrowserBtn.disabled = false;
+                    }
                 }
 
                 // Update config toggles only if user is not actively updating config
@@ -1346,14 +1443,23 @@ export class DashboardServer {
                             }
                         } else {
                             if (body && (body.action === 'start' || body.action === 'start-single')) {
-                                if (dashboardState.isRunning || isStartTransitionInProgress) {
+                                if (dashboardState.isRunning || isStartTransitionInProgress || dashboardState.manualSession?.isActive) {
                                     logEmitter.emit(
                                         'log',
-                                        `⚠️ [C2-CONTROL] Permintaan '${body.action}' diabaikan: runner sedang aktif atau dalam proses transisi startup.`
+                                        `⚠️ [C2-CONTROL] Permintaan '${body.action}' diabaikan: runner sedang aktif atau sesi manual browser sedang terbuka.`
                                     )
                                     return
                                 }
                                 isStartTransitionInProgress = true
+                            }
+                            if (body && body.action === 'open-manual-browser') {
+                                if (dashboardState.isRunning || dashboardState.manualSession?.isActive) {
+                                    logEmitter.emit(
+                                        'log',
+                                        `⚠️ [C2-CONTROL] Permintaan 'open-manual-browser' diabaikan: runner sedang aktif atau sesi manual lain masih berjalan.`
+                                    )
+                                    return
+                                }
                             }
                             // Async run execution callbacks
                             void onControlCommand(body).finally(() => {
