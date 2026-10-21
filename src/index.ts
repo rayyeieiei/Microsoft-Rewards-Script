@@ -29,8 +29,12 @@ import {
     registerControlCallback,
     registerConfigCallback,
     registerIpConfirmCallback,
-    registerManualQuestProvider
+    registerManualQuestProvider,
+    updateManualSessionStatus,
+    isStartInProgress,
+    broadcastC2Log
 } from './util/DashboardServer'
+import { AccountSessionStore } from './runtime/session/AccountSessionStore'
 import { ManualQuestQueue } from './runtime/manual/ManualQuestQueue'
 import { resolveAccountIdentity, validateUniqueAccountIdentities } from './runtime/identity/AccountIdentity'
 import { OnboardingEvidence } from './functions/onboarding/NewAccountOnboardingTypes'
@@ -269,6 +273,16 @@ export class MicrosoftRewardsBot {
     public runId: string = `run_${Date.now()}`
     public isRunning = false
     public stopRequested = false
+    public activeManualSession: {
+        browser: any
+        context: any
+        page: any
+        account: Account
+        scope: AccountScope
+        openedAt: number
+        watchdogTimer?: NodeJS.Timeout
+        isClosing?: boolean
+    } | null = null
     public dashboardServer: DashboardServer | null = null
     private dashboardServerActive = false
     private shutdownPromise: Promise<ShutdownResult> | null = null
@@ -845,6 +859,13 @@ export class MicrosoftRewardsBot {
                     this.cancelActiveRecovery()
                 } catch {}
 
+                // 1.5. Close active manual session if open
+                if (this.activeManualSession) {
+                    try {
+                        await this.closeManualAccountSession()
+                    } catch {}
+                }
+
                 // 2. Dispose active accountScope if present
                 if (this.accountScope) {
                     const scope = this.accountScope
@@ -1250,6 +1271,12 @@ export class MicrosoftRewardsBot {
                         this.isRunning = false
                         this.updateDashboardGlobal({ isRunning: false, startTime: 0 })
                     }
+                } else if (cmd.action === 'open-manual-browser') {
+                    if (cmd.email) {
+                        await this.openManualAccountSession(cmd.email)
+                    }
+                } else if (cmd.action === 'close-manual-browser') {
+                    await this.closeManualAccountSession()
                 }
             })
 
@@ -1325,6 +1352,166 @@ export class MicrosoftRewardsBot {
         } else {
             await this.runTasks(this.accounts, runStartTime)
         }
+    }
+
+    public async openManualAccountSession(email: string): Promise<boolean> {
+        if (this.isRunning || isStartInProgress()) {
+            this.logger.warn(
+                'main',
+                'C2-MANUAL',
+                'Tidak dapat membuka browser manual: bot sedang menjalankan batch akun!'
+            )
+            broadcastC2Log('⚠️ [C2-MANUAL] Tidak dapat membuka browser manual: bot sedang menjalankan batch akun!')
+            return false
+        }
+
+        if (this.activeManualSession) {
+            this.logger.warn(
+                'main',
+                'C2-MANUAL',
+                `Sesi browser manual untuk ${this.activeManualSession.account.email} sudah aktif!`
+            )
+            broadcastC2Log(`⚠️ [C2-MANUAL] Sesi browser manual untuk ${this.activeManualSession.account.email} sudah aktif!`)
+            return false
+        }
+
+        const targetAccount = this.accounts.find(a => a.email.toLowerCase() === email.toLowerCase())
+        if (!targetAccount) {
+            this.logger.error('main', 'C2-MANUAL', `Akun ${email} tidak ditemukan dalam daftar akun!`)
+            broadcastC2Log(`🚨 [C2-MANUAL] Akun ${email} tidak ditemukan dalam daftar akun!`)
+            return false
+        }
+
+        if (process.platform === 'linux' && !process.env.DISPLAY) {
+            const displayError = 'Display server tidak terdeteksi. Buka terminal desktop GUI Lubuntu.'
+            this.logger.error('main', 'C2-MANUAL', displayError)
+            broadcastC2Log(`🚨 [C2-MANUAL] ${displayError}`)
+            return false
+        }
+
+        this.logger.info('main', 'C2-MANUAL', `Membuka browser manual untuk: ${targetAccount.email}...`)
+        broadcastC2Log(`🌐 [C2-MANUAL] Membuka browser manual untuk: ${targetAccount.email}...`)
+
+        try {
+            const scope = await AccountScope.create({
+                account: targetAccount,
+                bot: this,
+                runId: `manual_${Date.now()}`
+            })
+
+            const { browser, context, page } = await this.browserFactory.createManualBrowser(targetAccount, scope)
+
+            const INACTIVITY_TIMEOUT_MS = 20 * 60 * 1000 // 20 minutes auto-close watchdog
+            const watchdogTimer = setTimeout(async () => {
+                this.logger.warn(
+                    'main',
+                    'C2-MANUAL',
+                    `⏰ [WATCHDOG] Sesi manual ${targetAccount.email} mencapai batas 20 menit tanpa aktivitas. Menyimpan dan menutup browser...`
+                )
+                broadcastC2Log(
+                    `⏰ [WATCHDOG] Sesi manual ${targetAccount.email} mencapai batas 20 menit tanpa aktivitas. Menyimpan dan menutup browser...`
+                )
+                await this.closeManualAccountSession()
+            }, INACTIVITY_TIMEOUT_MS)
+
+            this.activeManualSession = {
+                browser,
+                context,
+                page,
+                account: targetAccount,
+                scope,
+                openedAt: Date.now(),
+                watchdogTimer,
+                isClosing: false
+            }
+
+            updateManualSessionStatus({
+                isActive: true,
+                email: targetAccount.email,
+                openedAt: Date.now()
+            })
+
+            browser.once('disconnected', async () => {
+                await this.handleManualSessionClose('browser-disconnected')
+            })
+
+            return true
+        } catch (err) {
+            const errMsg = err instanceof Error ? err.message : String(err)
+            this.logger.error('main', 'C2-MANUAL', `Gagal membuka browser manual: ${errMsg}`)
+            broadcastC2Log(`🚨 [C2-MANUAL] Gagal membuka browser manual: ${errMsg}`)
+            updateManualSessionStatus({ isActive: false, email: null, openedAt: null })
+            return false
+        }
+    }
+
+    private async handleManualSessionClose(trigger: string): Promise<void> {
+        const session = this.activeManualSession
+        if (!session || session.isClosing) {
+            return
+        }
+        session.isClosing = true
+        if (session.watchdogTimer) {
+            clearTimeout(session.watchdogTimer)
+            session.watchdogTimer = undefined
+        }
+
+        const { context, scope, account, browser } = session
+
+        this.logger.info(
+            'main',
+            'C2-MANUAL',
+            `Menutup sesi browser manual untuk ${account.email} (alasan: ${trigger})...`
+        )
+        broadcastC2Log(`💾 [MANUAL-SESSION] Menyimpan sesi akun ${account.email}...`)
+
+        try {
+            const saveRes = await AccountSessionStore.saveContextSession(context, scope, 'desktop', 5000)
+            if (saveRes.status === 'saved') {
+                this.logger.info(
+                    'main',
+                    'C2-MANUAL',
+                    `✅ Sesi akun ${account.email} berhasil disimpan ke storageState disk.`
+                )
+                broadcastC2Log(`✅ [MANUAL-SESSION] Sesi akun ${account.email} berhasil disimpan ke storageState disk.`)
+            } else {
+                this.logger.warn(
+                    'main',
+                    'C2-MANUAL',
+                    `⚠️ Status penyimpanan sesi ${account.email}: ${saveRes.status}`
+                )
+                broadcastC2Log(`⚠️ [MANUAL-SESSION] Status penyimpanan sesi ${account.email}: ${saveRes.status}`)
+            }
+        } catch (err) {
+            this.logger.error(
+                'main',
+                'C2-MANUAL',
+                `Gagal menyimpan context storageState: ${err instanceof Error ? err.message : String(err)}`
+            )
+        }
+
+        try {
+            if (browser && (browser.isConnected?.() || !browser.isClosed?.())) {
+                await browser.close().catch(() => {})
+            }
+        } catch {}
+
+        try {
+            await scope.dispose().catch(() => {})
+        } catch {}
+
+        this.activeManualSession = null
+        updateManualSessionStatus({
+            isActive: false,
+            email: null,
+            openedAt: null
+        })
+
+        broadcastC2Log(`🏁 [C2-MANUAL] Sesi manual ${account.email} ditutup. Dashboard kembali Standby.`)
+    }
+
+    public async closeManualAccountSession(): Promise<void> {
+        await this.handleManualSessionClose('c2-ui-close-request')
     }
 
     private async runMaster(runStartTime: number): Promise<void> {
