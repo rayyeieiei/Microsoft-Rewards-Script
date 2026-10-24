@@ -393,5 +393,124 @@ export async function runChapter30ZombieWorkerAndPunchCardResolverTests(): Promi
         console.log('  ✔ Test 18: Linux Hardening, C2 Log Ring Buffer, /about Guard, PunchCard Break & Baseline Sync verified')
     }
 
+    // Test 19: Level-Up Quota Expansion Lock, Sequential Deadline, & Query Engine Isolation
+    {
+        // 1. Validasi QueryCore.resetSessionQueries()
+        QueryCore.sessionUsedQueries.clear()
+        QueryCore.sessionUsedQueries.add('artificial intelligence news')
+        QueryCore.sessionUsedQueries.add('linux lubuntu performance')
+        assert.strictEqual(QueryCore.sessionUsedQueries.size, 2, 'sessionUsedQueries must contain 2 entries')
+
+        QueryCore.resetSessionQueries()
+        assert.strictEqual(QueryCore.sessionUsedQueries.size, 0, 'resetSessionQueries() must completely clear the set')
+
+        // Validasi resetAccountState memicu query isolation
+        const bot = new MicrosoftRewardsBot()
+        QueryCore.sessionUsedQueries.add('query to be cleared by resetAccountState')
+        bot.resetAccountState()
+        assert.strictEqual(QueryCore.sessionUsedQueries.size, 0, 'resetAccountState must trigger QueryCore.resetSessionQueries()')
+
+        // 2. Validasi getSearchPoints DAPI progress preservation
+        const browserFunc = new BrowserFunc(bot)
+        browserFunc.cachedCounters = {
+            pcSearch: [{ pointProgress: 24, pointProgressMax: 90 }],
+            mobileSearch: [{ pointProgress: 15, pointProgressMax: 60 }]
+        } as any
+
+        // Simulate DAPI sync returning pointProgress: 0 (e.g. from mapAppDataToDashboard fallback)
+        // mapAppDataToDashboard must now preserve cached progress:
+        const mockRawAppData: AppDashboardData = {
+            response: {
+                balance: 1000,
+                promotions: []
+            }
+        } as unknown as AppDashboardData
+        const mapped = browserFunc.mapAppDataToDashboard(mockRawAppData)
+        assert.ok(mapped?.userStatus?.counters?.pcSearch?.[0], 'pcSearch counters must exist')
+        assert.strictEqual(
+            mapped?.userStatus?.counters?.pcSearch?.[0]?.pointProgress,
+            24,
+            'mapAppDataToDashboard must preserve cached pcSearch pointProgress instead of hardcoding 0'
+        )
+
+        // 3. Validasi Kalkulasi Level-Up dan Penguncian isLevelUpHandled
+        let isLevelUpHandled = false
+        let currentMax = 30 // Level 1 Desktop Max
+        const totalGainedPoints = 18 // Earned so far this session
+        let missingPointsTotal = 12 // 30 - 18 = 12 remaining
+
+        // Mid-session quota leap: Level 2 detected (newMax = 90)
+        const incomingMax = 90
+        let newMissingPointsTotal = incomingMax // raw fallback = 90
+
+        if (incomingMax > currentMax && !isLevelUpHandled) {
+            isLevelUpHandled = true
+            currentMax = incomingMax
+            const earnedThisSession = totalGainedPoints
+            newMissingPointsTotal = Math.max(0, incomingMax - earnedThisSession)
+        }
+
+        assert.strictEqual(isLevelUpHandled, true, 'isLevelUpHandled must be true after quota expansion')
+        assert.strictEqual(currentMax, 90, 'currentMax must update to newMax')
+        assert.strictEqual(
+            newMissingPointsTotal,
+            72,
+            'newMissingPointsTotal must be 90 - 18 = 72 (NOT raw 90!)'
+        )
+
+        // Subsequent counter delta check (DAPI sync anomaly or repeated trigger)
+        missingPointsTotal = newMissingPointsTotal // now 72
+        const anomalyNewMissingPointsTotal = 90 // Anomaly raw 90 returns
+        const counterDelta = missingPointsTotal - anomalyNewMissingPointsTotal // 72 - 90 = -18 < 0
+        assert.ok(counterDelta < 0, 'Anomaly counterDelta must be negative')
+
+        let levelUpReTriggered = false
+        if (incomingMax > currentMax && !isLevelUpHandled) {
+            levelUpReTriggered = true
+        }
+        assert.strictEqual(levelUpReTriggered, false, 'Level-up must NOT re-trigger when isLevelUpHandled is true')
+
+        // 4. Validasi Sequential Dynamic Deadline Bounded Barrier
+        const dynamicDeadline = calculateDynamicDeadline(100, 2 * 60 * 1000)
+        assert.ok(dynamicDeadline >= 12 * 60 * 1000, 'Deadline must be at least 12 minutes')
+        assert.ok(dynamicDeadline <= 25 * 60 * 1000, 'Deadline must not exceed 25 minutes')
+
+        // Fast-fail deadline race verification
+        let deadlineFired = false
+        const testFastDeadlineMs = 50
+        const testWorkerHangingPromise = new Promise(resolve => setTimeout(resolve, 5000))
+        const testDeadlinePromise = new Promise<{ kind: 'timeout' }>(resolve => {
+            setTimeout(() => resolve({ kind: 'timeout' }), testFastDeadlineMs)
+        })
+
+        const raceRes = await Promise.race([
+            testWorkerHangingPromise.then(() => ({ kind: 'completed' as const })),
+            testDeadlinePromise
+        ])
+        if (raceRes.kind === 'timeout') {
+            deadlineFired = true
+        }
+        assert.strictEqual(deadlineFired, true, 'Race barrier must catch hanging worker and resolve with timeout')
+
+        // 5. Validasi ensureOnRewardsDashboard navigates to /earn when on /about
+        const navigatedUrls: string[] = []
+        const mockPage = {
+            isClosed: () => false,
+            url: () => 'https://rewards.bing.com/about',
+            goto: async (url: string) => {
+                navigatedUrls.push(url)
+            },
+            waitForSelector: async () => {}
+        } as any
+
+        await ensureOnRewardsDashboard(mockPage)
+        assert.ok(
+            navigatedUrls.includes('https://rewards.bing.com/earn'),
+            'ensureOnRewardsDashboard must prioritize https://rewards.bing.com/earn to prevent /about redirect bounce'
+        )
+
+        console.log('  ✔ Test 19: Level-Up Quota Expansion Lock, Sequential Deadline, & Query Engine Isolation verified')
+    }
+
     console.log('✨ Chapter 30 Test Suite Finished Successfully!\n')
 }

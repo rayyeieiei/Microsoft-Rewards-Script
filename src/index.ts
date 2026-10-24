@@ -18,6 +18,7 @@ import { Login } from './browser/auth/Login'
 import { Workers, ensureOnRewardsDashboard } from './functions/Workers'
 import Activities from './functions/Activities'
 import { SearchManager } from './functions/SearchManager'
+import { QueryCore } from './functions/QueryEngine'
 import { HttpProxyAgent } from 'http-proxy-agent'
 import { HttpsProxyAgent } from 'https-proxy-agent'
 import { DynamicOutboundProxy } from './util/DynamicOutboundProxy'
@@ -501,6 +502,7 @@ export class MicrosoftRewardsBot {
         if (!isDualMode) {
             this.batchCircuitBreakerTriggered = false
         }
+        QueryCore.resetSessionQueries()
         this.userData = {
             userName: '',
             geoLocale: 'US',
@@ -1568,14 +1570,46 @@ export class MicrosoftRewardsBot {
                     this.batchCircuitBreakerTriggered = false
                     this.activeAccount = account
                     this.userData.userName = this.utils.getEmailUsername(account.email)
+
+                    // Batas waktu adaptif dinamis (12 - 25 menit) pada mode sequential
+                    const dynamicDeadlineMs = calculateDynamicDeadline(100, 2 * 60 * 1000)
+                    let deadlineTimeout: NodeJS.Timeout | undefined
+                    const deadlinePromise = new Promise<{ kind: 'timeout' }>(resolve => {
+                        deadlineTimeout = setTimeout(() => resolve({ kind: 'timeout' }), dynamicDeadlineMs)
+                    })
+
                     try {
                         const worker = this.runAccountWorkflow(account)
-                        const [res] = await Promise.allSettled([worker])
-                        processedInBatchCount++
-                        if (res && res.status === 'fulfilled' && res.value) {
-                            accountStats.push(res.value)
+                        const workerPromise = worker.then(val => ({ kind: 'completed' as const, val }))
+
+                        const raceResult = await Promise.race([workerPromise, deadlinePromise])
+                        if (deadlineTimeout) clearTimeout(deadlineTimeout)
+
+                        if (raceResult.kind === 'timeout') {
+                            this.logger.error(
+                                'main',
+                                'ACCOUNT-DEADLINE',
+                                `[ACCOUNT-DEADLINE-EXCEEDED] Eksekusi akun ${account.email} di mode sequential melebihi batas waktu adaptif ${(dynamicDeadlineMs / 60000).toFixed(0)} menit! Melakukan pembatalan paksa dan membersihkan resource browser.`
+                            )
+                            try {
+                                this.accountScope?.abortController.abort()
+                                await this.cleanupBrowserResources()
+                            } catch {}
+
+                            // Bounded Join: tunggu hingga worker keluar maksimal 10 detik
+                            await Promise.race([
+                                Promise.allSettled([worker]),
+                                new Promise(resolve => setTimeout(resolve, 10000))
+                            ])
+                        } else {
+                            processedInBatchCount++
+                            if (raceResult.val) {
+                                accountStats.push(raceResult.val)
+                            }
                         }
                     } finally {
+                        if (deadlineTimeout) clearTimeout(deadlineTimeout)
+                        QueryCore.resetSessionQueries()
                         this.activeAccount = null
                         this.userData.userName = ''
                     }

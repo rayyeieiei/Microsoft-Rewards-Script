@@ -7,6 +7,11 @@ import { QueryEngine } from '../interface/Config'
 
 export class QueryCore {
     public static sessionUsedQueries = new Set<string>()
+
+    public static resetSessionQueries(): void {
+        QueryCore.sessionUsedQueries.clear()
+    }
+
     constructor(private bot: MicrosoftRewardsBot) {}
 
     async queryManager(
