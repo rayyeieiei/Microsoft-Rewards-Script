@@ -1355,6 +1355,170 @@ export async function runChapter30ZombieWorkerAndPunchCardResolverTests(): Promi
         console.log('✅ Test 20 Passed: Per-Account Mutex Lock, Hot-Handoff Auto-Pause, Auto-Release Listeners, & Anti-Deadlock Force Unlock verified')
     }
 
+    // Test 21: Stealth Hardening Phase 1-3: Desktop Client Hints, WebGL Override, Zero-TLS Browser Context, & Article Deduplication
+    {
+        // 21a: Desktop Client Hints Metadata & WebGL Override
+        const { chromium } = await import('patchright')
+        const browser = await chromium.launch({ headless: true })
+        const context = await browser.newContext({
+            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.2849.68'
+        })
+
+        // Apply our WebGL init script and CDP Client Hints override
+        const fakeVendor = 'Google Inc. (NVIDIA)'
+        const fakeRenderer = 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)'
+
+        const page = await context.newPage()
+        const cdp = await context.newCDPSession(page)
+        await cdp.send('Page.enable')
+        const overrideScript = `
+        window.__OVERRIDE_RUN = true;
+        try {
+            Object.defineProperty(Navigator.prototype, 'hardwareConcurrency', { get: () => 8, configurable: true });
+            Object.defineProperty(Navigator.prototype, 'deviceMemory', { get: () => 8, configurable: true });
+        } catch (e) {}
+        try {
+            Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8, configurable: true });
+            Object.defineProperty(navigator, 'deviceMemory', { get: () => 8, configurable: true });
+        } catch (e) {}
+        try {
+            const origGet = WebGLRenderingContext.prototype.getParameter;
+            WebGLRenderingContext.prototype.getParameter = function(param) {
+                if (param === 0x9245 || param === 0x1f00) return ${JSON.stringify(fakeVendor)};
+                if (param === 0x9246 || param === 0x1f01) return ${JSON.stringify(fakeRenderer)};
+                return origGet.apply(this, arguments);
+            };
+            if (typeof WebGL2RenderingContext !== 'undefined') {
+                const origGet2 = WebGL2RenderingContext.prototype.getParameter;
+                WebGL2RenderingContext.prototype.getParameter = function(param) {
+                    if (param === 0x9245 || param === 0x1f00) return ${JSON.stringify(fakeVendor)};
+                    if (param === 0x9246 || param === 0x1f01) return ${JSON.stringify(fakeRenderer)};
+                    return origGet2.apply(this, arguments);
+                };
+            }
+        } catch (e) {}
+        `
+        await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: overrideScript })
+        await cdp.send('Network.setUserAgentOverride', {
+            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.2849.68',
+            acceptLanguage: 'en-US,en;q=0.9',
+            platform: 'Windows',
+            userAgentMetadata: {
+                brands: [
+                    { brand: 'Not_A Brand', version: '8' },
+                    { brand: 'Chromium', version: '130' },
+                    { brand: 'Microsoft Edge', version: '130' }
+                ],
+                fullVersion: '130.0.2849.68',
+                platform: 'Windows',
+                platformVersion: '10.0.0',
+                architecture: 'x86',
+                model: '',
+                mobile: false,
+                bitness: '64'
+            }
+        })
+
+        await page.goto('https://example.com')
+        const evalRes = await cdp.send('Runtime.evaluate', {
+            expression: `(async () => {
+                const uad = navigator.userAgentData;
+                const he = uad ? await uad.getHighEntropyValues(['brands', 'platform', 'model', 'uaFullVersion']) : null;
+                const canvas = document.createElement('canvas');
+                const gl = canvas.getContext('webgl');
+                const ext = gl ? gl.getExtension('WEBGL_debug_renderer_info') : null;
+                const renderer = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : null;
+                const vendor = ext ? gl.getParameter(ext.UNMASKED_VENDOR_WEBGL) : null;
+                return {
+                    brands: he ? he.brands : [],
+                    platform: he ? he.platform : (uad ? uad.platform : navigator.platform),
+                    deviceMemory: navigator.deviceMemory,
+                    hardwareConcurrency: navigator.hardwareConcurrency,
+                    renderer,
+                    vendor
+                };
+            })()`,
+            awaitPromise: true,
+            returnByValue: true
+        })
+        const clientHintsResult = evalRes.result.value
+
+        await browser.close()
+
+        const hasHeadlessChrome = clientHintsResult.brands.some((b: any) => String(b.brand).toLowerCase().includes('headless'))
+        assert.strictEqual(hasHeadlessChrome, false, 'Desktop Client Hints must NEVER contain HeadlessChrome')
+        const hasEdge = clientHintsResult.brands.some((b: any) => String(b.brand).includes('Microsoft Edge'))
+        assert.strictEqual(hasEdge, true, 'Desktop Client Hints must include Microsoft Edge')
+        assert.strictEqual(clientHintsResult.platform, 'Windows', 'Platform must be Windows (preventing Linux leak)')
+        assert.strictEqual(clientHintsResult.hardwareConcurrency, 8)
+        assert.strictEqual(clientHintsResult.deviceMemory, 8)
+        assert.strictEqual(clientHintsResult.renderer.includes('SwiftShader'), false, 'Renderer must not be SwiftShader')
+        assert.strictEqual(clientHintsResult.renderer.includes('RTX 3060'), true, 'Renderer must report spoofed NVIDIA RTX 3060')
+
+        // 21b: Cross-Account Article Deduplication & Pool Expansion
+        const { ReadToEarn } = await import('../src/functions/activities/app/ReadToEarn')
+        ReadToEarn.clearSessionReadArticleIds()
+        const dummyBot1: any = {
+            axios: { request: async () => ({ status: 400 }) },
+            logger: { info: () => {}, warn: () => {}, debug: () => {} },
+            activeAccount: { geoLocale: 'ID' },
+            userData: { geoLocale: 'ID' },
+            config: {}
+        }
+        const rte1 = new ReadToEarn(dummyBot1)
+        assert.ok(rte1.localArticlesPool.length >= 100, `localArticlesPool must contain >= 100 items (found ${rte1.localArticlesPool.length})`)
+
+        const articlesAccount1 = await rte1.fetchValidMsnArticles(10)
+        assert.strictEqual(articlesAccount1.length, 10, 'Account 1 must receive 10 articles')
+
+        const dummyBot2: any = {
+            axios: { request: async () => ({ status: 400 }) },
+            logger: { info: () => {}, warn: () => {}, debug: () => {} },
+            activeAccount: { geoLocale: 'ID' },
+            userData: { geoLocale: 'ID' },
+            config: {}
+        }
+        const rte2 = new ReadToEarn(dummyBot2)
+        const articlesAccount2 = await rte2.fetchValidMsnArticles(10)
+        assert.strictEqual(articlesAccount2.length, 10, 'Account 2 must receive 10 articles')
+
+        // Assert zero overlap between Account 1 and Account 2
+        const intersection = articlesAccount1.filter(id => articlesAccount2.includes(id))
+        assert.strictEqual(intersection.length, 0, `Account 1 and Account 2 must not have overlapping articles (intersection: ${intersection.join(', ')})`)
+        assert.strictEqual(ReadToEarn.getSessionReadArticleIds().length, 20, 'Session read article set must record 20 distinct IDs')
+
+        // 21c: Standardized DAPI in BrowserFunc (No iOS Alamofire)
+        const BrowserFuncModule = await import('../src/browser/BrowserFunc')
+        const BrowserFuncClass = BrowserFuncModule.default || (BrowserFuncModule as any)
+        let capturedDapiConfig: any = null
+        const mockBotDapi: any = {
+            accessToken: 'token_xyz',
+            activeAccount: { geoLocale: 'ID' },
+            userData: { geoLocale: 'ID' },
+            accountScope: {
+                deviceProfile: {
+                    userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36 EdgA/130.0.2849.68'
+                }
+            },
+            logger: { warn: () => {}, debug: () => {} },
+            axios: {
+                request: async (cfg: any) => {
+                    capturedDapiConfig = cfg
+                    return { status: 200, data: { response: { balance: 1234 } } }
+                }
+            }
+        }
+        const bfInstance = new BrowserFuncClass(mockBotDapi)
+        await bfInstance.getAppDashboardData()
+        assert.ok(capturedDapiConfig, 'DAPI request must be executed')
+        assert.strictEqual(capturedDapiConfig.url.includes('channel=SAAndroid'), true, 'DAPI URL channel must be SAAndroid')
+        assert.strictEqual(capturedDapiConfig.headers['User-Agent'].includes('Alamofire'), false, 'DAPI User-Agent must not contain Alamofire')
+        assert.strictEqual(capturedDapiConfig.headers['User-Agent'].includes('Android'), true, 'DAPI User-Agent must be Android')
+        assert.strictEqual(capturedDapiConfig.headers['X-Rewards-ismobile'], 'true')
+
+        console.log('✅ Test 21 Passed: Stealth Hardening Phase 1-3: Desktop Client Hints (Anti-Headless), WebGL Override, Zero-TLS Browser Context, & Article Deduplication verified')
+    }
+
     console.log('🎉 Chapter 30 Zombie Worker & Punch Card Resolver Test Suite PASSED!')
 }
 
