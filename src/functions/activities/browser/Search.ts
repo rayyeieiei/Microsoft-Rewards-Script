@@ -106,6 +106,11 @@ export class Search extends Workers {
             let stagnantLoop = 0
             const stagnantLoopMax = 3
             let isCooldownDetected = false
+            let isLevelUpHandled = false
+            let currentMax = isMobile
+                ? (searchCounters.mobileSearch?.[0]?.pointProgressMax ?? 60)
+                : ((searchCounters.pcSearch?.[0]?.pointProgressMax ?? 0) + (searchCounters.pcSearch?.[1]?.pointProgressMax ?? 0))
+            if (currentMax === 0) currentMax = isMobile ? 60 : 90
 
             for (let i = 0; i < queries.length; i++) {
                 if (signal?.aborted) {
@@ -170,18 +175,58 @@ export class Search extends Workers {
                     status: `Searching (${isMobile ? 'Mobile' : 'Desktop'})`
                 })
 
+                const newMax = isMobile
+                    ? (searchCounters.mobileSearch?.[0]?.pointProgressMax ?? currentMax)
+                    : ((searchCounters.pcSearch?.[0]?.pointProgressMax ?? 0) + (searchCounters.pcSearch?.[1]?.pointProgressMax ?? 0))
+
                 const counterDelta = missingPointsTotal - newMissingPointsTotal
                 let gainedPoints = 0
 
-                if (counterDelta < 0) {
+                if (newMax > currentMax && !isLevelUpHandled) {
                     // Kenaikan kuota maksimal di tengah jalan (Level Up / Quota Leap: Level 1 -> Level 2)
+                    isLevelUpHandled = true
+                    const previousMax = currentMax
+                    currentMax = newMax
+
+                    // Hitung sisa poin yang benar: newMax - total poin pencarian yang sudah didapat sesi ini
+                    const earnedThisSession = totalGainedPoints
+                    newMissingPointsTotal = Math.max(0, newMax - earnedThisSession)
+
                     this.bot.logger.info(
                         isMobile,
                         'SEARCH-BING',
-                        `[LEVEL-UP] Search quota expanded mid-session (Level 1 -> Level 2 detected). Resetting remaining target from ${missingPointsTotal} to ${newMissingPointsTotal} points.`,
+                        `[LEVEL-UP] Search quota expanded mid-session (Level 1 -> Level 2 detected: max ${previousMax} -> ${newMax}). Recalculating remaining target to ${newMissingPointsTotal} points (earned this session: ${earnedThisSession}).`,
                         'green'
                     )
                     gainedPoints = 3
+                    stagnantLoop = 0
+
+                    void Database.getInstance().recordActivity(
+                        currentEmail,
+                        isMobile ? 'SEARCH_MOBILE' : 'SEARCH_DESKTOP',
+                        gainedPoints
+                    )
+
+                    this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
+                    this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
+                    totalGainedPoints += gainedPoints
+
+                    this.bot.logger.info(
+                        isMobile,
+                        'SEARCH-BING',
+                        `gainedPoints=${gainedPoints} points | query="${query}" | remaining=${newMissingPointsTotal}`,
+                        'green'
+                    )
+                } else if (counterDelta < 0) {
+                    // Delta negatif tanpa ekspansi kuota resmi / anomali DAPI: JANGAN izinkan reset target mentah ke 90!
+                    this.bot.logger.warn(
+                        isMobile,
+                        'SEARCH-BING',
+                        `[COUNTER-ANOMALY] Negative counter delta detected (${counterDelta}) without quota expansion or Level-Up already handled. Preserving current remaining target (${missingPointsTotal}).`
+                    )
+                    gainedPoints = 3
+                    const decrementedRemaining = Math.max(0, missingPointsTotal - 3)
+                    newMissingPointsTotal = decrementedRemaining
                     stagnantLoop = 0
 
                     void Database.getInstance().recordActivity(
@@ -570,9 +615,12 @@ export class Search extends Workers {
                 const searchBarSelector = '#sb_form_q, input[name="q"], textarea[name="q"], input.b_searchbox, input[type="search"]'
                 const searchBox = searchPage.locator(searchBarSelector).first()
 
-                await searchPage.evaluate(() => {
-                    window.scrollTo({ left: 0, top: 0, behavior: 'auto' })
-                }).catch(() => {})
+                await Promise.race([
+                    searchPage.evaluate(() => {
+                        window.scrollTo({ left: 0, top: 0, behavior: 'auto' })
+                    }),
+                    new Promise<void>((_, reject) => setTimeout(() => reject(new Error('EVAL_TIMEOUT')), 5000))
+                ]).catch(() => {})
 
                 await searchPage.keyboard.press('Home').catch(() => {})
                 
@@ -588,6 +636,8 @@ export class Search extends Workers {
                         await searchPage.keyboard.type(char, { delay: charDelay })
                     }
                     await searchPage.keyboard.press('Enter')
+                    // Pasang waitForLoadState domcontentloaded { timeout: 15000 } secara graceful
+                    await searchPage.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {})
                 } else {
                     // Resilient Fallback: Navigasi langsung ke URL pencarian bersih tanpa parameter statis mencurigakan
                     const cvid = randomBytes(16).toString('hex')
@@ -629,14 +679,17 @@ export class Search extends Workers {
                 const maxDelay = Math.max(minDelay, Math.min(14000, rawMaxDelay))
                 await interruptibleWait(this.bot.utils.randomDelay(minDelay, maxDelay), signal)
 
-                // In-page balance tracking (#id_rc atau #rh_meter)
-                const inPageBalance = await searchPage.evaluate(() => {
-                    const rc = document.getElementById('id_rc')?.innerText?.replace(/[^0-9]/g, '')
-                    if (rc && !isNaN(Number(rc)) && Number(rc) > 0) return Number(rc)
-                    const flyout = document.querySelector('#rh_meter .rh_meter_points, .id_rh_pts, #id_rh, #id_h')?.textContent?.replace(/[^0-9]/g, '')
-                    if (flyout && !isNaN(Number(flyout)) && Number(flyout) > 0) return Number(flyout)
-                    return null
-                }).catch(() => null)
+                // In-page balance tracking (#id_rc atau #rh_meter) dengan timeout terikat 8000ms
+                const inPageBalance = await Promise.race([
+                    searchPage.evaluate(() => {
+                        const rc = document.getElementById('id_rc')?.innerText?.replace(/[^0-9]/g, '')
+                        if (rc && !isNaN(Number(rc)) && Number(rc) > 0) return Number(rc)
+                        const flyout = document.querySelector('#rh_meter .rh_meter_points, .id_rh_pts, #id_rh, #id_h')?.textContent?.replace(/[^0-9]/g, '')
+                        if (flyout && !isNaN(Number(flyout)) && Number(flyout) > 0) return Number(flyout)
+                        return null
+                    }),
+                    new Promise<null>((_, reject) => setTimeout(() => reject(new Error('EVAL_TIMEOUT')), 8000))
+                ]).catch(() => null)
 
                 if (inPageBalance && inPageBalance > Number(this.bot.userData.currentPoints ?? 0)) {
                     this.bot.userData.currentPoints = inPageBalance
@@ -727,8 +780,16 @@ export class Search extends Workers {
 
     private async randomScroll(page: Page, isMobile: boolean) {
         try {
-            const viewportHeight = await page.evaluate(() => window.innerHeight)
-            const totalHeight = await page.evaluate(() => document.body.scrollHeight)
+            const viewportHeight = await Promise.race([
+                page.evaluate(() => window.innerHeight),
+                new Promise<number>((_, reject) => setTimeout(() => reject(new Error('EVAL_TIMEOUT')), 5000))
+            ]).catch(() => 800)
+
+            const totalHeight = await Promise.race([
+                page.evaluate(() => document.body.scrollHeight),
+                new Promise<number>((_, reject) => setTimeout(() => reject(new Error('EVAL_TIMEOUT')), 5000))
+            ]).catch(() => 1200)
+
             const randomScrollPosition = Math.floor(Math.random() * (totalHeight - viewportHeight))
 
             this.bot.logger.debug(
@@ -737,9 +798,12 @@ export class Search extends Workers {
                 `Random scroll | viewportHeight=${viewportHeight} | totalHeight=${totalHeight} | scrollPos=${randomScrollPosition}`
             )
 
-            await page.evaluate((scrollPos: number) => {
-                window.scrollTo({ left: 0, top: scrollPos, behavior: 'auto' })
-            }, randomScrollPosition)
+            await Promise.race([
+                page.evaluate((scrollPos: number) => {
+                    window.scrollTo({ left: 0, top: scrollPos, behavior: 'auto' })
+                }, randomScrollPosition),
+                new Promise<void>((_, reject) => setTimeout(() => reject(new Error('EVAL_TIMEOUT')), 5000))
+            ]).catch(() => {})
         } catch (error) {
             this.bot.logger.error(
                 isMobile,

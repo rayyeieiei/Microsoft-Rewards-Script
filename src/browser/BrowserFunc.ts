@@ -84,12 +84,14 @@ export default class BrowserFunc {
         }
 
         if (dailySetItems.length > 0 || morePromos.length > 0 || balance > 0) {
+            const cachedPcProgress = this.cachedCounters?.pcSearch?.[0]?.pointProgress ?? 0
+            const cachedMobileProgress = this.cachedCounters?.mobileSearch?.[0]?.pointProgress ?? 0
             return {
                 userStatus: {
                     availablePoints: balance,
                     counters: {
-                        pcSearch: [{ pointProgress: 0, pointProgressMax: 90 }],
-                        mobileSearch: [{ pointProgress: 0, pointProgressMax: 60 }]
+                        pcSearch: [{ pointProgress: cachedPcProgress, pointProgressMax: 90 }],
+                        mobileSearch: [{ pointProgress: cachedMobileProgress, pointProgressMax: 60 }]
                     }
                 },
                 dailySetPromotions: {
@@ -417,6 +419,21 @@ export default class BrowserFunc {
                     pcSearch: [{ pointProgress: 0, pointProgressMax: 60 }],
                     mobileSearch: []
                 } as unknown as Counters
+            }
+        }
+
+        // Jangan menimpa pointProgress menjadi 0 jika di sesi sudah ada progres pencarian yang valid
+        if (counters && this.cachedCounters) {
+            if (!isMobile && counters.pcSearch?.[0] && this.cachedCounters.pcSearch?.[0]) {
+                const prevPcProgress = this.cachedCounters.pcSearch[0].pointProgress ?? 0
+                if ((counters.pcSearch[0].pointProgress ?? 0) < prevPcProgress) {
+                    counters.pcSearch[0].pointProgress = prevPcProgress
+                }
+            } else if (isMobile && counters.mobileSearch?.[0] && this.cachedCounters.mobileSearch?.[0]) {
+                const prevMobileProgress = this.cachedCounters.mobileSearch[0].pointProgress ?? 0
+                if ((counters.mobileSearch[0].pointProgress ?? 0) < prevMobileProgress) {
+                    counters.mobileSearch[0].pointProgress = prevMobileProgress
+                }
             }
         }
 
