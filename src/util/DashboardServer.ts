@@ -70,12 +70,54 @@ export interface DashboardState {
     accounts: Record<string, AccountDashboardStatus>
     manualQuests?: Record<string, AppOnlyManualRequiredEvent[]>
     manualSession?: ManualSessionStatus
+    lockedAccounts?: string[]
 }
 
 export interface ManualSessionStatus {
     isActive: boolean
     email: string | null
     openedAt: number | null
+}
+
+export const activeAccountLocks = new Set<string>()
+
+export function isAccountLocked(email?: string): boolean {
+    if (!email) return false
+    return activeAccountLocks.has(email.toLowerCase().trim())
+}
+
+export function acquireAccountLock(email: string, reason?: string): boolean {
+    const key = email.toLowerCase().trim()
+    if (activeAccountLocks.has(key)) {
+        if (reason === 'manual-browser') {
+            logEmitter.emit('account-lock-changed', { email: key, locked: true, reason })
+            return true
+        }
+        return false
+    }
+    activeAccountLocks.add(key)
+    updateDashboardGlobal({ lockedAccounts: Array.from(activeAccountLocks) })
+    logEmitter.emit('account-lock-changed', { email: key, locked: true, reason })
+    return true
+}
+
+export function releaseAccountLock(email: string): void {
+    const key = email.toLowerCase().trim()
+    if (activeAccountLocks.delete(key)) {
+        updateDashboardGlobal({ lockedAccounts: Array.from(activeAccountLocks) })
+        logEmitter.emit('account-lock-changed', { email: key, locked: false })
+    }
+}
+
+export function forceUnlockAllAccounts(): void {
+    activeAccountLocks.clear()
+    updateDashboardGlobal({ lockedAccounts: [] })
+    updateManualSessionStatus({ isActive: false, email: null, openedAt: null })
+    logEmitter.emit('account-lock-changed', { forced: true })
+}
+
+export function getActiveAccountLocks(): string[] {
+    return Array.from(activeAccountLocks)
 }
 
 export let dashboardState: DashboardState = {
@@ -95,7 +137,8 @@ export let dashboardState: DashboardState = {
         isActive: false,
         email: null,
         openedAt: null
-    }
+    },
+    lockedAccounts: []
 }
 
 logEmitter.on('app-only-manual-required', (event: AppOnlyManualRequiredEvent) => {
@@ -636,11 +679,12 @@ const htmlPage = `<!DOCTYPE html>
                     <span id="net-recovery-status" class="status-badge status-pending">idle</span>
                 </div>
                 <div class="single-acc-form">
-                    <select id="single-email" class="text-input" style="cursor: pointer;">
+                    <select id="single-email" class="text-input" style="cursor: pointer;" onchange="updateAccountControlButtons()">
                         <option value="">-- Select Account --</option>
                     </select>
                     <button id="btn-start-single" class="btn-secondary" onclick="runSingle()">Start Single</button>
                     <button id="btn-manual-browser" class="btn-secondary" style="background-color: #f59e0b;" onclick="openManualBrowser()">Buka Browser Manual</button>
+                    <button id="btn-force-unlock" class="btn-secondary" style="background-color: #475569;" title="Lepas seluruh kunci sesi jika terkunci" onclick="forceUnlockSessions()">Reset Kunci Sesi</button>
                 </div>
                 <div id="manual-session-banner" style="display:none; margin-top:0.75rem; padding:0.6rem 1rem; background-color:#1e293b; border:1px solid #f59e0b; border-radius:8px; align-items:center; justify-content:space-between;">
                     <div style="font-size:0.85rem; color:#f1f5f9;">
@@ -773,6 +817,52 @@ const htmlPage = `<!DOCTYPE html>
                 });
             } catch(e) {
                 console.error(e);
+            }
+        }
+
+        async function forceUnlockSessions() {
+            if (!confirm('Lepas seluruh kunci sesi akun dan reset status sesi manual?')) return;
+            const btn = document.getElementById('btn-force-unlock');
+            if (btn) btn.disabled = true;
+            try {
+                await fetch('/api/control', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'force-unlock' })
+                });
+            } catch(e) {
+                console.error(e);
+            } finally {
+                setTimeout(() => { if (btn) btn.disabled = false; }, 1000);
+            }
+        }
+
+        let latestLockedAccounts = [];
+
+        function updateAccountControlButtons() {
+            const selectElem = document.getElementById('single-email');
+            const selectedEmail = (selectElem ? selectElem.value : '').toLowerCase().trim();
+            const startSingleBtn = document.getElementById('btn-start-single');
+            const manualBrowserBtn = document.getElementById('btn-manual-browser');
+
+            if (!selectedEmail) {
+                if (startSingleBtn) startSingleBtn.disabled = true;
+                if (manualBrowserBtn) manualBrowserBtn.disabled = true;
+                return;
+            }
+
+            const isLocked = latestLockedAccounts.includes(selectedEmail);
+            if (startSingleBtn) {
+                startSingleBtn.disabled = isLocked;
+                startSingleBtn.title = isLocked ? 'Akun ini sedang aktif atau terkunci' : 'Jalankan automasi untuk akun ini';
+            }
+            if (manualBrowserBtn) {
+                const activeManualEmail = (document.getElementById('manual-session-email')?.innerText || '').toLowerCase().trim();
+                const isThisManualActive = activeManualEmail === selectedEmail;
+                manualBrowserBtn.disabled = isThisManualActive;
+                manualBrowserBtn.title = isLocked
+                    ? 'Buka browser manual (Hot-Handoff auto-pause akun aktif)'
+                    : 'Buka browser manual untuk akun ini';
             }
         }
 
@@ -927,14 +1017,12 @@ const htmlPage = `<!DOCTYPE html>
                     statusText.innerText = 'C2 Standby';
                 }
 
-                // Update Manual Session Banner & Button Lock State
+                // Update Manual Session Banner
                 const manualSession = data.manualSession || { isActive: false, email: null, openedAt: null };
                 const manualBanner = document.getElementById('manual-session-banner');
                 const manualEmailSpan = document.getElementById('manual-session-email');
                 const manualTimeSpan = document.getElementById('manual-session-time');
                 const startAllBtn = document.querySelector('button[onclick="sendControl(\\'start\\')"]');
-                const startSingleBtn = document.getElementById('btn-start-single');
-                const manualBrowserBtn = document.getElementById('btn-manual-browser');
 
                 if (manualSession.isActive) {
                     if (manualBanner) manualBanner.style.display = 'flex';
@@ -943,21 +1031,16 @@ const htmlPage = `<!DOCTYPE html>
                         const elapsedMin = Math.floor((Date.now() - manualSession.openedAt) / 60000);
                         manualTimeSpan.innerText = '(' + elapsedMin + 'm lalu / max 20m auto-close)';
                     }
-                    if (startAllBtn) startAllBtn.disabled = true;
-                    if (startSingleBtn) startSingleBtn.disabled = true;
-                    if (manualBrowserBtn) manualBrowserBtn.disabled = true;
                 } else {
                     if (manualBanner) manualBanner.style.display = 'none';
-                    if (data.isRunning) {
-                        if (startAllBtn) startAllBtn.disabled = true;
-                        if (startSingleBtn) startSingleBtn.disabled = true;
-                        if (manualBrowserBtn) manualBrowserBtn.disabled = true;
-                    } else {
-                        if (startAllBtn) startAllBtn.disabled = false;
-                        if (startSingleBtn) startSingleBtn.disabled = false;
-                        if (manualBrowserBtn) manualBrowserBtn.disabled = false;
-                    }
                 }
+
+                // Global Start All button is only locked if batch automation is running
+                if (startAllBtn) startAllBtn.disabled = !!data.isRunning;
+
+                // Sync per-account locks and refresh single account buttons
+                latestLockedAccounts = (data.lockedAccounts || []).map(function(e) { return (e || '').toLowerCase().trim(); });
+                updateAccountControlButtons();
 
                 // Update config toggles only if user is not actively updating config
                 if (!isUpdatingConfig) {
@@ -1277,7 +1360,7 @@ export class DashboardServer {
 
                     if (url === '/api/status') {
                         res.writeHead(200, { 'Content-Type': 'application/json' })
-                        let responseData = { ...dashboardState }
+                        let responseData = { ...dashboardState, lockedAccounts: getActiveAccountLocks() }
                         if (manualQuestProvider) {
                             try {
                                 responseData.manualQuests = manualQuestProvider()
@@ -1441,29 +1524,38 @@ export class DashboardServer {
                                 logEmitter.emit('log', '🔔 [DASHBOARD] Tombol "Confirm IP Rotated" diklik oleh operator. Melanjutkan batch...')
                                 onIpConfirmCommand()
                             }
+                        } else if (body && body.action === 'force-unlock') {
+                            forceUnlockAllAccounts()
+                            logEmitter.emit('log', '🔓 [C2-LOCK] Seluruh kunci sesi berhasil di-reset secara paksa (force unlock).')
+                            void onControlCommand(body).catch(() => {})
                         } else {
-                            if (body && (body.action === 'start' || body.action === 'start-single')) {
-                                if (dashboardState.isRunning || isStartTransitionInProgress || dashboardState.manualSession?.isActive) {
+                            if (body && body.action === 'start') {
+                                if (dashboardState.isRunning || isStartTransitionInProgress) {
                                     logEmitter.emit(
                                         'log',
-                                        `⚠️ [C2-CONTROL] Permintaan '${body.action}' diabaikan: runner sedang aktif atau sesi manual browser sedang terbuka.`
+                                        `⚠️ [C2-CONTROL] Permintaan 'start' diabaikan: runner batch utama sedang aktif.`
                                     )
                                     return
                                 }
                                 isStartTransitionInProgress = true
                             }
-                            if (body && body.action === 'open-manual-browser') {
-                                if (dashboardState.isRunning || dashboardState.manualSession?.isActive) {
+                            if (body && body.action === 'start-single') {
+                                const email = typeof body.email === 'string' ? body.email.toLowerCase().trim() : ''
+                                if (!email) {
+                                    logEmitter.emit('log', `⚠️ [C2-CONTROL] Permintaan 'start-single' gagal: email tidak ditentukan.`)
+                                    return
+                                }
+                                if (isAccountLocked(email)) {
                                     logEmitter.emit(
                                         'log',
-                                        `⚠️ [C2-CONTROL] Permintaan 'open-manual-browser' diabaikan: runner sedang aktif atau sesi manual lain masih berjalan.`
+                                        `⚠️ [C2-CONTROL] Permintaan 'start-single' diabaikan: akun '${email}' sedang aktif atau terkunci.`
                                     )
                                     return
                                 }
                             }
                             // Async run execution callbacks
                             void onControlCommand(body).finally(() => {
-                                if (body && (body.action === 'start' || body.action === 'start-single')) {
+                                if (body && body.action === 'start') {
                                     isStartTransitionInProgress = false
                                 }
                             })

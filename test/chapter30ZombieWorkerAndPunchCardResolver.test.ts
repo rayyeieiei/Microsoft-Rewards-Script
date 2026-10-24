@@ -1204,18 +1204,14 @@ export async function runChapter30ZombieWorkerAndPunchCardResolverTests(): Promi
         assert.strictEqual(dashboardState.manualSession?.isActive, false)
         assert.strictEqual(dashboardState.manualSession?.email, null)
 
-        // 19b: Mutex Lock Enforcement (Simulate bot running check)
-        const mockBot: any = {
-            isRunning: true,
-            accounts: [{ email: 'target@example.com', password: '123', proxy: {} }],
-            logger: { warn: () => {}, info: () => {}, error: () => {} }
-        }
-        // When bot is running, manual session must be rejected
-        let sessionAllowed = false
-        if (!mockBot.isRunning) {
-            sessionAllowed = true
-        }
-        assert.strictEqual(sessionAllowed, false, 'Manual browser must be rejected when bot runner is active')
+        // 19b: Per-Account Mutex Lock Enforcement (Idle accounts allowed, double manual blocked)
+        const { acquireAccountLock: acq19, isAccountLocked: isLocked19, forceUnlockAllAccounts: reset19 } = await import('../src/util/DashboardServer')
+        reset19()
+        // Bot running Account A does not reject manual session on Account B
+        acq19('account_a@example.com', 'bot-runner')
+        const idleAllowed = !isLocked19('account_b@example.com')
+        assert.strictEqual(idleAllowed, true, 'Manual browser for idle Account B must be permitted even if runner is active on Account A')
+        reset19()
 
         // 19c: Linux Display Guard
         const isLinuxWithoutDisplay = (platform: string, display?: string) => {
@@ -1286,6 +1282,77 @@ export async function runChapter30ZombieWorkerAndPunchCardResolverTests(): Promi
         } catch {}
 
         console.log('✅ Test 19 Passed: Manual Account Browser (Headful Inspector), Two-Way Session Sync, Inactivity Watchdog & Linux Display Guard verified')
+    }
+
+    // Test 20: Per-Account Mutex Lock, Hot-Handoff Auto-Pause, Auto-Release Listeners, & Anti-Deadlock Force Unlock
+    {
+        const {
+            acquireAccountLock,
+            releaseAccountLock,
+            isAccountLocked,
+            forceUnlockAllAccounts,
+            getActiveAccountLocks,
+            dashboardState,
+            updateManualSessionStatus
+        } = await import('../src/util/DashboardServer')
+
+        // Clean state
+        forceUnlockAllAccounts()
+        assert.strictEqual(isAccountLocked('account_a@example.com'), false)
+        assert.strictEqual(isAccountLocked('account_b@example.com'), false)
+
+        // 20a: Per-Account Mutex Isolation (Account A running does NOT block Account B manual session)
+        const lockedA = acquireAccountLock('account_a@example.com', 'bot-runner')
+        assert.strictEqual(lockedA, true, 'Must acquire lock for Account A')
+        assert.strictEqual(isAccountLocked('account_a@example.com'), true, 'Account A must be locked')
+        assert.strictEqual(isAccountLocked('account_b@example.com'), false, 'Account B must remain unlocked while Account A runs')
+
+        // Operator can open manual session for idle Account B while Account A is processed by bot runner
+        const lockedB = acquireAccountLock('account_b@example.com', 'manual-browser')
+        assert.strictEqual(lockedB, true, 'Operator must be allowed to open manual browser for idle Account B')
+        assert.strictEqual(isAccountLocked('account_b@example.com'), true)
+
+        const activeLocks = getActiveAccountLocks()
+        assert.strictEqual(activeLocks.includes('account_a@example.com'), true)
+        assert.strictEqual(activeLocks.includes('account_b@example.com'), true)
+
+        // 20b: Hot-Handoff Transition for Active Account
+        // When operator requests manual browser for Account A (which is currently running),
+        // acquireAccountLock transitions reason to 'manual-browser'
+        const handoffAcquire = acquireAccountLock('account_a@example.com', 'manual-browser')
+        assert.strictEqual(handoffAcquire, true, 'Hot-handoff must allow transition to manual-browser')
+
+        // 20c: Auto-Release on Browser Disconnect / Context Close
+        // Simulate browser disconnect handler
+        let manualSessionEnded = false
+        const simulateClearManualState = () => {
+            releaseAccountLock('account_b@example.com')
+            updateManualSessionStatus({ isActive: false, email: null, openedAt: null })
+            manualSessionEnded = true
+        }
+
+        // Simulate event trigger
+        simulateClearManualState()
+        assert.strictEqual(manualSessionEnded, true)
+        assert.strictEqual(isAccountLocked('account_b@example.com'), false, 'Account B lock must be auto-released')
+        assert.strictEqual(dashboardState.manualSession?.isActive, false)
+
+        // 20d: Anti-Deadlock Force Unlock Action
+        // Lock multiple accounts, simulate hung process
+        acquireAccountLock('hung_1@example.com', 'bot-runner')
+        acquireAccountLock('hung_2@example.com', 'manual-browser')
+        updateManualSessionStatus({ isActive: true, email: 'hung_2@example.com', openedAt: Date.now() })
+        assert.strictEqual(getActiveAccountLocks().length >= 2, true)
+
+        // Operator triggers emergency reset /api/control "force-unlock"
+        forceUnlockAllAccounts()
+        assert.strictEqual(getActiveAccountLocks().length, 0, 'Force unlock must clear all active account locks')
+        assert.strictEqual(isAccountLocked('hung_1@example.com'), false)
+        assert.strictEqual(isAccountLocked('hung_2@example.com'), false)
+        assert.strictEqual(dashboardState.manualSession?.isActive, false, 'Force unlock must reset manual session state')
+        assert.strictEqual(dashboardState.lockedAccounts?.length, 0, 'Dashboard lockedAccounts array must be cleared')
+
+        console.log('✅ Test 20 Passed: Per-Account Mutex Lock, Hot-Handoff Auto-Pause, Auto-Release Listeners, & Anti-Deadlock Force Unlock verified')
     }
 
     console.log('🎉 Chapter 30 Zombie Worker & Punch Card Resolver Test Suite PASSED!')

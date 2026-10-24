@@ -31,8 +31,11 @@ import {
     registerIpConfirmCallback,
     registerManualQuestProvider,
     updateManualSessionStatus,
-    isStartInProgress,
-    broadcastC2Log
+    broadcastC2Log,
+    isAccountLocked,
+    acquireAccountLock,
+    releaseAccountLock,
+    forceUnlockAllAccounts
 } from './util/DashboardServer'
 import { AccountSessionStore } from './runtime/session/AccountSessionStore'
 import { ManualQuestQueue } from './runtime/manual/ManualQuestQueue'
@@ -282,7 +285,9 @@ export class MicrosoftRewardsBot {
         openedAt: number
         watchdogTimer?: NodeJS.Timeout
         isClosing?: boolean
+        clearManualState?: () => Promise<void>
     } | null = null
+    public activeHandoffResolvers = new Map<string, () => void>()
     public dashboardServer: DashboardServer | null = null
     private dashboardServerActive = false
     private shutdownPromise: Promise<ShutdownResult> | null = null
@@ -1235,15 +1240,16 @@ export class MicrosoftRewardsBot {
                     this.logger.info('main', 'C2-CONTROL', 'Requesting bot execution to stop gracefully...')
                     this.stopRequested = true
                 } else if (cmd.action === 'start-single') {
-                    if (this.isRunning) {
-                        this.logger.warn('main', 'C2-CONTROL', 'Bot is already running!')
-                        return
-                    }
                     if (!cmd.email) {
                         this.logger.error('main', 'C2-CONTROL', 'No email provided for single account run!')
                         return
                     }
-                    const targetAcc = this.accounts.find(a => a.email.toLowerCase() === cmd.email!.toLowerCase())
+                    const normEmail = cmd.email.toLowerCase().trim()
+                    if (isAccountLocked(normEmail)) {
+                        this.logger.warn('main', 'C2-CONTROL', `Akun ${cmd.email} sedang aktif atau terkunci!`)
+                        return
+                    }
+                    const targetAcc = this.accounts.find(a => a.email.toLowerCase() === normEmail)
                     if (!targetAcc) {
                         this.logger.error('main', 'C2-CONTROL', `Account with email ${cmd.email} not found!`)
                         return
@@ -1277,6 +1283,8 @@ export class MicrosoftRewardsBot {
                     }
                 } else if (cmd.action === 'close-manual-browser') {
                     await this.closeManualAccountSession()
+                } else if (cmd.action === 'force-unlock') {
+                    await this.forceUnlockSessions()
                 }
             })
 
@@ -1354,28 +1362,75 @@ export class MicrosoftRewardsBot {
         }
     }
 
-    public async openManualAccountSession(email: string): Promise<boolean> {
-        if (this.isRunning || isStartInProgress()) {
-            this.logger.warn(
-                'main',
-                'C2-MANUAL',
-                'Tidak dapat membuka browser manual: bot sedang menjalankan batch akun!'
-            )
-            broadcastC2Log('⚠️ [C2-MANUAL] Tidak dapat membuka browser manual: bot sedang menjalankan batch akun!')
-            return false
-        }
+    public async waitForAccountLockRelease(email: string, timeoutMs: number = 1200000): Promise<boolean> {
+        const norm = email.toLowerCase().trim()
+        if (!isAccountLocked(norm)) return true
+        const start = Date.now()
+        return new Promise<boolean>((resolve) => {
+            const checkInterval = setInterval(() => {
+                if (!isAccountLocked(norm) || this.stopRequested) {
+                    clearInterval(checkInterval)
+                    resolve(true)
+                } else if (Date.now() - start > timeoutMs) {
+                    clearInterval(checkInterval)
+                    resolve(false)
+                }
+            }, 500)
+        })
+    }
 
+    public async waitForHandoffComplete(email: string): Promise<void> {
+        const norm = email.toLowerCase().trim()
+        if (!this.activeHandoffResolvers.has(norm)) return
+        this.logger.info(
+            'main',
+            'HOT-HANDOFF',
+            `⏸️ [HOT-HANDOFF] Automasi untuk ${email} ditangguhkan sementara karena sesi manual dibuka...`
+        )
+        broadcastC2Log(`⏸️ [HOT-HANDOFF] Automasi untuk ${email} ditangguhkan sementara...`)
+        await new Promise<void>((resolve) => {
+            const check = setInterval(() => {
+                if (!this.activeHandoffResolvers.has(norm) || this.stopRequested) {
+                    clearInterval(check)
+                    resolve()
+                }
+            }, 500)
+        })
+        this.logger.info(
+            'main',
+            'HOT-HANDOFF',
+            `▶️ [HOT-HANDOFF] Melanjutkan kembali automasi untuk ${email} setelah intervensi manual selesai.`
+        )
+        broadcastC2Log(`▶️ [HOT-HANDOFF] Melanjutkan kembali automasi untuk ${email} setelah intervensi manual selesai.`)
+    }
+
+    public async forceUnlockSessions(): Promise<void> {
+        this.logger.warn('main', 'C2-LOCK', '⚠️ [C2-LOCK] Menjalankan force-unlock: mereset seluruh sesi & kunci...')
+        broadcastC2Log('⚠️ [C2-LOCK] Menjalankan force-unlock: mereset seluruh sesi & kunci...')
         if (this.activeManualSession) {
-            this.logger.warn(
-                'main',
-                'C2-MANUAL',
-                `Sesi browser manual untuk ${this.activeManualSession.account.email} sudah aktif!`
-            )
-            broadcastC2Log(`⚠️ [C2-MANUAL] Sesi browser manual untuk ${this.activeManualSession.account.email} sudah aktif!`)
+            try {
+                if (this.activeManualSession.browser) {
+                    await this.activeManualSession.browser.close().catch(() => {})
+                }
+            } catch {}
+            this.activeManualSession = null
+        }
+        for (const [_, resume] of this.activeHandoffResolvers.entries()) {
+            try { resume() } catch {}
+        }
+        this.activeHandoffResolvers.clear()
+        forceUnlockAllAccounts()
+        broadcastC2Log('🔓 [C2-LOCK] Seluruh status sesi manual & kunci akun berhasil di-reset.')
+    }
+
+    public async openManualAccountSession(email: string): Promise<boolean> {
+        const normEmail = (email || '').toLowerCase().trim()
+        if (!normEmail) {
+            this.logger.error('main', 'C2-MANUAL', 'Email akun tidak boleh kosong!')
             return false
         }
 
-        const targetAccount = this.accounts.find(a => a.email.toLowerCase() === email.toLowerCase())
+        const targetAccount = this.accounts.find(a => a.email.toLowerCase() === normEmail)
         if (!targetAccount) {
             this.logger.error('main', 'C2-MANUAL', `Akun ${email} tidak ditemukan dalam daftar akun!`)
             broadcastC2Log(`🚨 [C2-MANUAL] Akun ${email} tidak ditemukan dalam daftar akun!`)
@@ -1389,15 +1444,60 @@ export class MicrosoftRewardsBot {
             return false
         }
 
+        if (this.activeManualSession && this.activeManualSession.account.email.toLowerCase() === normEmail) {
+            this.logger.warn(
+                'main',
+                'C2-MANUAL',
+                `Sesi browser manual untuk ${targetAccount.email} sudah aktif!`
+            )
+            broadcastC2Log(`⚠️ [C2-MANUAL] Sesi browser manual untuk ${targetAccount.email} sudah aktif!`)
+            return false
+        }
+
+        const isCurrentActiveAccount = this.sessionActiveAccountEmail?.toLowerCase() === normEmail ||
+            (this.activeAccount && this.activeAccount.email.toLowerCase() === normEmail)
+
+        if (isCurrentActiveAccount) {
+            this.logger.info(
+                'main',
+                'HOT-HANDOFF',
+                `🔄 [HOT-HANDOFF] Operator meminta intervensi manual untuk ${targetAccount.email} yang sedang aktif. Melakukan auto-pause & menyimpan snapshot...`
+            )
+            broadcastC2Log(`🔄 [HOT-HANDOFF] Operator meminta intervensi manual untuk ${targetAccount.email} yang sedang aktif. Melakukan auto-pause...`)
+
+            if (this.accountScope) {
+                try {
+                    const activeProc = this.browserFactory.getCurrentBrowserProcess()
+                    const activeCtx = activeProc?.contexts?.()?.[0]
+                    if (activeCtx) {
+                        await AccountSessionStore.saveContextSession(activeCtx, this.accountScope, this.isMobile ? 'mobile' : 'desktop', 3000)
+                    }
+                } catch {}
+            }
+
+            await this.browserFactory.recycleBrowser().catch(() => {})
+            this.updateDashboardAccount(targetAccount.email, { status: 'Manual Handoff' })
+
+            let resumeAutomation: () => void = () => {}
+            new Promise<void>(res => {
+                resumeAutomation = res
+            })
+            this.activeHandoffResolvers.set(normEmail, resumeAutomation)
+        }
+
+        acquireAccountLock(normEmail, 'manual-browser')
+
         this.logger.info('main', 'C2-MANUAL', `Membuka browser manual untuk: ${targetAccount.email}...`)
         broadcastC2Log(`🌐 [C2-MANUAL] Membuka browser manual untuk: ${targetAccount.email}...`)
 
         try {
-            const scope = await AccountScope.create({
-                account: targetAccount,
-                bot: this,
-                runId: `manual_${Date.now()}`
-            })
+            const scope = (isCurrentActiveAccount && this.accountScope)
+                ? this.accountScope
+                : await AccountScope.create({
+                    account: targetAccount,
+                    bot: this,
+                    runId: `manual_${Date.now()}`
+                })
 
             const { browser, context, page } = await this.browserFactory.createManualBrowser(targetAccount, scope)
 
@@ -1411,8 +1511,78 @@ export class MicrosoftRewardsBot {
                 broadcastC2Log(
                     `⏰ [WATCHDOG] Sesi manual ${targetAccount.email} mencapai batas 20 menit tanpa aktivitas. Menyimpan dan menutup browser...`
                 )
-                await this.closeManualAccountSession()
+                await clearManualState()
             }, INACTIVITY_TIMEOUT_MS)
+
+            let isCleaned = false
+            const clearManualState = async () => {
+                if (isCleaned) return
+                isCleaned = true
+                if (watchdogTimer) clearTimeout(watchdogTimer)
+
+                this.logger.info(
+                    'main',
+                    'C2-MANUAL',
+                    `Menutup sesi browser manual untuk ${targetAccount.email}...`
+                )
+                broadcastC2Log(`💾 [MANUAL-SESSION] Menyimpan sesi akun ${targetAccount.email}...`)
+
+                try {
+                    const saveRes = await AccountSessionStore.saveContextSession(context, scope, 'desktop', 5000)
+                    if (saveRes.status === 'saved') {
+                        this.logger.info(
+                            'main',
+                            'C2-MANUAL',
+                            `✅ Sesi akun ${targetAccount.email} berhasil disimpan ke storageState disk.`
+                        )
+                        broadcastC2Log(`✅ [MANUAL-SESSION] Sesi akun ${targetAccount.email} berhasil disimpan ke storageState disk.`)
+                    } else {
+                        this.logger.warn(
+                            'main',
+                            'C2-MANUAL',
+                            `⚠️ Status penyimpanan sesi ${targetAccount.email}: ${saveRes.status}`
+                        )
+                        broadcastC2Log(`⚠️ [MANUAL-SESSION] Status penyimpanan sesi ${targetAccount.email}: ${saveRes.status}`)
+                    }
+                } catch (err) {
+                    this.logger.error(
+                        'main',
+                        'C2-MANUAL',
+                        `Gagal menyimpan context storageState: ${err instanceof Error ? err.message : String(err)}`
+                    )
+                }
+
+                try {
+                    if (browser && (browser.isConnected?.() || !browser.isClosed?.())) {
+                        await browser.close().catch(() => {})
+                    }
+                } catch {}
+
+                if (!isCurrentActiveAccount) {
+                    try {
+                        await scope.dispose().catch(() => {})
+                    } catch {}
+                }
+
+                releaseAccountLock(normEmail)
+                updateManualSessionStatus({
+                    isActive: false,
+                    email: null,
+                    openedAt: null
+                })
+                this.activeManualSession = null
+                broadcastC2Log(`🔓 [C2-LOCK] Kunci sesi ${targetAccount.email} berhasil dilepas.`)
+
+                const resume = this.activeHandoffResolvers.get(normEmail)
+                if (resume) {
+                    this.activeHandoffResolvers.delete(normEmail)
+                    broadcastC2Log(`▶️ [HOT-HANDOFF] Sesi manual selesai. Melanjutkan kembali automasi akun ${targetAccount.email}...`)
+                    resume()
+                }
+            }
+
+            browser.on('disconnected', clearManualState)
+            context.on('close', clearManualState)
 
             this.activeManualSession = {
                 browser,
@@ -1422,7 +1592,8 @@ export class MicrosoftRewardsBot {
                 scope,
                 openedAt: Date.now(),
                 watchdogTimer,
-                isClosing: false
+                isClosing: false,
+                clearManualState
             }
 
             updateManualSessionStatus({
@@ -1431,87 +1602,26 @@ export class MicrosoftRewardsBot {
                 openedAt: Date.now()
             })
 
-            browser.once('disconnected', async () => {
-                await this.handleManualSessionClose('browser-disconnected')
-            })
-
             return true
         } catch (err) {
             const errMsg = err instanceof Error ? err.message : String(err)
             this.logger.error('main', 'C2-MANUAL', `Gagal membuka browser manual: ${errMsg}`)
             broadcastC2Log(`🚨 [C2-MANUAL] Gagal membuka browser manual: ${errMsg}`)
+            releaseAccountLock(normEmail)
             updateManualSessionStatus({ isActive: false, email: null, openedAt: null })
+            const resume = this.activeHandoffResolvers.get(normEmail)
+            if (resume) {
+                this.activeHandoffResolvers.delete(normEmail)
+                resume()
+            }
             return false
         }
     }
 
-    private async handleManualSessionClose(trigger: string): Promise<void> {
-        const session = this.activeManualSession
-        if (!session || session.isClosing) {
-            return
-        }
-        session.isClosing = true
-        if (session.watchdogTimer) {
-            clearTimeout(session.watchdogTimer)
-            session.watchdogTimer = undefined
-        }
-
-        const { context, scope, account, browser } = session
-
-        this.logger.info(
-            'main',
-            'C2-MANUAL',
-            `Menutup sesi browser manual untuk ${account.email} (alasan: ${trigger})...`
-        )
-        broadcastC2Log(`💾 [MANUAL-SESSION] Menyimpan sesi akun ${account.email}...`)
-
-        try {
-            const saveRes = await AccountSessionStore.saveContextSession(context, scope, 'desktop', 5000)
-            if (saveRes.status === 'saved') {
-                this.logger.info(
-                    'main',
-                    'C2-MANUAL',
-                    `✅ Sesi akun ${account.email} berhasil disimpan ke storageState disk.`
-                )
-                broadcastC2Log(`✅ [MANUAL-SESSION] Sesi akun ${account.email} berhasil disimpan ke storageState disk.`)
-            } else {
-                this.logger.warn(
-                    'main',
-                    'C2-MANUAL',
-                    `⚠️ Status penyimpanan sesi ${account.email}: ${saveRes.status}`
-                )
-                broadcastC2Log(`⚠️ [MANUAL-SESSION] Status penyimpanan sesi ${account.email}: ${saveRes.status}`)
-            }
-        } catch (err) {
-            this.logger.error(
-                'main',
-                'C2-MANUAL',
-                `Gagal menyimpan context storageState: ${err instanceof Error ? err.message : String(err)}`
-            )
-        }
-
-        try {
-            if (browser && (browser.isConnected?.() || !browser.isClosed?.())) {
-                await browser.close().catch(() => {})
-            }
-        } catch {}
-
-        try {
-            await scope.dispose().catch(() => {})
-        } catch {}
-
-        this.activeManualSession = null
-        updateManualSessionStatus({
-            isActive: false,
-            email: null,
-            openedAt: null
-        })
-
-        broadcastC2Log(`🏁 [C2-MANUAL] Sesi manual ${account.email} ditutup. Dashboard kembali Standby.`)
-    }
-
     public async closeManualAccountSession(): Promise<void> {
-        await this.handleManualSessionClose('c2-ui-close-request')
+        if (this.activeManualSession?.clearManualState) {
+            await this.activeManualSession.clearManualState()
+        }
     }
 
     private async runMaster(runStartTime: number): Promise<void> {
@@ -1673,10 +1783,20 @@ export class MicrosoftRewardsBot {
         let scope: AccountScope | null = null
         const accountStartTime = Date.now()
         const accountEmail = account.email
+        const normEmail = accountEmail.toLowerCase().trim()
         this.sessionActiveAccountEmail = accountEmail
         if (!this.sessionTotalAccounts) {
             this.sessionTotalAccounts = 1
         }
+        if (isAccountLocked(normEmail)) {
+            this.logger.info(
+                'main',
+                'C2-LOCK',
+                `⏳ Menunggu rilis kunci sesi untuk ${accountEmail} sebelum memulai eksekusi bot...`
+            )
+            await this.waitForAccountLockRelease(accountEmail)
+        }
+        acquireAccountLock(normEmail, 'bot-runner')
         try {
             this.resetAccountState()
             const isolatedUserData = createIsolatedUserData(
@@ -1737,6 +1857,8 @@ export class MicrosoftRewardsBot {
                         this.updateDashboardAccount(accountEmail, { status: 'Stealth Delay' })
                         await interruptibleWait(startDelay, scope!.abortController.signal)
                     }
+
+                    await this.waitForHandoffComplete(accountEmail)
 
                     if (scope!.abortController.signal.aborted) {
                         throw new Error('ACCOUNT_ABORTED_BEFORE_START')
@@ -1881,6 +2003,9 @@ export class MicrosoftRewardsBot {
             })
             return stat
         } finally {
+            if (!this.activeManualSession || this.activeManualSession.account.email.toLowerCase() !== normEmail) {
+                releaseAccountLock(normEmail)
+            }
             const isCurrentActiveScope = this.accountScope === scope
             try {
                 if (scope && !scope.isDisposed) {
@@ -2133,6 +2258,22 @@ export class MicrosoftRewardsBot {
             const batchNum = bIdx + 1
 
             for (const account of batch) {
+                if (this.stopRequested) {
+                    this.logger.warn('main', 'C2-CONTROL', 'Execution stopped/paused by user request.')
+                    break
+                }
+
+                const normEmail = account.email.toLowerCase().trim()
+                if (isAccountLocked(normEmail)) {
+                    this.logger.info(
+                        'main',
+                        'C2-LOCK',
+                        `⏳ [C2-LOCK] Akun ${account.email} sedang terkunci (sesi manual operator). Menunggu rilis sebelum eksekusi otomatis...`
+                    )
+                    broadcastC2Log(`⏳ [C2-LOCK] Akun ${account.email} sedang terkunci oleh operator. Menunggu rilis...`)
+                    await this.waitForAccountLockRelease(account.email)
+                }
+
                 if (this.stopRequested) {
                     this.logger.warn('main', 'C2-CONTROL', 'Execution stopped/paused by user request.')
                     break
