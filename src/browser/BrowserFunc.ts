@@ -4,6 +4,7 @@ import type { AxiosRequestConfig } from 'axios'
 import type { MicrosoftRewardsBot } from '../index'
 import { saveSessionData } from '../util/Load'
 import { AccountSessionStore } from '../runtime/session/AccountSessionStore'
+import { UserAgentManager } from './UserAgent'
 
 import type { Counters, DashboardData } from './../interface/DashboardData'
 import type { AppUserData } from '../interface/AppUserData'
@@ -176,32 +177,54 @@ export default class BrowserFunc {
                 for (const endpoint of apiEndpoints) {
                     if (isExpired()) break
                     try {
-                        const request: AxiosRequestConfig = {
-                            url: endpoint,
-                            method: 'GET',
-                            timeout: 10000,
-                            ...({ 'axios-retry': { retries: 0 } } as any),
-                            headers: {
-                                ...(this.bot.fingerprint?.headers ?? {}),
-                                'User-Agent':
-                                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0',
-                                'sec-ch-ua-mobile': '?0',
-                                'sec-ch-ua-platform': '"Windows"',
-                                Cookie: this.buildCookieHeader(activeCookies, [
-                                    'bing.com',
-                                    'live.com',
-                                    'microsoftonline.com'
-                                ]),
-                                Referer: 'https://rewards.bing.com/',
-                                Origin: 'https://rewards.bing.com'
-                            }
+                        const ctx = this.bot.accountScope?.getContext(this.bot.isMobile ? 'mobile' : 'desktop')
+                        let data: any = null
+
+                        if (ctx?.request) {
+                            try {
+                                const bRes = await ctx.request.get(endpoint, {
+                                    timeout: 10000,
+                                    headers: {
+                                        Referer: 'https://rewards.bing.com/',
+                                        Origin: 'https://rewards.bing.com',
+                                        Accept: 'application/json'
+                                    }
+                                })
+                                if (bRes.ok()) {
+                                    data = await bRes.json().catch(() => null)
+                                }
+                            } catch {}
                         }
 
-                        const response = await this.bot.axios.request(request)
+                        if (!data) {
+                            const request: AxiosRequestConfig = {
+                                url: endpoint,
+                                method: 'GET',
+                                timeout: 10000,
+                                ...({ 'axios-retry': { retries: 0 } } as any),
+                                headers: {
+                                    ...(this.bot.fingerprint?.headers ?? {}),
+                                    'User-Agent':
+                                        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.2849.68',
+                                    'sec-ch-ua-mobile': '?0',
+                                    'sec-ch-ua-platform': '"Windows"',
+                                    Cookie: this.buildCookieHeader(activeCookies, [
+                                        'bing.com',
+                                        'live.com',
+                                        'microsoftonline.com'
+                                    ]),
+                                    Referer: 'https://rewards.bing.com/',
+                                    Origin: 'https://rewards.bing.com'
+                                }
+                            }
 
-                        if (response.data?.dashboard && response.data.dashboard.userStatus) {
-                            this.lockInitialPoints(response.data.dashboard.userStatus.availablePoints)
-                            return response.data.dashboard as DashboardData
+                            const response = await this.bot.axios.request(request)
+                            data = response.data
+                        }
+
+                        if (data?.dashboard && data.dashboard.userStatus) {
+                            this.lockInitialPoints(data.dashboard.userStatus.availablePoints)
+                            return data.dashboard as DashboardData
                         }
                     } catch (error) {
                         this.bot.logger.debug(
@@ -416,15 +439,22 @@ export default class BrowserFunc {
      */
     async getAppDashboardData(): Promise<AppDashboardData> {
         try {
+            const deviceUa =
+                this.bot.accountScope?.deviceProfile?.userAgent ||
+                UserAgentManager.DEFAULT_MOBILE_UA
+            const country = (this.bot.activeAccount?.geoLocale || this.bot.userData?.geoLocale || 'ID').toUpperCase()
+
             const request: AxiosRequestConfig = {
-                url: 'https://prod.rewardsplatform.microsoft.com/dapi/me?channel=SAIOS&options=613',
+                url: 'https://prod.rewardsplatform.microsoft.com/dapi/me?channel=SAAndroid&options=613',
                 method: 'GET',
                 timeout: 6000,
                 ...({ 'axios-retry': { retries: 1 } } as any),
                 headers: {
                     Authorization: `Bearer ${this.bot.accessToken}`,
-                    'User-Agent':
-                        'Bing/32.5.431027001 (com.microsoft.bing; build:431027001; iOS 17.6.1) Alamofire/5.10.2'
+                    'User-Agent': deviceUa,
+                    'X-Rewards-Country': country,
+                    'X-Rewards-Language': 'en',
+                    'X-Rewards-ismobile': 'true'
                 },
                 validateStatus: (status) => status < 500
             }

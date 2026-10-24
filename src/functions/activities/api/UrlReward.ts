@@ -458,19 +458,50 @@ export class UrlReward extends Workers {
                         activityAmount: '1',
                         __RequestVerificationToken: this.bot.requestToken
                     })
-                    await this.bot.axios
-                        .request({
-                            url: 'https://rewards.bing.com/api/reportactivity?X-Requested-With=XMLHttpRequest',
-                            method: 'POST',
-                            timeout: 5000,
-                            headers: {
-                                ...(this.bot.fingerprint?.headers ?? {}),
-                                Cookie: this.cookieHeader,
-                                Referer: 'https://rewards.bing.com/'
-                            },
-                            data: formData
-                        })
-                        .catch(() => {})
+                    const ctx = this.bot.accountScope?.getContext(this.bot.isMobile ? 'mobile' : 'desktop')
+                    if (ctx?.request) {
+                        try {
+                            await ctx.request.post('https://rewards.bing.com/api/reportactivity?X-Requested-With=XMLHttpRequest', {
+                                timeout: 5000,
+                                headers: {
+                                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                                    Referer: 'https://rewards.bing.com/',
+                                    Origin: 'https://rewards.bing.com',
+                                    Cookie: this.cookieHeader,
+                                    ...(this.bot.fingerprint?.headers ?? {})
+                                },
+                                data: formData.toString()
+                            })
+                        } catch {
+                            await this.bot.axios
+                                .request({
+                                    url: 'https://rewards.bing.com/api/reportactivity?X-Requested-With=XMLHttpRequest',
+                                    method: 'POST',
+                                    timeout: 5000,
+                                    headers: {
+                                        ...(this.bot.fingerprint?.headers ?? {}),
+                                        Cookie: this.cookieHeader,
+                                        Referer: 'https://rewards.bing.com/'
+                                    },
+                                    data: formData
+                                })
+                                .catch(() => {})
+                        }
+                    } else {
+                        await this.bot.axios
+                            .request({
+                                url: 'https://rewards.bing.com/api/reportactivity?X-Requested-With=XMLHttpRequest',
+                                method: 'POST',
+                                timeout: 5000,
+                                headers: {
+                                    ...(this.bot.fingerprint?.headers ?? {}),
+                                    Cookie: this.cookieHeader,
+                                    Referer: 'https://rewards.bing.com/'
+                                },
+                                data: formData
+                            })
+                            .catch(() => {})
+                    }
                 } catch {}
             }
 

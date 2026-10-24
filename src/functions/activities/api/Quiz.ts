@@ -92,12 +92,41 @@ export class Quiz extends Workers {
                             `Sending ReportActivity request | attempt=${i + 1}/${maxAttempts} | offerId=${offerId} | url=${request.url}`
                         )
 
-                        const response = await this.bot.axios.request(request)
+                        const ctx = this.bot.accountScope?.getContext(this.bot.isMobile ? 'mobile' : 'desktop')
+                        let resStatus = 0
+
+                        if (ctx?.request) {
+                            try {
+                                const browserRes = await ctx.request.post('https://www.bing.com/bingqa/ReportActivity?ajaxreq=1', {
+                                    headers: {
+                                        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                                        Referer: 'https://www.bing.com/',
+                                        Origin: 'https://www.bing.com',
+                                        Cookie: this.cookieHeader,
+                                        ...this.fingerprintHeader
+                                    },
+                                    data: JSON.stringify(jsonData),
+                                    timeout: 10000
+                                })
+                                resStatus = browserRes.status()
+                            } catch (ctxErr) {
+                                this.bot.logger.debug(
+                                    this.bot.isMobile,
+                                    'QUIZ',
+                                    `Context request failed, falling back to axios: ${ctxErr instanceof Error ? ctxErr.message : String(ctxErr)}`
+                                )
+                                const response = await this.bot.axios.request(request)
+                                resStatus = response.status
+                            }
+                        } else {
+                            const response = await this.bot.axios.request(request)
+                            resStatus = response.status
+                        }
 
                         this.bot.logger.debug(
                             this.bot.isMobile,
                             'QUIZ',
-                            `Received ReportActivity response | attempt=${i + 1}/${maxAttempts} | offerId=${offerId} | status=${response.status}`
+                            `Received ReportActivity response | attempt=${i + 1}/${maxAttempts} | offerId=${offerId} | status=${resStatus}`
                         )
 
                         let newBalance = await this.bot.browser.func.getCurrentPoints()
@@ -130,7 +159,7 @@ export class Quiz extends Workers {
                             this.bot.logger.info(
                                 this.bot.isMobile,
                                 'QUIZ',
-                                `ReportActivity ${i + 1} → ${response.status} | offerId=${offerId} | gainedPoints=${gainedPoints} | newBalance=${newBalance}`,
+                                `ReportActivity ${i + 1} → ${resStatus} | offerId=${offerId} | gainedPoints=${gainedPoints} | newBalance=${newBalance}`,
                                 'green'
                             )
                         } else {
