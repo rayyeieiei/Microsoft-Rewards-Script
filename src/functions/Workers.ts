@@ -24,14 +24,25 @@ export { isLocalSystemProtocol, resolvePunchCardExecutionUrl }
 export async function ensureOnRewardsDashboard(page: Page): Promise<void> {
     if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return
     try {
-        const currentUrl = typeof page.url === 'function' ? page.url() : ''
-        if (currentUrl.includes('/about') || !currentUrl.includes('rewards.bing.com/dashboard')) {
+        const currentUrl = typeof page.url === 'function' ? page.url().toLowerCase() : ''
+        const isOnValidRewards = currentUrl.includes('rewards.bing.com/earn') || currentUrl.includes('rewards.bing.com/dashboard')
+        if (currentUrl.includes('/about') || !isOnValidRewards) {
+            // Arahkan ke /earn yang stabil dan tidak memantul ke /about
             await page
-                .goto('https://rewards.bing.com/dashboard', { waitUntil: 'domcontentloaded', timeout: 15000 })
+                .goto('https://rewards.bing.com/earn', { waitUntil: 'domcontentloaded', timeout: 15000 })
                 .catch(() => {})
+
+            const afterNavUrl = typeof page.url === 'function' ? page.url().toLowerCase() : ''
+            if (afterNavUrl.includes('/about')) {
+                // Fallback kedua: coba /dashboard jika /earn terpental
+                await page
+                    .goto('https://rewards.bing.com/dashboard', { waitUntil: 'domcontentloaded', timeout: 15000 })
+                    .catch(() => {})
+            }
+
             await page
                 .waitForSelector(
-                    '#daily-sets, [data-bi-area*="DailySet"], #dailyset, .daily-set, [id*="dashboard"], [class*="dashboard"]',
+                    '#daily-sets, [data-bi-area*="DailySet"], #dailyset, .daily-set, [id*="dashboard"], [class*="dashboard"], .c-card, [class*="card"]',
                     { timeout: 4000 }
                 )
                 .catch(() => {})
@@ -451,7 +462,8 @@ export class Workers {
         if (todayDailySetItems.length === 0 && activitiesUncompleted.length === 0) {
             try {
                 const currentUrl = page.url().toLowerCase()
-                if (currentUrl.includes('/about') || !currentUrl.includes('rewards.bing.com/dashboard')) {
+                const isDashboardLoaded = currentUrl.includes('rewards.bing.com/earn') || currentUrl.includes('rewards.bing.com/dashboard')
+                if (currentUrl.includes('/about') || !isDashboardLoaded) {
                     await ensureOnRewardsDashboard(page)
                     await this.bot.utils.wait(2000)
                 }
@@ -632,7 +644,8 @@ export class Workers {
             if (page && !page.isClosed()) {
                 try {
                     const curUrl = page.url().toLowerCase()
-                    if (curUrl.includes('/about') || !curUrl.includes('rewards.bing.com/dashboard')) {
+                    const isDashboardLoaded = curUrl.includes('rewards.bing.com/earn') || curUrl.includes('rewards.bing.com/dashboard')
+                    if (curUrl.includes('/about') || !isDashboardLoaded) {
                         await ensureOnRewardsDashboard(page)
                         await this.bot.utils.wait(1500)
                     }

@@ -257,7 +257,7 @@ export class UrlReward extends Workers {
                 (promotion.name || '').toLowerCase().includes('dailyset') ||
                 (promotion.title || '').toLowerCase().includes('daily set')
 
-            let targetDashboard = isDailySet ? 'https://rewards.bing.com/dashboard' : 'https://rewards.bing.com/earn'
+            let targetDashboard = 'https://rewards.bing.com/earn'
             if (punchCard && punchCard.parentPromotion?.destinationUrl) {
                 const parentDest = punchCard.parentPromotion.destinationUrl.trim()
                 if (
@@ -273,7 +273,8 @@ export class UrlReward extends Workers {
                 const currentUrl = page.url().toLowerCase()
 
                 if (isDailySet) {
-                    if (currentUrl.includes('/about') || !currentUrl.includes('rewards.bing.com/dashboard')) {
+                    const isDashboardLoaded = currentUrl.includes('rewards.bing.com/earn') || currentUrl.includes('rewards.bing.com/dashboard')
+                    if (currentUrl.includes('/about') || !isDashboardLoaded) {
                         await ensureOnRewardsDashboard(page)
                         await this.bot.utils.wait(1500)
                     }
@@ -298,7 +299,7 @@ export class UrlReward extends Workers {
                                 'URL-REWARD',
                                 `[URI-GUARD] Intercepted invalid protocol or deprecated envelope in targetDashboard "${targetDashboard}". Falling back to safe dashboard.`
                             )
-                            targetDashboard = 'https://rewards.bing.com/dashboard'
+                            targetDashboard = 'https://rewards.bing.com/earn'
                         }
                         await page
                             .goto(targetDashboard, { waitUntil: 'domcontentloaded', timeout: 15000 })
@@ -819,7 +820,7 @@ export class UrlReward extends Workers {
                             'URL-REWARD',
                             `Initial balance delta is 0 for "${promotion.title}", performing 1x dashboard reload & re-evaluation...`
                         )
-                        const reloadUrl = isDailySet ? 'https://rewards.bing.com/dashboard' : targetDashboard
+                        const reloadUrl = isDailySet ? 'https://rewards.bing.com/earn' : targetDashboard
                         if (isDailySet) {
                             await ensureOnRewardsDashboard(page)
                         } else if (!isLocalSystemProtocol(reloadUrl)) {
