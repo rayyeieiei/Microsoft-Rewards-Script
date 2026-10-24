@@ -9,6 +9,8 @@ export interface DeviceHardwareProfile {
     isMobile: boolean
     hasTouch: boolean
     userAgent: string
+    webglVendor?: string
+    webglRenderer?: string
 }
 
 export const REAL_ANDROID_DEVICE_CATALOG: readonly DeviceHardwareProfile[] = [
@@ -19,7 +21,9 @@ export const REAL_ANDROID_DEVICE_CATALOG: readonly DeviceHardwareProfile[] = [
         isMobile: true,
         hasTouch: true,
         userAgent:
-            'Mozilla/5.0 (Linux; Android 14; SM-S911B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36 EdgA/128.0.2739.79'
+            'Mozilla/5.0 (Linux; Android 14; SM-S911B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36 EdgA/130.0.2849.68',
+        webglVendor: 'Qualcomm',
+        webglRenderer: 'Adreno (TM) 740'
     },
     {
         deviceModel: 'Pixel 7', // Google Pixel 7
@@ -28,7 +32,9 @@ export const REAL_ANDROID_DEVICE_CATALOG: readonly DeviceHardwareProfile[] = [
         isMobile: true,
         hasTouch: true,
         userAgent:
-            'Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36 EdgA/128.0.2739.79'
+            'Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36 EdgA/130.0.2849.68',
+        webglVendor: 'ARM',
+        webglRenderer: 'Mali-G710 MP7'
     },
     {
         deviceModel: '22101316G', // Xiaomi Redmi Note 12
@@ -37,7 +43,9 @@ export const REAL_ANDROID_DEVICE_CATALOG: readonly DeviceHardwareProfile[] = [
         isMobile: true,
         hasTouch: true,
         userAgent:
-            'Mozilla/5.0 (Linux; Android 14; 22101316G) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36 EdgA/128.0.2739.79'
+            'Mozilla/5.0 (Linux; Android 14; 22101316G) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36 EdgA/130.0.2849.68',
+        webglVendor: 'Qualcomm',
+        webglRenderer: 'Adreno (TM) 619'
     },
     {
         deviceModel: 'SM-A546B', // Samsung Galaxy A54
@@ -46,7 +54,9 @@ export const REAL_ANDROID_DEVICE_CATALOG: readonly DeviceHardwareProfile[] = [
         isMobile: true,
         hasTouch: true,
         userAgent:
-            'Mozilla/5.0 (Linux; Android 14; SM-A546B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36 EdgA/128.0.2739.79'
+            'Mozilla/5.0 (Linux; Android 14; SM-A546B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36 EdgA/130.0.2849.68',
+        webglVendor: 'ARM',
+        webglRenderer: 'Mali-G68 MP5'
     },
     {
         deviceModel: 'CPH2449', // OnePlus 11
@@ -55,7 +65,9 @@ export const REAL_ANDROID_DEVICE_CATALOG: readonly DeviceHardwareProfile[] = [
         isMobile: true,
         hasTouch: true,
         userAgent:
-            'Mozilla/5.0 (Linux; Android 14; CPH2449) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36 EdgA/128.0.2739.79'
+            'Mozilla/5.0 (Linux; Android 14; CPH2449) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36 EdgA/130.0.2849.68',
+        webglVendor: 'Qualcomm',
+        webglRenderer: 'Adreno (TM) 740'
     },
     {
         deviceModel: 'SM-A715F', // Samsung Galaxy A71
@@ -64,7 +76,9 @@ export const REAL_ANDROID_DEVICE_CATALOG: readonly DeviceHardwareProfile[] = [
         isMobile: true,
         hasTouch: true,
         userAgent:
-            'Mozilla/5.0 (Linux; Android 14; SM-A715F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36 EdgA/128.0.2739.79'
+            'Mozilla/5.0 (Linux; Android 14; SM-A715F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36 EdgA/130.0.2849.68',
+        webglVendor: 'Qualcomm',
+        webglRenderer: 'Adreno (TM) 618'
     }
 ]
 

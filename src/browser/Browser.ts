@@ -3,6 +3,7 @@ import type { MicrosoftRewardsBot } from '../index'
 import { loadSessionData } from '../util/Load'
 import { BrowserEnvironmentPolicy } from '../runtime/environment/BrowserEnvironmentPolicy'
 import { AccountSessionStore } from '../runtime/session/AccountSessionStore'
+import { UserAgentManager } from './UserAgent'
 import type { Account, AccountProxy } from '../interface/Account'
 import type { AccountScope } from '../runtime/AccountScope'
 
@@ -193,53 +194,8 @@ class Browser {
 
             const context = await browser.newContext(contextOptions)
 
-            // Guardrail 2: Hardware Concurrency Clamping to 8 (octa-core Android standard)
-            await context.addInitScript(() => {
-                try {
-                    Object.defineProperty(navigator, 'hardwareConcurrency', {
-                        get: () => 8,
-                        configurable: true
-                    })
-                } catch {}
-            })
-
-            // Guardrail 1: Injeksi CDP Client Hints via Network.setUserAgentOverride
-            if (this.bot.isMobile && deviceProfile) {
-                const applyCdpOverride = async (page: any) => {
-                    try {
-                        const cdp = await (context as any).newCDPSession(page)
-                        if (this.bot.accountScope) {
-                            this.bot.accountScope.trackCdpSession(cdp)
-                        }
-                        await cdp.send('Network.setUserAgentOverride', {
-                            userAgent: deviceProfile.userAgent,
-                            acceptLanguage: 'en-US,en;q=0.9',
-                            platform: 'Android',
-                            userAgentMetadata: {
-                                brands: [
-                                    { brand: 'Not_A Brand', version: '8' },
-                                    { brand: 'Chromium', version: '128' },
-                                    { brand: 'Microsoft Edge', version: '128' }
-                                ],
-                                fullVersion: '128.0.2739.79',
-                                platform: 'Android',
-                                platformVersion: '14.0.0',
-                                architecture: 'arm',
-                                model: deviceProfile.deviceModel,
-                                mobile: true,
-                                bitness: '64'
-                            }
-                        })
-                    } catch {}
-                }
-
-                ;(context as any).on('page', (page: any) => {
-                    applyCdpOverride(page).catch(() => {})
-                })
-                for (const p of context.pages()) {
-                    applyCdpOverride(p).catch(() => {})
-                }
-            }
+            // Terapkan override deterministik WebGL, Device Memory & CDP Client Hints (Mobile & Desktop)
+            await this.applyDeterministicOverrides(context, this.bot.isMobile, profile, deviceProfile)
 
             context.setDefaultTimeout(this.bot.utils.stringToNumber(this.bot.config?.globalTimeout ?? 30000))
 
@@ -441,10 +397,163 @@ class Browser {
         }
 
         const context = await browser.newContext(contextOptions)
+        await this.applyDeterministicOverrides(context, false, profile, deviceProfile)
         const page = await context.newPage()
         await page.goto('https://rewards.bing.com/dashboard', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {})
 
         return { browser, context, page }
+    }
+
+    private async applyDeterministicOverrides(
+        context: any,
+        isMobile: boolean,
+        profile: any,
+        deviceProfile?: any
+    ): Promise<void> {
+        const fakeVendor = isMobile
+            ? (deviceProfile?.webglVendor || 'ARM')
+            : 'Google Inc. (NVIDIA)'
+        const fakeRenderer = isMobile
+            ? (deviceProfile?.webglRenderer || 'Mali-G710 MP7')
+            : 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)'
+
+        await context.addInitScript(({ isMobile, fakeVendor, fakeRenderer }: any) => {
+            try {
+                Object.defineProperty(Navigator.prototype, 'hardwareConcurrency', {
+                    get: () => 8,
+                    configurable: true
+                })
+            } catch {
+                try {
+                    Object.defineProperty(navigator, 'hardwareConcurrency', {
+                        get: () => 8,
+                        configurable: true
+                    })
+                } catch {}
+            }
+
+            try {
+                Object.defineProperty(Navigator.prototype, 'deviceMemory', {
+                    get: () => 8,
+                    configurable: true
+                })
+            } catch {
+                try {
+                    Object.defineProperty(navigator, 'deviceMemory', {
+                        get: () => 8,
+                        configurable: true
+                    })
+                } catch {}
+            }
+
+            try {
+                const getParameterProto = WebGLRenderingContext.prototype.getParameter
+                const getParameterProto2 = typeof WebGL2RenderingContext !== 'undefined'
+                    ? WebGL2RenderingContext.prototype.getParameter
+                    : null
+
+                const unmaskedVendorId = 0x9245
+                const unmaskedRendererId = 0x9246
+                const vendorId = 0x1f00
+                const rendererId = 0x1f01
+
+                const wrapGetParameter = function(originalFn: any) {
+                    return function(this: any, param: number) {
+                        if (param === unmaskedVendorId || param === vendorId) {
+                            return fakeVendor
+                        }
+                        if (param === unmaskedRendererId || param === rendererId) {
+                            return fakeRenderer
+                        }
+                        return originalFn.apply(this, arguments)
+                    }
+                }
+
+                WebGLRenderingContext.prototype.getParameter = wrapGetParameter(getParameterProto)
+                if (getParameterProto2) {
+                    WebGL2RenderingContext.prototype.getParameter = wrapGetParameter(getParameterProto2)
+                }
+            } catch {}
+        }, { isMobile, fakeVendor, fakeRenderer })
+
+        const targetUa = profile?.userAgent || (isMobile ? UserAgentManager.DEFAULT_MOBILE_UA : UserAgentManager.DEFAULT_DESKTOP_UA)
+        const brands = [
+            { brand: 'Not_A Brand', version: '8' },
+            { brand: 'Chromium', version: '130' },
+            { brand: 'Microsoft Edge', version: '130' }
+        ]
+        const userAgentMetadata = isMobile
+            ? {
+                  brands,
+                  fullVersion: '130.0.2849.68',
+                  platform: 'Android',
+                  platformVersion: '14.0.0',
+                  architecture: 'arm',
+                  model: deviceProfile?.deviceModel || 'Pixel 7',
+                  mobile: true,
+                  bitness: '64'
+              }
+            : {
+                  brands,
+                  fullVersion: '130.0.2849.68',
+                  platform: 'Windows',
+                  platformVersion: '10.0.0',
+                  architecture: 'x86',
+                  model: '',
+                  mobile: false,
+                  bitness: '64'
+              }
+
+        const overrideScript = `
+        try {
+            Object.defineProperty(Navigator.prototype, 'hardwareConcurrency', { get: () => 8, configurable: true });
+            Object.defineProperty(Navigator.prototype, 'deviceMemory', { get: () => 8, configurable: true });
+        } catch (e) {}
+        try {
+            Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8, configurable: true });
+            Object.defineProperty(navigator, 'deviceMemory', { get: () => 8, configurable: true });
+        } catch (e) {}
+        try {
+            const origGet = WebGLRenderingContext.prototype.getParameter;
+            WebGLRenderingContext.prototype.getParameter = function(param) {
+                if (param === 0x9245 || param === 0x1f00) return ${JSON.stringify(fakeVendor)};
+                if (param === 0x9246 || param === 0x1f01) return ${JSON.stringify(fakeRenderer)};
+                return origGet.apply(this, arguments);
+            };
+            if (typeof WebGL2RenderingContext !== 'undefined') {
+                const origGet2 = WebGL2RenderingContext.prototype.getParameter;
+                WebGL2RenderingContext.prototype.getParameter = function(param) {
+                    if (param === 0x9245 || param === 0x1f00) return ${JSON.stringify(fakeVendor)};
+                    if (param === 0x9246 || param === 0x1f01) return ${JSON.stringify(fakeRenderer)};
+                    return origGet2.apply(this, arguments);
+                };
+            }
+        } catch (e) {}
+        `
+
+        const applyCdp = async (page: any) => {
+            try {
+                const cdp = await context.newCDPSession(page)
+                if (this.bot.accountScope) {
+                    this.bot.accountScope.trackCdpSession(cdp)
+                }
+                await cdp.send('Page.enable')
+                await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: overrideScript })
+                await cdp.send('Network.setUserAgentOverride', {
+                    userAgent: targetUa,
+                    acceptLanguage: 'en-US,en;q=0.9',
+                    platform: isMobile ? 'Android' : 'Windows',
+                    userAgentMetadata
+                })
+            } catch {}
+        }
+
+        context.on('page', (page: any) => {
+            applyCdp(page).catch(() => {})
+        })
+        for (const p of context.pages()) {
+            applyCdp(p).catch(() => {})
+        }
     }
 
     private formatProxyServer(proxy: AccountProxy): string {
