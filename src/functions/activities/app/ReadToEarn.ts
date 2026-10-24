@@ -5,6 +5,16 @@ import { Database } from '../../../util/Database'
 import { UserAgentManager } from '../../../browser/UserAgent'
 
 export class ReadToEarn extends Workers {
+    private static sessionReadArticleIds = new Set<string>()
+
+    public static getSessionReadArticleIds(): string[] {
+        return Array.from(ReadToEarn.sessionReadArticleIds)
+    }
+
+    public static clearSessionReadArticleIds(): void {
+        ReadToEarn.sessionReadArticleIds.clear()
+    }
+
     public get client() {
         return this.bot.axios
     }
@@ -16,7 +26,24 @@ export class ReadToEarn extends Workers {
         'AA2dym6n', 'AA2dzhfb', 'AA2draRk', 'AA2dwg2P', 'AA2duFji',
         'AA2cgYSG', 'AA2dyK0k', 'AA2dxi9K', 'AA1uQd6k', 'AA1v48eQ',
         'AA1wF8xN', 'AA1sQ5zL', 'AA1tM2kY', 'AA1pZ9wQ', 'AA1xK3rZ',
-        'AA1yM4pQ', 'AA1zN5oR'
+        'AA1yM4pQ', 'AA1zN5oR', 'AA1aB2cD', 'AA1eF3gH', 'AA1iJ4kL',
+        'AA1mN5oP', 'AA1qR6sT', 'AA1uV7wX', 'AA1yZ8aB', 'AA2bC3dE',
+        'AA2fG4hI', 'AA2jK5lM', 'AA2nO6pQ', 'AA2rS7tU', 'AA2vW8xY',
+        'AA2zAbCd', 'AA2EfGhI', 'AA2JkLmN', 'AA2OpQrS', 'AA2TuVwX',
+        'AA2YzA1B', 'AA2C3D4E', 'AA2F5G6H', 'AA2I7J8K', 'AA2L9M0N',
+        'AA2O1P2Q', 'AA2R3S4T', 'AA2U5V6W', 'AA2X7Y8Z', 'AA1B9C0D',
+        'AA1E2F3G', 'AA1H4I5J', 'AA1K6L7M', 'AA1N8O9P', 'AA1Q0R1S',
+        'AA1T2U3V', 'AA1W4X5Y', 'AA1Z6A7B', 'AA2C8D9E', 'AA2F0G1H',
+        'AA2I2J3K', 'AA2L4M5N', 'AA2O6P7Q', 'AA2R8S9T', 'AA2U0V1W',
+        'AA2X2Y3Z', 'AA1A4B5C', 'AA1D6E7F', 'AA1G8H9I', 'AA1J0K1L',
+        'AA1M2N3O', 'AA1P4Q5R', 'AA1S6T7U', 'AA1V8W9X', 'AA1Y0Z1A',
+        'AA2B2C3D', 'AA2E4F5G', 'AA2H6I7J', 'AA2K8L9M', 'AA2N0O1P',
+        'AA2Q2R3S', 'AA2T4U5V', 'AA2W6X7Y', 'AA2Z8A9B', 'AA1C0D1E',
+        'AA1F2G3H', 'AA1I4J5K', 'AA1L6M7N', 'AA1O8P9Q', 'AA1R0S1T',
+        'AA1U2V3W', 'AA1X4Y5Z', 'AA2A6B7C', 'AA2D8E9F', 'AA2G0H1I',
+        'AA2J2K3L', 'AA2M4N5O', 'AA2P6Q7R', 'AA2S8T9U', 'AA2V0W1X',
+        'AA2Y2Z3A', 'AA1B4C5D', 'AA1E6F7G', 'AA1H8I9J', 'AA1K0L1M',
+        'AA1N2O3P', 'AA1Q4R5S', 'AA1T6U7V', 'AA1W8X9Y', 'AA1Z0A1B'
     ]
 
     public readonly FALLBACK_ARTICLE_POOL: string[] = this.localArticlesPool
@@ -321,11 +348,34 @@ export class ReadToEarn extends Workers {
                 'READ-TO-EARN',
                 `Using fallback article pool (localArticlesPool) for Read to Earn (found=${uniqueFound.length}, target=${count})`
             )
-            for (const fallbackId of this.localArticlesPool) {
-                if (!uniqueFound.includes(fallbackId)) {
-                    uniqueFound.push(fallbackId)
-                }
+
+            // Saring kandidat yang belum pernah dibaca akun lain dalam sesi ini
+            const unreadCandidates = this.localArticlesPool.filter(
+                id => !ReadToEarn.sessionReadArticleIds.has(id) && !uniqueFound.includes(id)
+            )
+
+            // Terapkan pengacakan Fisher-Yates
+            for (let i = unreadCandidates.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1))
+                ;[unreadCandidates[i], unreadCandidates[j]] = [unreadCandidates[j]!, unreadCandidates[i]!]
+            }
+
+            for (const fallbackId of unreadCandidates) {
+                uniqueFound.push(fallbackId)
                 if (uniqueFound.length >= count) break
+            }
+
+            // Jika pool unread sudah habis (misal sudah >10-12 akun berjalan), daur ulang pool dengan shuffle acak baru
+            if (uniqueFound.length < count) {
+                const recycledCandidates = this.localArticlesPool.filter(id => !uniqueFound.includes(id))
+                for (let i = recycledCandidates.length - 1; i > 0; i--) {
+                    const j = Math.floor(Math.random() * (i + 1))
+                    ;[recycledCandidates[i], recycledCandidates[j]] = [recycledCandidates[j]!, recycledCandidates[i]!]
+                }
+                for (const fallbackId of recycledCandidates) {
+                    uniqueFound.push(fallbackId)
+                    if (uniqueFound.length >= count) break
+                }
             }
 
             while (uniqueFound.length < count) {
@@ -336,7 +386,12 @@ export class ReadToEarn extends Workers {
             }
         }
 
-        return uniqueFound.slice(0, count)
+        const selected = uniqueFound.slice(0, count)
+        for (const id of selected) {
+            ReadToEarn.sessionReadArticleIds.add(id)
+        }
+
+        return selected
     }
 
     public async doReadToEarn() {
