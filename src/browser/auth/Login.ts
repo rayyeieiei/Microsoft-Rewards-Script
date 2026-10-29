@@ -566,7 +566,7 @@ export class Login {
     }
 
     private async getRewardsSession(page: Page) {
-        await page.goto(`${this.bot.config.baseURL}?_=${Date.now()}`, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {})
+        await page.goto('https://rewards.bing.com/earn', { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {})
 
         const currentUrl = page.url()
         if (currentUrl.includes('rewards.bing.com/about') || currentUrl.includes('rewards.bing.com/welcome')) {

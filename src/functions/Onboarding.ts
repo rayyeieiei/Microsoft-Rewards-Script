@@ -83,14 +83,14 @@ export class Onboarding {
             if (!enrolled) {
                 const postUrl = page.url()
                 if (postUrl.includes('/about') || postUrl.includes('/welcome')) {
-                    await page.goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {})
+                    await page.goto('https://rewards.bing.com/earn', { waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {})
                     await this.bot.utils.wait(2000)
                 }
             }
 
             const finalUrl = page.url()
             const success =
-                (finalUrl.includes('rewards.bing.com') || finalUrl.includes('rewards.bing.com/dashboard')) &&
+                (finalUrl.includes('rewards.bing.com') || finalUrl.includes('rewards.bing.com/dashboard') || finalUrl.includes('rewards.bing.com/earn')) &&
                 !finalUrl.includes('/about') &&
                 !finalUrl.includes('/welcome')
 

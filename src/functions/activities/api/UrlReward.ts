@@ -1,5 +1,5 @@
 import type { BasePromotion, PunchCard } from '../../../interface/DashboardData'
-import { Workers, ensureOnRewardsDashboard } from '../../Workers'
+import { Workers } from '../../Workers'
 import { Page } from 'patchright'
 import { Database } from '../../../util/Database'
 import {
@@ -273,9 +273,14 @@ export class UrlReward extends Workers {
                 const currentUrl = page.url().toLowerCase()
 
                 if (isDailySet) {
-                    const isDashboardLoaded = currentUrl.includes('rewards.bing.com/earn') || currentUrl.includes('rewards.bing.com/dashboard')
-                    if (currentUrl.includes('/about') || !isDashboardLoaded) {
-                        await ensureOnRewardsDashboard(page)
+                    const isEarnLoaded = currentUrl.includes('rewards.bing.com/earn')
+                    if (currentUrl.includes('/about') || !isEarnLoaded) {
+                        await page
+                            .goto('https://rewards.bing.com/earn', {
+                                waitUntil: 'domcontentloaded',
+                                timeout: 15000
+                            })
+                            .catch(() => {})
                         await this.bot.utils.wait(1500)
                     }
                 } else {
@@ -822,7 +827,9 @@ export class UrlReward extends Workers {
                         )
                         const reloadUrl = isDailySet ? 'https://rewards.bing.com/earn' : targetDashboard
                         if (isDailySet) {
-                            await ensureOnRewardsDashboard(page)
+                            await page
+                                .goto('https://rewards.bing.com/earn', { waitUntil: 'domcontentloaded', timeout: 15000 })
+                                .catch(() => {})
                         } else if (!isLocalSystemProtocol(reloadUrl)) {
                             await page
                                 .goto(reloadUrl, { waitUntil: 'domcontentloaded', timeout: 15000 })
