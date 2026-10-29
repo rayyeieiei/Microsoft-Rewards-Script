@@ -341,39 +341,36 @@ class Browser {
                     url.includes('/rewards/log') ||
                     url.includes('/fd/ls/lsp.aspx')
 
-                if (isRewardsTelemetry) {
-                    return route.continue().catch(() => {})
-                }
-
                 // 1. Blokir resource tipe berat non-telemetri (Video, Audio, Font, WebSocket)
                 if (type === 'media' || type === 'font' || type === 'websocket') {
                     this.bot.trackBlockedRequest()
                     return route.abort().catch(() => {})
                 }
 
-                // 2. Blokir gambar umum/berat (format file banner/konten visual besar), tapi izinkan tracking pixel 1x1
+                // 2. Blokir gambar secara absolut (termasuk CDN mm.bing.net, bing.net/th, th.bing.com, sprite /sa/simg/, /rp/)
+                // Hanya izinkan tracking beacon 1x1 esensial (/fd/ls/lsp.aspx)
                 if (type === 'image') {
-                    const isHeavyImage =
-                        url.endsWith('.png') ||
-                        url.endsWith('.jpg') ||
-                        url.endsWith('.jpeg') ||
-                        url.endsWith('.webp') ||
-                        url.endsWith('.svg') ||
-                        url.includes('.png?') ||
-                        url.includes('.jpg?') ||
-                        url.includes('.jpeg?') ||
-                        url.includes('.webp?') ||
-                        url.includes('bing.com/th?id=') ||
-                        url.includes('static-news.msn.com')
-
-                    if (isHeavyImage) {
+                    const isTelemetryBeacon = url.includes('/fd/ls/lsp.aspx') || url.includes('/fd/ls/')
+                    if (!isTelemetryBeacon) {
                         this.bot.trackBlockedRequest()
                         return route.abort().catch(() => {})
                     }
                 }
 
-                // 3. Blokir domain iklan dan tracker pihak ketiga eksternal
+                if (isRewardsTelemetry) {
+                    return route.continue().catch(() => {})
+                }
+
+                // 3. Blokir domain CDN thumbnail, gambar terkompresi, domain iklan, dan tracker eksternal
                 if (
+                    url.includes('bing.net/th') ||
+                    url.includes('mm.bing.net') ||
+                    url.includes('th.bing.com') ||
+                    url.includes('bing.com/sa/simg') ||
+                    url.includes('bing.com/rp/') ||
+                    url.includes('bing.com/th?id=') ||
+                    url.includes('static-news.msn.com') ||
+                    url.includes('assets.msn.com') ||
                     url.includes('clarity.ms') ||
                     url.includes('adnxs.com') ||
                     url.includes('doubleclick.net') ||

@@ -97,6 +97,38 @@ export class Search extends Workers {
 
             this.topicalChainer.resetChain()
 
+            // Pasang dedicated page-level route blocker untuk mematikan render gambar, media, font, dan elemen berat selama pencarian
+            await page.route('**/*', route => {
+                const req = route.request()
+                const resourceType = req.resourceType()
+                const url = req.url().toLowerCase()
+
+                if (['image', 'media', 'font', 'websocket'].includes(resourceType)) {
+                    this.bot.trackBlockedRequest()
+                    return route.abort().catch(() => {})
+                }
+
+                if (
+                    url.includes('copilot.microsoft.com') ||
+                    url.includes('sydney.bing.com') ||
+                    url.includes('adnxs.com') ||
+                    url.includes('clarity.ms') ||
+                    url.includes('/as/api/') ||
+                    url.includes('msn.com/api/news') ||
+                    url.includes('bing.com/overlay') ||
+                    url.includes('bing.net/th') ||
+                    url.includes('mm.bing.net') ||
+                    url.includes('th.bing.com') ||
+                    url.includes('bing.com/sa/simg') ||
+                    url.includes('bing.com/rp/')
+                ) {
+                    this.bot.trackBlockedRequest()
+                    return route.abort().catch(() => {})
+                }
+
+                return route.continue().catch(() => {})
+            }).catch(() => {})
+
             // Go to bing
             this.bot.logger.debug(isMobile, 'SEARCH-BING', `Navigating to search page | url=${this.bingHome}`)
 
