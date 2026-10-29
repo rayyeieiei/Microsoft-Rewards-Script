@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import cluster, { Worker } from 'cluster'
-import type { BrowserContext, Cookie, Page } from 'patchright'
+import { chromium, type BrowserContext, type Cookie, type Page } from 'patchright'
 import axios from 'axios'
 import pkg from '../package.json'
 import dns from 'node:dns/promises' // 🚀 UNTUK CEK KONEKSI HEMAT KUOTA
@@ -353,6 +353,7 @@ export class MicrosoftRewardsBot {
     } | null = null
     private cliStdinListener: ((chunk: Buffer | string) => void) | null = null
     public connectivityFailureReporter?: ConnectivityFailureReporter
+    private activeManualInspector: { email: string; browser: any; context: any; page: any } | null = null
 
     private activeWorkers: number
     private exitedWorkers: number[]
@@ -1278,6 +1279,97 @@ export class MicrosoftRewardsBot {
                     } finally {
                         this.isRunning = false
                         this.updateDashboardGlobal({ isRunning: false, startTime: 0 })
+                    }
+                } else if (cmd.action === 'open-manual-browser') {
+                    if (this.activeManualInspector) {
+                        this.logger.warn('main', 'MANUAL-BROWSER', `[MANUAL-BROWSER] Browser inspeksi sudah aktif untuk ${this.activeManualInspector.email}. Tutup terlebih dahulu.`)
+                        return
+                    }
+                    if (!cmd.email) {
+                        this.logger.error('main', 'MANUAL-BROWSER', '[MANUAL-BROWSER] Parameter email wajib disertakan!')
+                        return
+                    }
+                    const targetAcc = this.accounts.find(a => a.email.toLowerCase() === cmd.email!.toLowerCase())
+                    if (!targetAcc) {
+                        this.logger.error('main', 'MANUAL-BROWSER', `[MANUAL-BROWSER] Akun ${cmd.email} tidak ditemukan dalam konfigurasi!`)
+                        return
+                    }
+                    if (this.isRunning && this.activeAccount?.email?.toLowerCase() === targetAcc.email.toLowerCase()) {
+                        this.logger.warn('main', 'MANUAL-BROWSER', `[MANUAL-BROWSER] Akun ${targetAcc.email} sedang aktif dijalankan bot. Tunggu hingga akun selesai.`)
+                        return
+                    }
+
+                    this.logger.info('main', 'MANUAL-BROWSER', `[MANUAL-BROWSER] Meluncurkan browser headful inspeksi untuk: ${targetAcc.email}...`, 'cyan')
+
+                    let scope: AccountScope | null = null
+                    try {
+                        scope = await AccountScope.create({
+                            account: targetAcc,
+                            bot: this,
+                            runId: `manual_${Date.now()}`
+                        })
+
+                        const loadResult = await AccountSessionStore.loadSession(scope, 'desktop', { legacyEmail: targetAcc.email })
+                        let storageState: any = undefined
+                        if (loadResult.status === 'loaded' && loadResult.state) {
+                            storageState = loadResult.state
+                            this.logger.info('main', 'MANUAL-BROWSER', `[MANUAL-BROWSER] Sesi berhasil dimuat (${loadResult.source}) untuk ${targetAcc.email}`)
+                        }
+
+                        const browser = await chromium.launch({
+                            headless: false,
+                            channel: this.config.channel || 'msedge',
+                            args: [
+                                '--no-sandbox',
+                                '--disable-setuid-sandbox',
+                                '--disable-blink-features=AutomationControlled'
+                            ]
+                        })
+
+                        const context = await browser.newContext({
+                            storageState,
+                            viewport: { width: 1280, height: 800 }
+                        })
+
+                        scope.setContext('desktop', context)
+
+                        const page = await context.newPage()
+                        this.activeManualInspector = { email: targetAcc.email, browser, context, page }
+
+                        browser.on('disconnected', async () => {
+                            try {
+                                if (scope) {
+                                    const saveRes = await AccountSessionStore.saveContextSession(context, scope, 'desktop')
+                                    if (saveRes.status === 'saved') {
+                                        this.logger.info('main', 'MANUAL-BROWSER', `[MANUAL-BROWSER] Sesi terbaru berhasil disimpan via AccountSessionStore (${saveRes.path})`, 'green')
+                                    }
+                                }
+                            } catch (syncErr) {
+                                this.logger.error('main', 'MANUAL-BROWSER', `[MANUAL-BROWSER] Gagal menyimpan sesi: ${syncErr}`)
+                            } finally {
+                                if (scope) {
+                                    await AccountDisposer.dispose(scope).catch(() => {})
+                                }
+                                this.activeManualInspector = null
+                            }
+                        })
+
+                        await page.goto('https://rewards.bing.com/earn', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {})
+                    } catch (err) {
+                        const errMsg = err instanceof Error ? err.message : String(err)
+                        this.logger.error('main', 'MANUAL-BROWSER', `[MANUAL-BROWSER] Gagal membuka browser manual: ${errMsg}`)
+                        if (scope) {
+                            await AccountDisposer.dispose(scope).catch(() => {})
+                        }
+                        this.activeManualInspector = null
+                    }
+                } else if (cmd.action === 'close-manual-browser') {
+                    if (this.activeManualInspector) {
+                        this.logger.info('main', 'MANUAL-BROWSER', `[MANUAL-BROWSER] Menutup browser inspeksi aktif (${this.activeManualInspector.email})...`)
+                        await this.activeManualInspector.browser.close().catch(() => {})
+                        this.activeManualInspector = null
+                    } else {
+                        this.logger.info('main', 'MANUAL-BROWSER', '[MANUAL-BROWSER] Tidak ada browser inspeksi yang sedang aktif.')
                     }
                 }
             })

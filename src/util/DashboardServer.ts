@@ -130,6 +130,20 @@ export function updateDashboardGlobal(update: Partial<Omit<DashboardState, 'acco
     }
 }
 
+export function checkLinuxDisplayAvailable(): { available: boolean; error?: string } {
+    if (process.platform === 'linux') {
+        const hasX11 = Boolean(process.env.DISPLAY && process.env.DISPLAY.trim() !== '')
+        const hasWayland = Boolean(process.env.WAYLAND_DISPLAY && process.env.WAYLAND_DISPLAY.trim() !== '')
+        if (!hasX11 && !hasWayland) {
+            return {
+                available: false,
+                error: 'DISPLAY_SERVER_UNAVAILABLE: Environment variable $DISPLAY atau $WAYLAND_DISPLAY tidak ditemukan di sistem Linux/Lubuntu ini. Pastikan sesi X11 desktop grafis aktif atau gunakan virtual display (xvfb).'
+            }
+        }
+    }
+    return { available: true }
+}
+
 export let onControlCommand: (cmd: { action: string; email?: string }) => Promise<void> = async () => {}
 
 export function registerControlCallback(callback: (cmd: { action: string; email?: string }) => Promise<void>) {
@@ -620,6 +634,10 @@ const htmlPage = `<!DOCTYPE html>
                     </select>
                     <button class="btn-secondary" onclick="runSingle()">Start Single</button>
                 </div>
+                <div class="single-acc-form" style="margin-top: 0.5rem; gap: 0.5rem;">
+                    <button class="btn-secondary" style="background-color: #059669; flex: 1;" onclick="openManualBrowser()">Inspect Browser (X11)</button>
+                    <button class="btn-danger" style="background-color: #dc2626; flex: 1;" onclick="closeManualBrowser()">Close Inspector</button>
+                </div>
             </div>
 
             <!-- Configuration Toggles -->
@@ -703,6 +721,43 @@ const htmlPage = `<!DOCTYPE html>
             const email = document.getElementById('single-email').value.trim();
             if (email) {
                 sendControl('start-single', email);
+            }
+        }
+
+        async function openManualBrowser() {
+            const email = document.getElementById('single-email').value.trim();
+            if (!email) {
+                alert('Pilih akun terlebih dahulu!');
+                return;
+            }
+            try {
+                const res = await fetch('/api/control', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'open-manual-browser', email })
+                });
+                const data = await res.json();
+                if (!data.success) {
+                    alert('Gagal membuka browser: ' + (data.error || data.reason || 'Unknown error'));
+                }
+            } catch (err) {
+                alert('Error koneksi C2: ' + err.message);
+            }
+        }
+
+        async function closeManualBrowser() {
+            try {
+                const res = await fetch('/api/control', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'close-manual-browser' })
+                });
+                const data = await res.json();
+                if (!data.success) {
+                    alert('Gagal menutup browser: ' + (data.error || data.reason || 'Unknown error'));
+                }
+            } catch (err) {
+                alert('Error koneksi C2: ' + err.message);
             }
         }
 
@@ -1340,6 +1395,31 @@ export class DashboardServer {
                                     isOperatorRecoveryInProgress = false
                                 }
                             })()
+                            return
+                        }
+
+                        if (body && body.action === 'open-manual-browser') {
+                            const dispCheck = checkLinuxDisplayAvailable()
+                            if (!dispCheck.available) {
+                                res.writeHead(400, { 'Content-Type': 'application/json' })
+                                res.end(JSON.stringify({ success: false, accepted: false, reason: dispCheck.error }))
+                                return
+                            }
+                            if (!body.email) {
+                                res.writeHead(400, { 'Content-Type': 'application/json' })
+                                res.end(JSON.stringify({ success: false, accepted: false, reason: 'missing-email' }))
+                                return
+                            }
+                            res.writeHead(200, { 'Content-Type': 'application/json' })
+                            res.end(JSON.stringify({ success: true, accepted: true }))
+                            void onControlCommand(body)
+                            return
+                        }
+
+                        if (body && body.action === 'close-manual-browser') {
+                            res.writeHead(200, { 'Content-Type': 'application/json' })
+                            res.end(JSON.stringify({ success: true, accepted: true }))
+                            void onControlCommand(body)
                             return
                         }
 
