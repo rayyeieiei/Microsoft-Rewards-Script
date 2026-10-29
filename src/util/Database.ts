@@ -1,5 +1,15 @@
+import fs from 'fs'
+import path from 'path'
 import { Pool } from 'pg'
 import { loadConfig } from './Load'
+
+export interface AccountErrorRecord {
+    email: string
+    errorType: string
+    errorMessage: string
+    stage: string
+    proxy?: string
+}
 
 export interface AccountSummaryRecord {
     email: string
@@ -124,12 +134,60 @@ export class Database {
             CREATE INDEX IF NOT EXISTS idx_system_logs_level_time ON system_logs(level, timestamp DESC);
         `
 
+        const ddlAccountErrors = `
+            CREATE TABLE IF NOT EXISTS account_errors (
+                id BIGSERIAL PRIMARY KEY,
+                email VARCHAR(255) NOT NULL,
+                error_type VARCHAR(100) NOT NULL,
+                error_message TEXT NOT NULL,
+                stage VARCHAR(100) NOT NULL,
+                proxy VARCHAR(255),
+                timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                resolved BOOLEAN DEFAULT FALSE
+            );
+            CREATE INDEX IF NOT EXISTS idx_account_errors_email_time ON account_errors(email, timestamp DESC);
+        `
+
         try {
             await this.pool.query(ddlAccountsSummary)
             await this.pool.query(ddlActivityHistory)
             await this.pool.query(ddlSystemLogs)
+            await this.pool.query(ddlAccountErrors)
         } catch (err) {
             console.error('[DATABASE-ERROR] Failed executing DDL migrations:', err)
+        }
+    }
+
+    public async recordAccountError(record: AccountErrorRecord): Promise<void> {
+        // 1. Tulis ke PostgreSQL jika aktif dan terhubung
+        if (this.isConnected && this.pool) {
+            try {
+                const query = `
+                    INSERT INTO account_errors (email, error_type, error_message, stage, proxy, timestamp)
+                    VALUES ($1, $2, $3, $4, $5, NOW());
+                `
+                await this.pool.query(query, [
+                    record.email,
+                    record.errorType,
+                    record.errorMessage,
+                    record.stage,
+                    record.proxy || 'direct'
+                ])
+                return
+            } catch (err) {
+                console.warn(`[DATABASE-WARN] Failed to write to account_errors: ${err}. Falling back to error_accounts.txt`)
+            }
+        }
+
+        // 2. Dual-handler fallback: Atomic append ke error_accounts.txt
+        try {
+            const filePath = path.join(process.cwd(), 'error_accounts.txt')
+            const timestamp = new Date().toISOString()
+            const sanitizedMsg = (record.errorMessage || '').replace(/\r?\n/g, ' ')
+            const line = `[${timestamp}] | ${record.email} | ${record.errorType} | ${record.stage} | ${sanitizedMsg} | proxy=${record.proxy || 'direct'}\n`
+            await fs.promises.appendFile(filePath, line, 'utf-8')
+        } catch (fsErr) {
+            console.error(`[DATABASE-ERROR] Failed writing to error_accounts.txt: ${fsErr}`)
         }
     }
 

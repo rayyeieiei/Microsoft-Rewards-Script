@@ -1959,6 +1959,13 @@ export class MicrosoftRewardsBot {
                 if (lowerErr.includes('locked') || lowerErr.includes('suspended') || lowerErr.includes('banned')) {
                     this.triggerCircuitBreaker(`Account security penalty detected on ${accountEmail}: ${errMsg}`)
                 }
+                void Database.getInstance().recordAccountError({
+                    email: accountEmail,
+                    errorType: 'WORKFLOW_ERROR',
+                    errorMessage: errMsg,
+                    stage: 'ACCOUNT_FLOW',
+                    proxy: account.proxy?.url
+                })
                 this.updateDashboardAccount(accountEmail, { status: 'Error', error: errMsg })
                 result = undefined
             }
@@ -2067,11 +2074,18 @@ export class MicrosoftRewardsBot {
                 )
 
                 // 4. Update status in dashboard & internal database
+                void Database.getInstance().recordAccountError({
+                    email: accountEmail,
+                    errorType: 'ACCOUNT_SUSPENDED',
+                    errorMessage: errMsg,
+                    stage: 'SUSPENSION_DETECTED',
+                    proxy: account.proxy?.url
+                })
                 this.updateDashboardAccount(accountEmail, {
                     status: 'SUSPENDED',
                     error: errMsg
                 })
-
+ 
                 return {
                     email: accountEmail,
                     initialPoints: 0,
@@ -2086,6 +2100,13 @@ export class MicrosoftRewardsBot {
 
             const errMsg = error instanceof Error ? error.message : String(error)
             this.logger.error('main', 'ACCOUNT-ERROR', `${accountEmail}: ${errMsg}`)
+            void Database.getInstance().recordAccountError({
+                email: accountEmail,
+                errorType: 'ACCOUNT_ERROR',
+                errorMessage: errMsg,
+                stage: 'ACCOUNT_PIPELINE',
+                proxy: account.proxy?.url
+            })
             this.updateDashboardAccount(accountEmail, {
                 status: 'Failed',
                 error: errMsg
