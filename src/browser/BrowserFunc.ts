@@ -14,9 +14,102 @@ import type { AppDashboardData } from '../interface/AppDashBoardData'
 
 export default class BrowserFunc {
     private bot: MicrosoftRewardsBot
+    private dapiConsecutive400 = new Map<string, number>()
+    private dapiUnavailableAccounts = new Set<string>()
 
     constructor(bot: MicrosoftRewardsBot) {
         this.bot = bot
+    }
+
+    public isDapiUnavailable(accountEmail?: string): boolean {
+        const email = (accountEmail || this.bot.activeAccount?.email || this.bot.userData?.userName || '').toLowerCase()
+        return email ? this.dapiUnavailableAccounts.has(email) : false
+    }
+
+    public markDapiUnavailable(accountEmail?: string): void {
+        const email = (accountEmail || this.bot.activeAccount?.email || this.bot.userData?.userName || '').toLowerCase()
+        if (email) {
+            this.dapiUnavailableAccounts.add(email)
+            this.bot.logger.warn(
+                this.bot.isMobile,
+                'DAPI-STATUS',
+                `⚠️ [DAPI-GUARD] DAPI /dapi/me mengembalikan HTTP 400 sebanyak 2x berturut-turut. Menandai DAPI sebagai UNAVAILABLE_FOR_SESSION untuk akun "${email}". Beralih ke in-page fallback rewards.bing.com/earn.`
+            )
+        }
+    }
+
+    public resetDapiState(accountEmail?: string): void {
+        const email = (accountEmail || this.bot.activeAccount?.email || this.bot.userData?.userName || '').toLowerCase()
+        if (email) {
+            this.dapiConsecutive400.delete(email)
+            this.dapiUnavailableAccounts.delete(email)
+        }
+    }
+
+    public createFallbackSnapshot(): DashboardData {
+        return {
+            userStatus: {
+                availablePoints: Number(this.bot.userData?.currentPoints ?? this.bot.userData?.initialPoints ?? 0),
+                counters: {
+                    pcSearch: [{ pointProgress: 0, pointProgressMax: 90 }],
+                    mobileSearch: [{ pointProgress: 0, pointProgressMax: 60 }]
+                }
+            },
+            dailySetPromotions: {
+                [new Date().toISOString().split('T')[0] as string]: []
+            },
+            morePromotions: [],
+            promotionalItems: [],
+            punchCards: []
+        } as unknown as DashboardData
+    }
+
+    /**
+     * Fallback snapshot saldo via in-page DOM evaluation pada rewards.bing.com/earn
+     */
+    async getEarnPageSnapshot(page?: Page): Promise<DashboardData | null> {
+        const activePage = page || this.bot.mainMobilePage || this.bot.mainDesktopPage
+        if (!activePage || activePage.isClosed()) return null
+
+        try {
+            if (!activePage.url().includes('rewards.bing.com/earn')) {
+                await activePage.goto('https://rewards.bing.com/earn', {
+                    waitUntil: 'domcontentloaded',
+                    timeout: 15000
+                }).catch(() => {})
+            }
+            await activePage.waitForSelector('#dailyset, [data-bi-area*="DailySet"], .c-card, [class*="card"]', {
+                timeout: 3000
+            }).catch(() => {})
+
+            const domPoints = await this.getCurrentPoints(activePage).catch(() => 0)
+            const inPageData = await activePage.evaluate(() => {
+                const winDash = (window as any).dashboard || null
+                return winDash
+            }).catch(() => null)
+
+            if (inPageData && inPageData.userStatus) {
+                if (domPoints > 0) {
+                    inPageData.userStatus.availablePoints = Math.max(inPageData.userStatus.availablePoints || 0, domPoints)
+                }
+                this.lockInitialPoints(inPageData.userStatus.availablePoints)
+                return inPageData as DashboardData
+            }
+
+            if (domPoints > 0) {
+                this.lockInitialPoints(domPoints)
+                const snapshot = this.createFallbackSnapshot()
+                snapshot.userStatus.availablePoints = domPoints
+                return snapshot
+            }
+        } catch (err) {
+            this.bot.logger.debug(
+                this.bot.isMobile,
+                'EARN-SNAPSHOT',
+                `[EARN-SNAPSHOT] Gagal membaca snapshot DOM dari /earn: ${err instanceof Error ? err.message : String(err)}`
+            )
+        }
+        return null
     }
 
     public lockInitialPoints(availablePoints?: number): void {
@@ -73,6 +166,7 @@ export default class BrowserFunc {
         } as unknown as DashboardData)
 
         const executeFetch = async (): Promise<DashboardData> => {
+            let hasReloadedFor400 = false
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
                 if (isExpired()) break
 
@@ -84,7 +178,7 @@ export default class BrowserFunc {
                         new Promise<Cookie[]>(resolve => setTimeout(() => resolve([]), 3000))
                     ])
                 }
-                const activeCookies =
+                let activeCookies =
                     liveCookies.length > 0
                         ? liveCookies
                         : (this.bot.isMobile ? this.bot.cookies.mobile : this.bot.cookies.desktop) || []
@@ -179,6 +273,7 @@ export default class BrowserFunc {
                     try {
                         const ctx = this.bot.accountScope?.getContext(this.bot.isMobile ? 'mobile' : 'desktop')
                         let data: any = null
+                        let isHttp400 = false
 
                         if (ctx?.request) {
                             try {
@@ -192,11 +287,13 @@ export default class BrowserFunc {
                                 })
                                 if (bRes.ok()) {
                                     data = await bRes.json().catch(() => null)
+                                } else if (bRes.status() === 400) {
+                                    isHttp400 = true
                                 }
                             } catch {}
                         }
 
-                        if (!data) {
+                        if (!data && !isHttp400) {
                             const request: AxiosRequestConfig = {
                                 url: endpoint,
                                 method: 'GET',
@@ -218,8 +315,38 @@ export default class BrowserFunc {
                                 }
                             }
 
-                            const response = await this.bot.axios.request(request)
+                            const response = await this.bot.axios.request(request).catch(err => {
+                                if (err?.response?.status === 400) {
+                                    isHttp400 = true
+                                }
+                                throw err
+                            })
                             data = response.data
+                        }
+
+                        if (isHttp400) {
+                            if (!hasReloadedFor400 && activePage && !activePage.isClosed()) {
+                                hasReloadedFor400 = true
+                                this.bot.logger.warn(
+                                    this.bot.isMobile,
+                                    'GET-DASHBOARD-DATA',
+                                    '⚠️ [HTTP-400-GUARD] Menerima HTTP 400 pada getuserinfo. Menyegarkan halaman aktif 1x untuk hidrasi ulang cookie context...'
+                                )
+                                await activePage.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
+                                await activePage.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
+                                await this.bot.utils.wait(2000)
+                                if (activePage.context()) {
+                                    activeCookies = await activePage.context().cookies().catch(() => activeCookies)
+                                }
+                            } else {
+                                // Hindari spam retry jika sudah di-reload namun tetap HTTP 400
+                                this.bot.logger.debug(
+                                    this.bot.isMobile,
+                                    'GET-DASHBOARD-DATA',
+                                    '⚠️ [HTTP-400-GUARD] HTTP 400 berulang pada endpoint getuserinfo. Menghentikan retry berlebih.'
+                                )
+                                break
+                            }
                         }
 
                         if (data?.dashboard && data.dashboard.userStatus) {
@@ -276,7 +403,7 @@ export default class BrowserFunc {
                 if (isExpired()) break
 
                 // 4. Fallback Terakhir: Adaptasi dari Mobile App API (dengan pemetaan promosi lengkap)
-                if (this.bot.accessToken) {
+                if (this.bot.accessToken && !this.isDapiUnavailable()) {
                     try {
                         this.bot.logger.debug(
                             this.bot.isMobile,
@@ -302,13 +429,18 @@ export default class BrowserFunc {
                 }
             }
 
-            // Fallback aman: jika semua endpoint web gagal, kembalikan DAPI atau snapshot dasar tanpa throw fatal
-            if (this.bot.accessToken) {
+            // Fallback aman: jika semua endpoint web gagal, kembalikan DAPI atau in-page /earn snapshot tanpa throw fatal
+            if (this.bot.accessToken && !this.isDapiUnavailable()) {
                 try {
                     const appData = await this.getAppDashboardData().catch(() => null)
                     const mapped = this.mapAppDashboardToBrowserDashboard(appData)
                     if (mapped) return mapped
                 } catch {}
+            }
+
+            if (this.isDapiUnavailable()) {
+                const earnSnap = await this.getEarnPageSnapshot().catch(() => null)
+                if (earnSnap) return earnSnap
             }
 
             this.bot.logger.warn(
@@ -330,11 +462,17 @@ export default class BrowserFunc {
                             'GET-DASHBOARD-DATA',
                             `[GET-DASHBOARD-DATA] Hard-cap timeout (${hardCapMs}ms) reached; recovering with DAPI / fallback dashboard snapshot.`
                         )
-                        if (this.bot.accessToken) {
+                        if (this.bot.accessToken && !this.isDapiUnavailable()) {
                             try {
                                 const appData = await this.getAppDashboardData().catch(() => null)
                                 const mapped = this.mapAppDashboardToBrowserDashboard(appData)
                                 if (mapped) return resolve(mapped)
+                            } catch {}
+                        }
+                        if (this.isDapiUnavailable()) {
+                            try {
+                                const earnSnap = await this.getEarnPageSnapshot().catch(() => null)
+                                if (earnSnap) return resolve(earnSnap)
                             } catch {}
                         }
                         resolve(createFallbackSnapshot())
@@ -439,6 +577,11 @@ export default class BrowserFunc {
      */
     async getAppDashboardData(): Promise<AppDashboardData> {
         try {
+            const email = (this.bot.activeAccount?.email || this.bot.userData?.userName || '').toLowerCase()
+            if (this.isDapiUnavailable(email)) {
+                throw new Error(`DAPI is marked UNAVAILABLE_FOR_SESSION for account "${email}"`)
+            }
+
             const deviceUa =
                 this.bot.accountScope?.deviceProfile?.userAgent ||
                 UserAgentManager.DEFAULT_MOBILE_UA
@@ -474,6 +617,20 @@ export default class BrowserFunc {
                     }
                     response = await this.bot.axios.request(request)
                 }
+            } else if (response.status === 400) {
+                const current400 = (this.dapiConsecutive400.get(email) || 0) + 1
+                this.dapiConsecutive400.set(email, current400)
+                if (current400 >= 2) {
+                    this.markDapiUnavailable(email)
+                } else {
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'DAPI-400',
+                        `⚠️ [DAPI-400] DAPI me mengembalikan HTTP 400 (attempt ${current400}/2). Menghindari refresh halaman berulang.`
+                    )
+                }
+            } else if (response.status === 200) {
+                this.dapiConsecutive400.set(email, 0)
             }
 
             if (response.status !== 200) {
@@ -784,6 +941,18 @@ export default class BrowserFunc {
      */
     async getAppEarnablePoints(): Promise<AppEarnablePoints> {
         try {
+            const email = (this.bot.activeAccount?.email || this.bot.userData?.userName || '').toLowerCase()
+            if (this.isDapiUnavailable(email)) {
+                return {
+                    readToEarn: 30,
+                    checkIn: 0,
+                    totalEarnablePoints: 30,
+                    readToEarnProgress: 0,
+                    readToEarnMax: 30,
+                    readToEarnCompleted: false
+                }
+            }
+
             const eligibleOffers = ['ENUS_readarticle3_30points', 'Gamification_Sapphire_DailyCheckIn']
             const accountGeo = (this.bot.activeAccount?.geoLocale || '').trim()
             const userGeo = (this.bot.userData?.geoLocale || '').trim()
@@ -1059,9 +1228,11 @@ export default class BrowserFunc {
                     )
                 } else {
                     // Fallback for legacy standalone invocation without scope
-                    const cookies = await browser.cookies()
-                    this.bot.logger.debug(this.bot.isMobile, 'CLOSE-BROWSER', `Saving ${cookies.length} cookies.`)
-                    await saveSessionData(this.bot.config.sessionPath, cookies, email, this.bot.isMobile)
+                    const cookies = await browser.cookies().catch(() => [])
+                    if (cookies.length > 0) {
+                        this.bot.logger.debug(this.bot.isMobile, 'CLOSE-BROWSER', `Saving ${cookies.length} cookies.`)
+                        await saveSessionData(this.bot.config.sessionPath, cookies, email, this.bot.isMobile)
+                    }
                 }
             }
         } catch (error) {

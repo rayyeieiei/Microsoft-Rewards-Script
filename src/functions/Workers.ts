@@ -504,7 +504,10 @@ export class Workers {
 
             // 3. Ambil SATU server snapshot setelah batch
             await this.bot.utils.wait(2000)
-            const refreshedData: DashboardData | null = await this.bot.browser.func.getDashboardData().catch(() => null)
+            let refreshedData: DashboardData | null = await this.bot.browser.func.getDashboardData().catch(() => null)
+            if (!refreshedData && this.bot.browser.func.isDapiUnavailable()) {
+                refreshedData = await this.bot.browser.func.getEarnPageSnapshot(page).catch(() => null)
+            }
             let updatedBalance =
                 refreshedData?.userStatus?.availablePoints ??
                 (await this.bot.browser.func.getCurrentPoints().catch(() => startBalance))
@@ -581,6 +584,7 @@ export class Workers {
             const isAborted = () => Boolean(
                 this.bot.abortController?.signal?.aborted ||
                 this.bot.accountScope?.abortController?.signal?.aborted ||
+                this.bot.isHandoffPaused?.() ||
                 page.isClosed()
             )
 
@@ -602,7 +606,10 @@ export class Workers {
 
                     // Re-fetch snapshot kedua
                     await this.bot.utils.wait(2000)
-                    const retryRefreshedData: DashboardData | null = await this.bot.browser.func.getDashboardData().catch(() => null)
+                    let retryRefreshedData: DashboardData | null = await this.bot.browser.func.getDashboardData().catch(() => null)
+                    if (!retryRefreshedData && this.bot.browser.func.isDapiUnavailable()) {
+                        retryRefreshedData = await this.bot.browser.func.getEarnPageSnapshot(page).catch(() => null)
+                    }
                     const retryUpdatedBalance =
                         retryRefreshedData?.userStatus?.availablePoints ??
                         (await this.bot.browser.func.getCurrentPoints().catch(() => updatedBalance))
@@ -1028,7 +1035,10 @@ export class Workers {
 
         // 3. Ambil SATU server snapshot setelah batch
         await this.bot.utils.wait(2000)
-        const refreshedData: DashboardData | null = await this.bot.browser.func.getDashboardData().catch(() => null)
+        let refreshedData: DashboardData | null = await this.bot.browser.func.getDashboardData().catch(() => null)
+        if (!refreshedData && this.bot.browser.func.isDapiUnavailable()) {
+            refreshedData = await this.bot.browser.func.getEarnPageSnapshot(page).catch(() => null)
+        }
         const updatedBonusBalance =
             refreshedData?.userStatus?.availablePoints ??
             (await this.bot.browser.func.getCurrentPoints().catch(() => startBonusBalance))
@@ -1378,7 +1388,8 @@ export class Workers {
                     while (stepsProcessed < maxChildrenPerRun) {
                         if (
                             this.bot.abortController?.signal?.aborted ||
-                            this.bot.accountScope?.abortController?.signal?.aborted
+                            this.bot.accountScope?.abortController?.signal?.aborted ||
+                            this.bot.isHandoffPaused?.()
                         ) {
                             this.bot.logger.warn(
                                 this.bot.isMobile,
