@@ -72,6 +72,33 @@ class Browser {
         }
     }
 
+    /**
+     * Persists browser session storageState safely without throwing unhandled rejections.
+     */
+    public async saveSession(
+        contextOrBrowser?: any,
+        isMobile?: boolean,
+        timeoutMs = 5000
+    ): Promise<boolean> {
+        try {
+            const scope = this.bot.accountScope
+            if (!scope) return false
+
+            const targetDevice = (typeof isMobile === 'boolean' ? isMobile : this.bot.isMobile) ? 'mobile' : 'desktop'
+            const ctx = contextOrBrowser || (targetDevice === 'mobile' ? scope.getContext('mobile') : scope.getContext('desktop'))
+            if (!ctx) return false
+
+            return await AccountSessionStore.saveSession(ctx, scope, targetDevice, timeoutMs)
+        } catch (err) {
+            this.bot.logger.warn(
+                Boolean(isMobile),
+                'BROWSER-SESSION',
+                `Non-fatal error persisting session: ${err instanceof Error ? err.message : String(err)}`
+            )
+            return false
+        }
+    }
+
     async createBrowser(account: Account): Promise<BrowserCreationResult> {
         let browser: any
 

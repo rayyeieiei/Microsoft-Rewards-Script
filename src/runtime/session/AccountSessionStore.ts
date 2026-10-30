@@ -285,6 +285,13 @@ export class AccountSessionStore {
         let attempt = 0
         const ownerToken = crypto.randomUUID()
 
+        const lockDir = path.dirname(lockfilePath)
+        if (!fs.existsSync(lockDir)) {
+            try {
+                fs.mkdirSync(lockDir, { recursive: true })
+            } catch {}
+        }
+
         while (true) {
             try {
                 const handle = await fs.promises.open(lockfilePath, 'wx')
@@ -415,8 +422,15 @@ export class AccountSessionStore {
         let lockfilePath: string | null = null
         let acquiredOwnerToken: string | null = null
         try {
+            const targetDir = path.dirname(targetPath)
+            if (!fs.existsSync(targetDir)) {
+                try {
+                    fs.mkdirSync(targetDir, { recursive: true })
+                } catch {}
+            }
+
             lockfilePath = SessionPathResolver.getLockfilePath(
-                path.dirname(targetPath),
+                targetDir,
                 accountId,
                 device
             )
@@ -462,6 +476,20 @@ export class AccountSessionStore {
      * as an opportunistic heuristic against writing an obviously older snapshot, and MUST NEVER
      * be claimed or relied upon to replace target writer exclusivity.
      */
+    public static async saveSession(
+        context: any,
+        scope: AccountScope,
+        device: SessionDevice,
+        timeoutMs: number = 3000
+    ): Promise<boolean> {
+        try {
+            const res = await this.saveContextSession(context, scope, device, timeoutMs)
+            return res.status === 'saved'
+        } catch {
+            return false
+        }
+    }
+
     public static async saveContextSession(
         context: any,
         scope: AccountScope,
@@ -476,6 +504,12 @@ export class AccountSessionStore {
         }
 
         const sessionDir = scope.storagePaths.sessionDir
+        if (!fs.existsSync(sessionDir)) {
+            try {
+                fs.mkdirSync(sessionDir, { recursive: true, mode: 0o777 })
+            } catch {}
+        }
+
         const targetPath = SessionPathResolver.getModernPath(sessionDir, scope.identity.accountId, device)
 
         // Lock acquired BEFORE extracting snapshot to prevent snapshot inversion race
@@ -485,7 +519,7 @@ export class AccountSessionStore {
             device,
             async (): Promise<SessionSaveResult> => {
                 const start = Date.now()
-                let rawState: PlaywrightStorageState
+                let rawState: PlaywrightStorageState | null = null
                 try {
                     rawState = await Promise.race([
                         context.storageState(),
@@ -494,19 +528,55 @@ export class AccountSessionStore {
                         )
                     ])
                 } catch (err: any) {
-                    const isTimeout = err?.message?.includes('timed out')
-                    if (isTimeout) {
+                    // Fallback to extracting cookies via context.cookies() if storageState evaluation fails or times out
+                    try {
+                        if (typeof context.cookies === 'function') {
+                            const cookies = await Promise.race([
+                                context.cookies(),
+                                new Promise<any[]>((_, reject) =>
+                                    setTimeout(() => reject(new Error('cookies extraction timed out')), timeoutMs)
+                                )
+                            ])
+                            if (Array.isArray(cookies) && cookies.length > 0) {
+                                rawState = {
+                                    cookies,
+                                    origins: []
+                                }
+                            }
+                        }
+                    } catch {}
+
+                    if (!rawState) {
+                        const isTimeout = err?.message?.includes('timed out')
+                        if (isTimeout) {
+                            return {
+                                status: 'timed-out',
+                                durationMs: Date.now() - start,
+                                path: targetPath
+                            }
+                        }
+                        const errMsg = String(err?.message || err)
                         return {
-                            status: 'timed-out',
-                            durationMs: Date.now() - start,
+                            status: 'failed',
+                            error: `Failed to extract storageState from context: ${errMsg}`,
                             path: targetPath
                         }
                     }
-                    return {
-                        status: 'failed',
-                        error: `Failed to extract storageState from context: ${err?.message || err}`,
-                        path: targetPath
-                    }
+                }
+
+                if (!isValidStorageState(rawState)) {
+                    // Coba perbaiki dari context.cookies jika format rawState tidak valid
+                    try {
+                        if (typeof context.cookies === 'function') {
+                            const cookies = await context.cookies().catch(() => [])
+                            if (Array.isArray(cookies) && cookies.length > 0) {
+                                rawState = {
+                                    cookies,
+                                    origins: []
+                                }
+                            }
+                        }
+                    } catch {}
                 }
 
                 if (!isValidStorageState(rawState)) {
@@ -638,14 +708,14 @@ export class AccountSessionStore {
         try {
             const targetDir = path.dirname(targetPath)
             if (!fs.existsSync(targetDir)) {
-                await fs.promises.mkdir(targetDir, { recursive: true })
+                await fs.promises.mkdir(targetDir, { recursive: true, mode: 0o777 })
             }
 
             // Create unique temp file with exclusive creation ('wx')
             const tempPath = `${targetPath}.tmp.${Date.now()}.${crypto.randomBytes(6).toString('hex')}`
             let handle: fs.promises.FileHandle | null = null
             try {
-                handle = await fs.promises.open(tempPath, 'wx')
+                handle = await fs.promises.open(tempPath, 'wx', 0o666)
                 await handle.writeFile(serialized, 'utf-8')
                 await handle.sync()
             } finally {
@@ -668,6 +738,16 @@ export class AccountSessionStore {
                 } catch (err: any) {
                     lastError = err
                     const isSharingViolation = err?.code === 'EBUSY' || err?.code === 'EPERM'
+                    if (err?.code === 'EXDEV') {
+                        try {
+                            await fs.promises.copyFile(tempPath, targetPath)
+                            await fs.promises.unlink(tempPath).catch(() => {})
+                            renamed = true
+                            break
+                        } catch (copyErr) {
+                            lastError = copyErr
+                        }
+                    }
                     const delay = delays[attempt]
                     if (
                         isSharingViolation &&

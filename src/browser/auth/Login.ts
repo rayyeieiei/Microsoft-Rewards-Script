@@ -2,6 +2,8 @@ import type { Page } from 'patchright'
 import type { MicrosoftRewardsBot } from '../../index'
 import { saveSessionData, setRateLimitCooldown, getRateLimitCooldown } from '../../util/Load'
 import { AccountSessionStore } from '../../runtime/session/AccountSessionStore'
+import { SessionPathResolver } from '../../runtime/session/SessionPathResolver'
+import fs from 'fs'
 
 import { MobileAccessLogin } from './methods/MobileAccessLogin'
 import { EmailLogin } from './methods/EmailLogin'
@@ -126,8 +128,7 @@ export class Login {
                     const currentUrl = page.url();
                     if (currentUrl.includes('consumers/fido/create') || currentUrl.includes('fido/create')) {
                         this.bot.logger.warn(this.bot.isMobile, 'LOGIN-BYPASS', '🛡️ Terdeteksi paksaan Register Passkey (FIDO)! Memaksa redirect ke halaman utama rewards...');
-                        await page.goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded' }).catch(() => {});
-                        await this.bot.utils.wait(2000);
+                        await this.ensurePostPasskeyHydration(page);
                     }
 
                     const usePasswordBtn = page.locator('#idA_PWD').first()
@@ -306,7 +307,7 @@ export class Login {
                 if (await skipBtn.count() > 0 && await skipBtn.isVisible()) {
                     await skipBtn.click().catch(() => {})
                     this.bot.logger.info(this.bot.isMobile, 'PASSKEY-BYPASS', `🛡️ [PASSKEY-BYPASS] Mendeteksi interupsi pendaftaran Passkey/FIDO. Berhasil mengeklik 'Not now'/'Cancel'.`)
-                    await this.bot.utils.wait(2000)
+                    await this.ensurePostPasskeyHydration(page)
                     return true
                 }
 
@@ -317,14 +318,13 @@ export class Login {
                     if (ru) {
                         this.bot.logger.info(this.bot.isMobile, 'LOGIN-PASSKEY', `Auto-redirecting past passkey interrupt to return URL: ${ru}`)
                         await page.goto(ru, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
-                        await this.bot.utils.wait(2000)
+                        await this.ensurePostPasskeyHydration(page)
                         return true
                     }
                 } catch {}
 
                 this.bot.logger.info(this.bot.isMobile, 'LOGIN-PASSKEY', 'Attempting direct navigation to Rewards home...')
-                await page.goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {})
-                await this.bot.utils.wait(2000)
+                await this.ensurePostPasskeyHydration(page)
                 return true
             }
 
@@ -422,29 +422,115 @@ export class Login {
         }
     }
 
+    public async ensurePostPasskeyHydration(page: Page): Promise<void> {
+        try {
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'COOKIE-HYDRATION',
+                '⏳ Menunggu navigasi stabil & hidrasi cookie sesi rewards setelah Passkey bypass...'
+            )
+            await page.goto('https://rewards.bing.com/earn', {
+                waitUntil: 'domcontentloaded',
+                timeout: 15000
+            }).catch(() => {})
+
+            await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
+            await this.bot.utils.wait(2000)
+
+            const cookies = await page.context().cookies().catch(() => [])
+            const hasRewardsCookie = cookies.some(c =>
+                c.domain.includes('bing.com') || c.domain.includes('live.com')
+            )
+            if (hasRewardsCookie) {
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'COOKIE-HYDRATION',
+                    `✅ Cookie sesi rewards berhasil terhidrasi (${cookies.length} cookies).`
+                )
+            }
+        } catch (e) {
+            this.bot.logger.warn(
+                this.bot.isMobile,
+                'COOKIE-HYDRATION',
+                `Non-fatal warning saat hidrasi cookie: ${e instanceof Error ? e.message : String(e)}`
+            )
+        }
+    }
+
+    /**
+     * Persists login session storageState safely without throwing unhandled rejections.
+     */
+    public async saveSession(pageOrContext?: Page | any): Promise<boolean> {
+        try {
+            const context = pageOrContext && typeof pageOrContext.context === 'function'
+                ? pageOrContext.context()
+                : pageOrContext
+            if (!this.bot.accountScope || !context) return false
+            const device = this.bot.isMobile ? 'mobile' : 'desktop'
+            return await AccountSessionStore.saveSession(context, this.bot.accountScope, device, 5000)
+        } catch (error) {
+            this.bot.logger.warn(
+                this.bot.isMobile,
+                'LOGIN-SESSION',
+                `Non-fatal error in Login.saveSession: ${error instanceof Error ? error.message : String(error)}`
+            )
+            return false
+        }
+    }
+
     private async finalizeLogin(page: Page, email: string) {
         await page.goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {})
         await this.verifyBingSession(page)
         await this.getRewardsSession(page)
+        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
         try {
             if (this.bot.accountScope) {
+                const sessionDir = this.bot.accountScope.storagePaths.sessionDir
+                if (sessionDir && !fs.existsSync(sessionDir)) {
+                    try {
+                        fs.mkdirSync(sessionDir, { recursive: true, mode: 0o777 })
+                    } catch {}
+                }
                 const saveResult = await AccountSessionStore.saveContextSession(
                     page.context(),
                     this.bot.accountScope,
-                    this.bot.isMobile ? 'mobile' : 'desktop'
+                    this.bot.isMobile ? 'mobile' : 'desktop',
+                    5000
                 )
-                this.bot.logger.info(
-                    this.bot.isMobile,
-                    'LOGIN',
-                    `Login completed, unified session persistence (${saveResult.status})`
-                )
+                if (saveResult.status === 'saved') {
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'LOGIN',
+                        `Login completed, unified session persistence (saved)`
+                    )
+                } else if (saveResult.status === 'failed') {
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'LOGIN',
+                        `Login completed, unified session persistence (failed: ${(saveResult as any).error})`
+                    )
+                } else {
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'LOGIN',
+                        `Login completed, unified session persistence (${saveResult.status})`
+                    )
+                }
             } else {
-                const cookies = await page.context().cookies()
-                await saveSessionData(this.bot.config.sessionPath, cookies, email, this.bot.isMobile)
+                const sessionDir = SessionPathResolver.resolveBaseDir(this.bot.config.sessionPath)
+                if (!fs.existsSync(sessionDir)) {
+                    try {
+                        fs.mkdirSync(sessionDir, { recursive: true, mode: 0o777 })
+                    } catch {}
+                }
+                const cookies = await page.context().cookies().catch(() => [])
+                if (cookies.length > 0) {
+                    await saveSessionData(this.bot.config.sessionPath, cookies, email, this.bot.isMobile)
+                }
                 this.bot.logger.info(this.bot.isMobile, 'LOGIN', 'Login completed, session saved')
             }
         } catch (error) {
-            this.bot.logger.error(this.bot.isMobile, 'LOGIN', `Failed to save session: ${error}`)
+            this.bot.logger.error(this.bot.isMobile, 'LOGIN', `Failed to save session: ${error instanceof Error ? error.message : String(error)}`)
         }
     }
 
