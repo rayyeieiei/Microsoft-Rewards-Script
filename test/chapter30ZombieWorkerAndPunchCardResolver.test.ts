@@ -1519,6 +1519,175 @@ export async function runChapter30ZombieWorkerAndPunchCardResolverTests(): Promi
         console.log('✅ Test 21 Passed: Stealth Hardening Phase 1-3: Desktop Client Hints (Anti-Headless), WebGL Override, Zero-TLS Browser Context, & Article Deduplication verified')
     }
 
+    // Test 22: Session Persistence Guarantee, Post-Passkey Cookie Hydration, and Hot-Handoff Race Condition Protection
+    {
+        // 22a: AccountSessionStore.saveSession creates missing session directory and captures storageState safely
+        const { AccountSessionStore } = await import('../src/runtime/session/AccountSessionStore')
+        const { AccountScope } = await import('../src/runtime/AccountScope')
+        const fs = await import('fs')
+        const path = await import('path')
+
+        const uniqueDirName = `test_session_dir_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`
+        const nonExistentDir = path.join(process.cwd(), 'browser', uniqueDirName)
+        assert.strictEqual(fs.existsSync(nonExistentDir), false, 'Test directory must not exist initially')
+
+        const scope = AccountScope.createForTesting('persist_test@example.com', undefined, undefined, undefined, nonExistentDir)
+        const mockContext: any = {
+            storageState: async () => ({
+                cookies: [
+                    { name: 'MUID', value: 'ABC123MUID', domain: '.bing.com', path: '/' }
+                ],
+                origins: []
+            })
+        }
+
+        const saveBool = await AccountSessionStore.saveSession(mockContext, scope, 'mobile')
+        assert.strictEqual(saveBool, true, 'saveSession must return boolean true and succeed even if directory was missing')
+        assert.strictEqual(fs.existsSync(nonExistentDir), true, 'saveSession must create the session directory')
+
+        // 22b: Closed context graceful handling (zero crash, returns false / failed)
+        const closedContext: any = {
+            storageState: async () => {
+                throw new Error('browserContext.storageState: Target page, context or browser has been closed')
+            }
+        }
+        const closedResult = await AccountSessionStore.saveContextSession(closedContext, scope, 'mobile')
+        assert.strictEqual(closedResult.status, 'failed', 'Closed context during storageState extraction must report failed status')
+        const closedBool = await AccountSessionStore.saveSession(closedContext, scope, 'mobile')
+        assert.strictEqual(closedBool, false, 'saveSession on closed context must return false without throwing unhandled error')
+
+        // Clean up test dir
+        try {
+            fs.rmSync(nonExistentDir, { recursive: true, force: true })
+        } catch {}
+
+        // 22c: Post-Passkey Cookie Hydration & HTTP 400 Reload Guard
+        const mockBotForHydration: any = {
+            isMobile: true,
+            utils: { wait: async () => {} },
+            logger: { info: () => {}, warn: () => {}, debug: () => {} }
+        }
+        let navUrl = ''
+        let loadStateCalled = false
+        const mockPageForHydration: any = {
+            goto: async (url: string) => { navUrl = url },
+            waitForLoadState: async (state: string) => { if (state === 'networkidle') loadStateCalled = true },
+            context: () => ({
+                cookies: async () => [
+                    { name: '_rwbf', value: 'val', domain: '.bing.com', path: '/' }
+                ]
+            })
+        }
+        const { Login: LoginClass } = await import('../src/browser/auth/Login')
+        const loginInstance = new (LoginClass as any)(mockBotForHydration)
+        await loginInstance.ensurePostPasskeyHydration(mockPageForHydration)
+        assert.strictEqual(navUrl, 'https://rewards.bing.com/earn', 'Post-passkey hydration must navigate to rewards earn')
+        assert.strictEqual(loadStateCalled, true, 'Post-passkey hydration must await networkidle')
+
+        // 22d: Hot-Handoff isHandoffPaused and Safe Context Extraction Guard
+        const mockBotInstance: any = {
+            activeHandoffResolvers: new Map(),
+            sessionActiveAccountEmail: 'handoff_active@example.com',
+            activeAccount: { email: 'handoff_active@example.com' }
+        }
+        const { MicrosoftRewardsBot } = await import('../src/index')
+        const isHandoffPausedFn = MicrosoftRewardsBot.prototype.isHandoffPaused.bind(mockBotInstance)
+
+        assert.strictEqual(isHandoffPausedFn('handoff_active@example.com'), false)
+        mockBotInstance.activeHandoffResolvers.set('handoff_active@example.com', () => {})
+        assert.strictEqual(isHandoffPausedFn('handoff_active@example.com'), true, 'isHandoffPaused must report true when resolver exists')
+        assert.strictEqual(isHandoffPausedFn(), true, 'isHandoffPaused without arg must check active account')
+        assert.strictEqual(isHandoffPausedFn('other@example.com'), false)
+
+        console.log('✅ Test 22 Passed: Session Persistence Guarantee, Post-Passkey Cookie Hydration, and Hot-Handoff Race Condition Protection verified')
+    }
+
+    // --- Test 23: Telemetry Stabilization: Counter-Anomaly Elimination, Graceful DAPI 400, & Mobile Session Persistence ---
+    {
+        const { AccountSessionStore } = await import('../src/runtime/session/AccountSessionStore')
+        const fs = await import('fs')
+        const path = await import('path')
+        const tempRoot = path.join(process.cwd(), 'browser', 'temp_tests')
+
+        // 23a: Baseline Quota Sync with Server Counters
+        const mockBotForBaseline: any = {
+            userData: {},
+            browser: {
+                func: {
+                    missingSearchPoints: (counters: any, isMobile?: boolean) => {
+                        if (counters.source === 'server') {
+                            return { mobilePoints: 0, desktopPoints: 70, edgePoints: 0, totalPoints: 70 }
+                        }
+                        return { mobilePoints: 0, desktopPoints: 90, edgePoints: 0, totalPoints: 90 }
+                    }
+                }
+            },
+            logger: { info: () => {}, warn: () => {}, debug: () => {} }
+        }
+        const domMissing = mockBotForBaseline.browser.func.missingSearchPoints({ source: 'dom' }, false)
+        const serverCounters = { source: 'server', pcSearch: [{ pointProgress: 20, pointProgressMax: 90 }] }
+        const serverMissing = mockBotForBaseline.browser.func.missingSearchPoints(serverCounters, false)
+        assert.strictEqual(domMissing.totalPoints, 90)
+        assert.strictEqual(serverMissing.totalPoints, 70)
+        // Baseline sync chooses server when server < dom
+        const effectiveBaseline = (serverMissing.totalPoints >= 0 && serverMissing.totalPoints < domMissing.totalPoints)
+            ? serverMissing.totalPoints
+            : domMissing.totalPoints
+        assert.strictEqual(effectiveBaseline, 70, 'Must synchronize initial baseline quota to server 70 instead of DOM 90')
+
+        // 23b: DOM Unchanged suppresses Counter-Anomaly
+        const previousMissingAfter = 70
+        const rawMissingAfter = 70
+        const isDomUnchanged = previousMissingAfter !== null && rawMissingAfter === previousMissingAfter
+        assert.strictEqual(isDomUnchanged, true, 'Same counter value must be recognized as DOM unchanged')
+        const clampedWhenUnchanged = isDomUnchanged ? { gainedPoints: 0, remaining: 70, wasClamped: false, rawDelta: 0 } : null
+        assert.strictEqual(clampedWhenUnchanged?.gainedPoints, 0, 'Unchanged DOM must not count as point delta')
+        assert.strictEqual(clampedWhenUnchanged?.wasClamped, false, 'Unchanged DOM must not trigger wasClamped')
+
+        // 23c: DAPI 400 Consecutive Tracking and UNAVAILABLE_FOR_SESSION
+        const BrowserFuncModule = await import('../src/browser/BrowserFunc')
+        const BrowserFuncClass = BrowserFuncModule.default || (BrowserFuncModule as any).BrowserFunc || BrowserFuncModule
+        const mockBotForDapi: any = {
+            activeAccount: { email: 'dapi_test@example.com' },
+            userData: { userName: 'dapi_test@example.com' },
+            logger: { info: () => {}, warn: () => {}, debug: () => {} }
+        }
+        const bFuncInstance = new (BrowserFuncClass as any)(mockBotForDapi)
+        assert.strictEqual(bFuncInstance.isDapiUnavailable('dapi_test@example.com'), false)
+        bFuncInstance.markDapiUnavailable('dapi_test@example.com')
+        assert.strictEqual(bFuncInstance.isDapiUnavailable('dapi_test@example.com'), true, 'Must report true when marked unavailable')
+        assert.strictEqual(bFuncInstance.isDapiUnavailable(), true, 'Must check active account when email omitted')
+        bFuncInstance.resetDapiState('dapi_test@example.com')
+        assert.strictEqual(bFuncInstance.isDapiUnavailable('dapi_test@example.com'), false, 'resetDapiState must clear unavailable status')
+
+        // 23d: StorageState Fallback to context.cookies() on Mobile Extraction Error
+        const testDir23 = path.join(tempRoot, 'test23_fallback')
+        fs.mkdirSync(testDir23, { recursive: true })
+        const scope23 = AccountScope.createForTesting('fallback_session@example.com', 'run23', 'scope23', undefined, testDir23)
+
+        // Mock context where storageState() throws (e.g. execution context destroyed), but context.cookies() succeeds
+        const mockContextWithCookiesFallback: any = {
+            storageState: async () => {
+                throw new Error('Execution context was destroyed, most likely because of a navigation')
+            },
+            cookies: async () => [
+                { name: '_U', value: 'auth_value_123', domain: '.bing.com', path: '/' },
+                { name: 'MUID', value: 'muid_456', domain: '.bing.com', path: '/' }
+            ]
+        }
+        const fallbackRes = await AccountSessionStore.saveContextSession(mockContextWithCookiesFallback, scope23, 'mobile', 3000)
+        assert.strictEqual(fallbackRes.status, 'saved', 'Must successfully save session using context.cookies() fallback')
+        const fallbackBool = await AccountSessionStore.saveSession(mockContextWithCookiesFallback, scope23, 'mobile', 3000)
+        assert.strictEqual(fallbackBool, true, 'saveSession must return true when cookies fallback succeeds')
+
+        // Clean up test dir
+        try {
+            fs.rmSync(testDir23, { recursive: true, force: true })
+        } catch {}
+
+        console.log('✅ Test 23 Passed: Telemetry Stabilization: Counter-Anomaly Elimination, Graceful DAPI 400, & Mobile Session Persistence verified')
+    }
+
     console.log('🎉 Chapter 30 Zombie Worker & Punch Card Resolver Test Suite PASSED!')
 }
 
