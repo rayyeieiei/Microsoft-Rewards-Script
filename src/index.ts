@@ -1379,6 +1379,11 @@ export class MicrosoftRewardsBot {
         })
     }
 
+    public isHandoffPaused(email?: string): boolean {
+        const norm = (email || this.sessionActiveAccountEmail || this.activeAccount?.email || '').toLowerCase().trim()
+        return Boolean(norm && this.activeHandoffResolvers.has(norm))
+    }
+
     public async waitForHandoffComplete(email: string): Promise<void> {
         const norm = email.toLowerCase().trim()
         if (!this.activeHandoffResolvers.has(norm)) return
@@ -1465,24 +1470,29 @@ export class MicrosoftRewardsBot {
             )
             broadcastC2Log(`🔄 [HOT-HANDOFF] Operator meminta intervensi manual untuk ${targetAccount.email} yang sedang aktif. Melakukan auto-pause...`)
 
-            if (this.accountScope) {
-                try {
-                    const activeProc = this.browserFactory.getCurrentBrowserProcess()
-                    const activeCtx = activeProc?.contexts?.()?.[0]
-                    if (activeCtx) {
-                        await AccountSessionStore.saveContextSession(activeCtx, this.accountScope, this.isMobile ? 'mobile' : 'desktop', 3000)
-                    }
-                } catch {}
-            }
-
-            await this.browserFactory.recycleBrowser().catch(() => {})
-            this.updateDashboardAccount(targetAccount.email, { status: 'Manual Handoff' })
-
             let resumeAutomation: () => void = () => {}
             new Promise<void>(res => {
                 resumeAutomation = res
             })
             this.activeHandoffResolvers.set(normEmail, resumeAutomation)
+
+            if (this.accountScope) {
+                try {
+                    const activeProc = this.browserFactory.getCurrentBrowserProcess()
+                    const activeCtx = activeProc?.contexts?.()?.[0]
+                    const activePage = this.mainMobilePage && !this.mainMobilePage.isClosed()
+                        ? this.mainMobilePage
+                        : (this.mainDesktopPage && !this.mainDesktopPage.isClosed() ? this.mainDesktopPage : null)
+                    if (activeCtx && (!activePage || !activePage.isClosed())) {
+                        await AccountSessionStore.saveContextSession(activeCtx, this.accountScope, this.isMobile ? 'mobile' : 'desktop', 3000)
+                    }
+                } catch (e) {
+                    // Tangani graceful jika target page/browser sudah tertutup
+                }
+            }
+
+            await this.browserFactory.recycleBrowser().catch(() => {})
+            this.updateDashboardAccount(targetAccount.email, { status: 'Manual Handoff' })
         }
 
         acquireAccountLock(normEmail, 'manual-browser')
@@ -1528,27 +1538,29 @@ export class MicrosoftRewardsBot {
                 broadcastC2Log(`💾 [MANUAL-SESSION] Menyimpan sesi akun ${targetAccount.email}...`)
 
                 try {
-                    const saveRes = await AccountSessionStore.saveContextSession(context, scope, 'desktop', 5000)
-                    if (saveRes.status === 'saved') {
-                        this.logger.info(
-                            'main',
-                            'C2-MANUAL',
-                            `✅ Sesi akun ${targetAccount.email} berhasil disimpan ke storageState disk.`
-                        )
-                        broadcastC2Log(`✅ [MANUAL-SESSION] Sesi akun ${targetAccount.email} berhasil disimpan ke storageState disk.`)
-                    } else {
-                        this.logger.warn(
-                            'main',
-                            'C2-MANUAL',
-                            `⚠️ Status penyimpanan sesi ${targetAccount.email}: ${saveRes.status}`
-                        )
-                        broadcastC2Log(`⚠️ [MANUAL-SESSION] Status penyimpanan sesi ${targetAccount.email}: ${saveRes.status}`)
+                    if (context && (!page || !page.isClosed())) {
+                        const saveRes = await AccountSessionStore.saveContextSession(context, scope, 'desktop', 5000)
+                        if (saveRes.status === 'saved') {
+                            this.logger.info(
+                                'main',
+                                'C2-MANUAL',
+                                `✅ Sesi akun ${targetAccount.email} berhasil disimpan ke storageState disk.`
+                            )
+                            broadcastC2Log(`✅ [MANUAL-SESSION] Sesi akun ${targetAccount.email} berhasil disimpan ke storageState disk.`)
+                        } else {
+                            this.logger.warn(
+                                'main',
+                                'C2-MANUAL',
+                                `⚠️ Status penyimpanan sesi ${targetAccount.email}: ${saveRes.status}`
+                            )
+                            broadcastC2Log(`⚠️ [MANUAL-SESSION] Status penyimpanan sesi ${targetAccount.email}: ${saveRes.status}`)
+                        }
                     }
                 } catch (err) {
-                    this.logger.error(
+                    this.logger.warn(
                         'main',
                         'C2-MANUAL',
-                        `Gagal menyimpan context storageState: ${err instanceof Error ? err.message : String(err)}`
+                        `Penutupan sesi manual (context closed): ${err instanceof Error ? err.message : String(err)}`
                     )
                 }
 
@@ -1882,7 +1894,7 @@ export class MicrosoftRewardsBot {
                     }
 
                     const result = await this.Main(account, scope!).catch(error => {
-                        if (scope?.abortController?.signal?.aborted) {
+                        if (scope?.abortController?.signal?.aborted || this.isHandoffPaused(accountEmail)) {
                             return undefined
                         }
                         const errMsg = error instanceof Error ? error.message : String(error)
@@ -1894,6 +1906,20 @@ export class MicrosoftRewardsBot {
                         this.updateDashboardAccount(accountEmail, { status: 'Error', error: errMsg })
                         return undefined
                     })
+
+                    if (this.isHandoffPaused(accountEmail)) {
+                        this.logger.info(
+                            'main',
+                            'HOT-HANDOFF',
+                            `⏸️ [HOT-HANDOFF] Menunggu operator menyelesaikan intervensi manual untuk ${accountEmail}...`
+                        )
+                        await this.waitForHandoffComplete(accountEmail)
+                        this.logger.info(
+                            'main',
+                            'HOT-HANDOFF',
+                            `▶️ [HOT-HANDOFF] Intervensi manual selesai untuk ${accountEmail}.`
+                        )
+                    }
 
                     if (scope!.abortController.signal.aborted) {
                         throw new Error('SEQUENTIAL_DEADLINE_TIMEOUT_EXCEEDED')
@@ -2902,7 +2928,7 @@ export class MicrosoftRewardsBot {
                     mobileProgress: startMobileProgress
                 })
 
-                this.cookies.mobile = await initialContext.cookies()
+                this.cookies.mobile = await initialContext.cookies().catch(() => [])
 
                 const { mobilePoints, desktopPoints } = await this.searchManager.doSearches(
                     data,

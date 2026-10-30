@@ -31,12 +31,13 @@ export class SearchManager {
     ): Promise<SearchResults> {
         if (
             this.bot.abortController?.signal?.aborted ||
-            this.bot.accountScope?.abortController?.signal?.aborted
+            this.bot.accountScope?.abortController?.signal?.aborted ||
+            this.bot.isHandoffPaused?.(accountEmail)
         ) {
             this.bot.logger.warn(
                 'main',
                 'SEARCH-MANAGER',
-                'Abort signal terdeteksi. Menghentikan seluruh proses pencarian seketika.'
+                'Abort / Hot-Handoff signal terdeteksi. Menghentikan seluruh proses pencarian seketika.'
             )
             return { mobilePoints: 0, desktopPoints: 0 }
         }
@@ -480,7 +481,7 @@ export class SearchManager {
         this.bot.logger.debug('main', 'SEARCH-DESKTOP-LOGIN', 'verifyBingSession')
 
         await this.bot['login'].verifyBingSession(this.bot.mainDesktopPage)
-        this.bot.cookies.desktop = await session.context.cookies()
+        this.bot.cookies.desktop = await session.context.cookies().catch(() => [])
         if (session.fingerprint) {
             this.bot.fingerprint = session.fingerprint
         }
