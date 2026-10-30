@@ -97,7 +97,27 @@ export class Search extends Workers {
                 this.bot.browser.func.cachedCounters = data.userStatus.counters
             }
             let searchCounters: Counters = await this.bot.browser.func.getSearchPoints(page, false, isMobile, false)
-            const missingPoints = this.bot.browser.func.missingSearchPoints(searchCounters, isMobile)
+            const domMissingPoints = this.bot.browser.func.missingSearchPoints(searchCounters, isMobile)
+            let missingPoints = domMissingPoints
+
+            // Sinkronkan baseline kuota awal: jika server mendeteksi sisa kuota awal lebih kecil (misal 70 daripada 90 default DOM),
+            // gunakan nilai server sebagai baseline penghitungan awal agar missingBefore tidak berselisih sejak kueri pertama.
+            if (data?.userStatus?.counters) {
+                const serverMissing = this.bot.browser.func.missingSearchPoints(data.userStatus.counters, isMobile)
+                if (serverMissing.totalPoints >= 0 && serverMissing.totalPoints < domMissingPoints.totalPoints) {
+                    this.bot.logger.info(
+                        isMobile,
+                        'SEARCH-BING',
+                        `[BASELINE-SYNC] Sinkronisasi kuota awal dengan server: sisa kuota server=${serverMissing.totalPoints} (DOM=${domMissingPoints.totalPoints}). Menggunakan ${serverMissing.totalPoints} sebagai baseline awal.`
+                    )
+                    missingPoints = serverMissing
+                    if (isMobile && searchCounters.mobileSearch?.[0] && data.userStatus.counters.mobileSearch?.[0]) {
+                        searchCounters.mobileSearch[0].pointProgress = data.userStatus.counters.mobileSearch[0].pointProgress
+                    } else if (!isMobile && searchCounters.pcSearch?.[0] && data.userStatus.counters.pcSearch?.[0]) {
+                        searchCounters.pcSearch[0].pointProgress = data.userStatus.counters.pcSearch[0].pointProgress
+                    }
+                }
+            }
             let missingPointsTotal = missingPoints.totalPoints
 
             this.bot.logger.debug(
@@ -200,6 +220,7 @@ export class Search extends Workers {
             let stagnantLoop = 0
             const stagnantLoopMax = 3
             let isCooldownDetected = false
+            let previousMissingAfter: number | null = null
 
             const isAborted = () => Boolean(
                 this.bot.abortController?.signal?.aborted ||
@@ -262,9 +283,24 @@ export class Search extends Workers {
 
                 const newMissingPoints = this.bot.browser.func.missingSearchPoints(searchCounters, isMobile)
                 const rawMissingAfter = newMissingPoints.totalPoints
-                const clamped = clampSearchPointDelta(missingPointsTotal, rawMissingAfter, pointsPerSearch)
+                const isDomUnchanged = previousMissingAfter !== null && rawMissingAfter === previousMissingAfter
+                previousMissingAfter = rawMissingAfter
 
-                if (clamped.wasClamped) {
+                let clamped: ClampedSearchDelta
+                if (isDomUnchanged) {
+                    // Flyout DOM Bing belum ter-update dan mengembalikan nilai yang sama persis: jangan hitung sebagai lonjakan anomali instan
+                    clamped = {
+                        gainedPoints: 0,
+                        remaining: missingPointsTotal,
+                        wasClamped: false,
+                        rawDelta: 0
+                    }
+                } else {
+                    clamped = clampSearchPointDelta(missingPointsTotal, rawMissingAfter, pointsPerSearch)
+                }
+
+                // Hanya picu warning [COUNTER-ANOMALY] jika rawDelta bernilai positif besar yang diverifikasi oleh perubahan riil DOM
+                if (clamped.wasClamped && clamped.rawDelta > pointsPerSearch && !isDomUnchanged) {
                     this.bot.logger.warn(
                         isMobile,
                         'SEARCH-BING',
@@ -469,6 +505,7 @@ export class Search extends Workers {
                     )
 
                     let pointsGainedThisPool = 0
+                    let extraPreviousMissingAfter: number | null = null
 
                     for (const query of queries) {
                         if (isAborted()) {
@@ -515,9 +552,24 @@ export class Search extends Workers {
 
                         const newMissingPoints = this.bot.browser.func.missingSearchPoints(searchCounters, isMobile)
                         const rawMissingAfter = newMissingPoints.totalPoints
-                        const clamped = clampSearchPointDelta(missingPointsTotal, rawMissingAfter, pointsPerSearch)
+                        const isDomUnchanged = extraPreviousMissingAfter !== null && rawMissingAfter === extraPreviousMissingAfter
+                        extraPreviousMissingAfter = rawMissingAfter
 
-                        if (clamped.wasClamped) {
+                        let clamped: ClampedSearchDelta
+                        if (isDomUnchanged) {
+                            // Flyout DOM Bing belum ter-update dan mengembalikan nilai yang sama persis: jangan hitung sebagai lonjakan anomali instan
+                            clamped = {
+                                gainedPoints: 0,
+                                remaining: missingPointsTotal,
+                                wasClamped: false,
+                                rawDelta: 0
+                            }
+                        } else {
+                            clamped = clampSearchPointDelta(missingPointsTotal, rawMissingAfter, pointsPerSearch)
+                        }
+
+                        // Hanya picu warning [COUNTER-ANOMALY] jika rawDelta bernilai positif besar yang diverifikasi oleh perubahan riil DOM
+                        if (clamped.wasClamped && clamped.rawDelta > pointsPerSearch && !isDomUnchanged) {
                             this.bot.logger.warn(
                                 isMobile,
                                 'SEARCH-BING-EXTRA',
