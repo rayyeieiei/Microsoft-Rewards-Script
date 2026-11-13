@@ -478,13 +478,36 @@ export class UrlReward extends Workers {
                             await this.bot.utils.wait(1500)
                             return
                         }
-                        const response = await tab.goto(targetUrl, {
-                            waitUntil: 'domcontentloaded',
-                            timeout: Math.max(1000, timeout),
-                            referer: 'https://rewards.bing.com/'
-                        }).catch(err => {
-                            throw err
-                        })
+                        let response: any = null
+                        const maxNavAttempts = 2
+                        for (let navAttempt = 1; navAttempt <= maxNavAttempts; navAttempt++) {
+                            try {
+                                response = await tab.goto(targetUrl, {
+                                    waitUntil: 'domcontentloaded',
+                                    timeout: Math.max(1000, timeout),
+                                    referer: 'https://rewards.bing.com/'
+                                })
+                                break
+                            } catch (err: any) {
+                                const errMsg = String(err?.message || err)
+                                const isTransient =
+                                    errMsg.includes('ERR_INTERNET_DISCONNECTED') ||
+                                    errMsg.includes('ERR_NETWORK_CHANGED') ||
+                                    errMsg.includes('ERR_CONNECTION_RESET') ||
+                                    errMsg.includes('ERR_TIMED_OUT') ||
+                                    errMsg.includes('ERR_NAME_NOT_RESOLVED')
+                                if (navAttempt < maxNavAttempts && isTransient) {
+                                    this.bot.logger.warn(
+                                        this.bot.isMobile,
+                                        'URL-REWARD',
+                                        `[NAV-RETRY] Transient network error (${errMsg}). Retrying navigation (attempt ${navAttempt}/${maxNavAttempts}) in 2000ms...`
+                                    )
+                                    await this.bot.utils.wait(2000)
+                                    continue
+                                }
+                                throw err
+                            }
+                        }
                         if (response && response.status() === 404) {
                             this.bot.logger.warn(
                                 this.bot.isMobile,
@@ -509,20 +532,45 @@ export class UrlReward extends Workers {
                         isMobile: this.bot.isMobile,
                         operation: async (signal) => {
                             const isExpectedQuiz = Boolean((promotion as any).isQuiz || this.isQuizPromotion(promotion))
-                            const startQuizSelector =
-                                '#rqStartQuiz, #rqStartQuizToken, input[value*="Start"], button:has-text("Start"), div[role="button"]:has-text("Start"), .btOption'
-                            const quizOptionsSelector =
-                                '[id^="rqAnswerOption"], .btOption, [id^="btoption"], .rqOptions, .wk_Option, [role="radio"], button.optionBtn, .bt_poll, input[type="radio"], .rqOption, .rq_button, [data-option]'
-                            const quizContainerSelector = `${startQuizSelector}, ${quizOptionsSelector}, #rqNextQuestion`
+                            const isPuzzle = Boolean(
+                                (promotion as any).isPuzzle ||
+                                (promotion.title || '').toLowerCase().includes('puzzle') ||
+                                (promotion.name || '').toLowerCase().includes('puzzle')
+                            )
 
-                            // Toleransi tunggu rendering DOM kuis (dipangkas ke 1.5s untuk non-quiz / promo biasa)
+                            const startQuizSelector =
+                                '#rqStartQuiz, #rqStartQuizToken, input[value*="Start"], button:has-text("Start"), div[role="button"]:has-text("Start"), button:has-text("Mulai"), div[role="button"]:has-text("Mulai"), .btOption'
+                            const quizOptionsSelector =
+                                '[id^="rqAnswerOption"], .btOption, [id^="btoption"], .rqOptions, .wk_Option, [role="radio"], button.optionBtn, .bt_poll, input[type="radio"], .rqOption, .rq_button, [data-option], .rq-option, [data-option-id], .quiz-option, .c-card__content [role="button"], div[class*="option"]:not([class*="disabled"]), button[class*="option"]'
+                            const puzzleSelector =
+                                '#puzzle, .puzzle, [id*="puzzle"], [class*="puzzle"], .slide-tile, .puzzle-piece, #overlay, canvas, .game-canvas, #gameContainer'
+                            const quizContainerSelector = `${startQuizSelector}, ${quizOptionsSelector}, ${puzzleSelector}, #rqNextQuestion`
+
+                            // Toleransi tunggu rendering DOM kuis/puzzle (dipangkas ke 1.5s untuk non-quiz / promo biasa)
                             try {
                                 await tab.waitForSelector(quizContainerSelector, {
                                     state: 'attached',
-                                    timeout: isExpectedQuiz ? 3000 : 1500
+                                    timeout: (isExpectedQuiz || isPuzzle) ? 3500 : 1500
                                 })
                             } catch {
-                                // Timeout tercapai tanpa elemen kuis terdeteksi
+                                // Timeout tercapai tanpa elemen kuis/puzzle terdeteksi
+                            }
+
+                            // Khusus Puzzle: Jangan fast-bailout, interaksikan dengan elemen puzzle
+                            if (isPuzzle) {
+                                this.bot.logger.info(
+                                    this.bot.isMobile,
+                                    'URL-REWARD',
+                                    `[PUZZLE] Interacting with puzzle activity for "${promotion.title}"...`
+                                )
+                                const puzzleEl = tab.locator(puzzleSelector).first()
+                                if (await puzzleEl.isVisible().catch(() => false)) {
+                                    await puzzleEl.scrollIntoViewIfNeeded().catch(() => {})
+                                    await puzzleEl.click({ force: true }).catch(() => {})
+                                }
+                                // Dwell time 3-4 detik agar event penyelesaian puzzle terekam di telemetry Microsoft
+                                await this.bot.utils.wait(this.bot.utils.randomDelay(3000, 4500))
+                                return
                             }
 
                             // Fast-bailout untuk non-quiz / promo biasa
@@ -562,17 +610,37 @@ export class UrlReward extends Workers {
                                 const quizOptions = tab.locator(quizOptionsSelector)
                                 const optCount = await quizOptions.count().catch(() => 0)
                                 if (optCount > 0) {
+                                    let clicked = false
                                     const randIdx = Math.floor(Math.random() * Math.min(optCount, 4))
-                                    await quizOptions
-                                        .nth(randIdx)
-                                        .click({ force: true })
-                                        .catch(() => {})
-                                    await this.bot.utils.wait(1500)
+                                    const targetOpt = quizOptions.nth(randIdx)
+                                    if (await targetOpt.isVisible().catch(() => false)) {
+                                        await targetOpt.scrollIntoViewIfNeeded().catch(() => {})
+                                        await targetOpt.click({ force: true }).catch(() => {})
+                                        clicked = true
+                                    } else {
+                                        for (let i = 0; i < Math.min(optCount, 6); i++) {
+                                            const opt = quizOptions.nth(i)
+                                            if (await opt.isVisible().catch(() => false)) {
+                                                await opt.scrollIntoViewIfNeeded().catch(() => {})
+                                                await opt.click({ force: true }).catch(() => {})
+                                                clicked = true
+                                                break
+                                            }
+                                        }
+                                    }
+                                    if (clicked) {
+                                        this.bot.logger.debug(
+                                            this.bot.isMobile,
+                                            'URL-REWARD',
+                                            `[QUIZ-CLICK] Clicked quiz option (question ${q + 1})`
+                                        )
+                                        await this.bot.utils.wait(1500)
+                                    }
 
                                     // Dukungan navigasi tombol lanjut #rqNextQuestion untuk kuis multi-pertanyaan
                                     const nextBtn = tab
                                         .locator(
-                                            '#rqNextQuestion, input#rqNextQuestion, input[value*="Next"], button:has-text("Next"), [id*="nextQuestion"]'
+                                            '#rqNextQuestion, input#rqNextQuestion, input[value*="Next"], button:has-text("Next"), button:has-text("Berikutnya"), [id*="nextQuestion"]'
                                         )
                                         .first()
                                     if (await nextBtn.isVisible().catch(() => false)) {
@@ -588,7 +656,7 @@ export class UrlReward extends Workers {
                                     // Cek apakah ada tombol next yang perlu diklik sebelum menyerah
                                     const nextBtn = tab
                                         .locator(
-                                            '#rqNextQuestion, input#rqNextQuestion, input[value*="Next"], button:has-text("Next"), [id*="nextQuestion"]'
+                                            '#rqNextQuestion, input#rqNextQuestion, input[value*="Next"], button:has-text("Next"), button:has-text("Berikutnya"), [id*="nextQuestion"]'
                                         )
                                         .first()
                                     if (await nextBtn.isVisible().catch(() => false)) {
@@ -984,33 +1052,42 @@ export class UrlReward extends Workers {
                             } catch {}
                         }
 
-                        // Tier 2: Universal secondary reinforcement ReportActivity?ajaxreq=1
-                        try {
+                        // Tier 2: Universal secondary reinforcement ReportActivity?ajaxreq=1 (hanya jika bukan offerId sintetis dom_)
+                        const isSyntheticOffer = (promotion.offerId ?? '').toLowerCase().startsWith('dom_')
+                        if (isSyntheticOffer) {
                             this.bot.logger.debug(
                                 this.bot.isMobile,
                                 'URL-REWARD',
-                                `[FALLBACK-REINFORCEMENT] Tier 2: Dispatching bingqa/ReportActivity?ajaxreq=1 for offerId=${promotion.offerId}`
+                                `[FALLBACK-REINFORCEMENT] Skipping Tier 2 ReportActivity for synthetic DOM offerId: ${promotion.offerId}`
                             )
-                            const jsonData = {
-                                UserId: null,
-                                TimeZoneOffset: -60,
-                                OfferId: promotion.offerId,
-                                ActivityCount: 1,
-                                QuestionIndex: '-1'
-                            }
-                            await this.bot.axios.request({
-                                url: 'https://www.bing.com/bingqa/ReportActivity?ajaxreq=1',
-                                method: 'POST',
-                                timeout: 5000,
-                                headers: {
-                                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                                    Cookie: bingCookies,
-                                    Referer: 'https://rewards.bing.com/',
-                                    ...(this.bot.fingerprint?.headers ?? {})
-                                },
-                                data: JSON.stringify(jsonData)
-                            }).catch(() => {})
-                        } catch {}
+                        } else {
+                            try {
+                                this.bot.logger.debug(
+                                    this.bot.isMobile,
+                                    'URL-REWARD',
+                                    `[FALLBACK-REINFORCEMENT] Tier 2: Dispatching bingqa/ReportActivity?ajaxreq=1 for offerId=${promotion.offerId}`
+                                )
+                                const jsonData = {
+                                    UserId: null,
+                                    TimeZoneOffset: -60,
+                                    OfferId: promotion.offerId,
+                                    ActivityCount: 1,
+                                    QuestionIndex: '-1'
+                                }
+                                await this.bot.axios.request({
+                                    url: 'https://www.bing.com/bingqa/ReportActivity?ajaxreq=1',
+                                    method: 'POST',
+                                    timeout: 5000,
+                                    headers: {
+                                        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                                        Cookie: bingCookies,
+                                        Referer: 'https://rewards.bing.com/',
+                                        ...(this.bot.fingerprint?.headers ?? {})
+                                    },
+                                    data: JSON.stringify(jsonData)
+                                }).catch(() => {})
+                            } catch {}
+                        }
 
                         // Jeda hidrasi (2500ms - 3500ms)
                         await this.bot.utils.wait(this.bot.utils.randomDelay(2500, 3500))

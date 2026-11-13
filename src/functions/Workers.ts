@@ -548,20 +548,48 @@ export class Workers {
 
                             if (!hasCheckmark && points > 0) {
                                 seenTitles.add(title.toLowerCase())
+                                let extractedOfferId =
+                                    el.getAttribute('data-offer-id') ||
+                                    el.getAttribute('data-bi-id') ||
+                                    el.querySelector('[data-offer-id]')?.getAttribute('data-offer-id') ||
+                                    el.querySelector('[data-bi-id]')?.getAttribute('data-bi-id') ||
+                                    ''
+
+                                if (!extractedOfferId && href) {
+                                    try {
+                                        const urlObj = new URL(href.startsWith('http') ? href : `https://rewards.bing.com${href}`)
+                                        extractedOfferId =
+                                            urlObj.searchParams.get('offerId') ||
+                                            urlObj.searchParams.get('id') ||
+                                            urlObj.searchParams.get('offerid') ||
+                                            urlObj.searchParams.get('rwds_quiz') ||
+                                            ''
+                                    } catch {}
+                                }
+
+                                const invalidIds = new Set(['', 'root', 'main', 'app', 'content', 'header', 'footer', 'dailyset', 'daily-set'])
+                                if (invalidIds.has(extractedOfferId.toLowerCase().trim()) || extractedOfferId.trim().length < 3) {
+                                    extractedOfferId = ''
+                                }
+
+                                const finalOfferId = extractedOfferId ? extractedOfferId.trim() : `dom_dailyset_${title.replace(/[^\w]/g, '_').toLowerCase()}`
+                                const isQuizType =
+                                    title.toLowerCase().includes('?') ||
+                                    txt.toLowerCase().includes('test your knowledge') ||
+                                    txt.toLowerCase().includes('quiz')
+                                const isPuzzleType = title.toLowerCase().includes('puzzle') || txt.toLowerCase().includes('puzzle')
+
                                 results.push({
                                     title,
                                     destinationUrl: href.startsWith('http') ? href : 'https://rewards.bing.com',
                                     pointProgressMax: points,
                                     pointProgress: 0,
                                     complete: false,
-                                    offerId: `dom_dailyset_${title.replace(/[^\w]/g, '_').toLowerCase()}`,
-                                    promotionType:
-                                        title.toLowerCase().includes('?') ||
-                                        txt.toLowerCase().includes('test your knowledge') ||
-                                        txt.toLowerCase().includes('quiz')
-                                            ? 'quiz'
-                                            : 'urlreward'
-                                })
+                                    offerId: finalOfferId,
+                                    promotionType: isQuizType ? 'quiz' : (isPuzzleType ? 'puzzle' : 'urlreward'),
+                                    isQuiz: isQuizType,
+                                    isPuzzle: isPuzzleType
+                                } as any)
                             }
                         }
                         return results
@@ -579,6 +607,18 @@ export class Workers {
                     uniqueDailySet = [...uniqueDailySet, ...liveDailySetCards]
                 }
             } catch {}
+        }
+
+        if (uniqueDailySet.length === 0) {
+            const currentGeo = (this.bot.userData.geoLocale || 'auto').toUpperCase()
+            if (currentGeo === 'ID') {
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'DAILY-SET',
+                    'ℹ️ [GEO-ADAPTIVE] Regional Indonesia (ID) tidak memiliki katalog "Daily Set" (Streak 3 kartu). Misi harian dipusatkan di "Keep earning", Daily Check-In, dan Read to Earn.',
+                    'cyan'
+                )
+            }
         }
 
         this.bot.logger.info(
@@ -1214,15 +1254,44 @@ export class Workers {
                         if (hasCheckmark) {
                             completedTitles.push(title.toLowerCase().trim())
                         } else if (points > 0 && !isPunchCardTile && !isAppOnly && !isMarketingPromo) {
+                            let extractedOfferId =
+                                el.getAttribute('data-offer-id') ||
+                                el.getAttribute('data-bi-id') ||
+                                el.querySelector('[data-offer-id]')?.getAttribute('data-offer-id') ||
+                                el.querySelector('[data-bi-id]')?.getAttribute('data-bi-id') ||
+                                ''
+
+                            if (!extractedOfferId && href) {
+                                try {
+                                    const urlObj = new URL(href.startsWith('http') ? href : `https://rewards.bing.com${href}`)
+                                    extractedOfferId =
+                                        urlObj.searchParams.get('offerId') ||
+                                        urlObj.searchParams.get('id') ||
+                                        urlObj.searchParams.get('offerid') ||
+                                        urlObj.searchParams.get('rwds_quiz') ||
+                                        ''
+                                } catch {}
+                            }
+
+                            const invalidOfferIds = new Set(['', 'root', 'main', 'app', 'content', 'header', 'footer', 'dailyset', 'daily-set', 'morepromotions', 'keep-earning'])
+                            if (invalidOfferIds.has(extractedOfferId.toLowerCase().trim()) || extractedOfferId.trim().length < 3) {
+                                extractedOfferId = ''
+                            }
+
+                            const finalOfferId = extractedOfferId ? extractedOfferId.trim() : `dom_bonus_${title.replace(/[^\w]/g, '_').toLowerCase()}`
+                            const isPuzzle = title.toLowerCase().includes('puzzle') || txt.toLowerCase().includes('puzzle')
+
                             uncompletedCards.push({
                                 title,
                                 destinationUrl: href && href.startsWith('http') ? href : 'https://rewards.bing.com',
                                 pointProgressMax: points,
                                 pointProgress: 0,
                                 complete: false,
-                                offerId: `dom_bonus_${title.replace(/[^\w]/g, '_').toLowerCase()}`,
-                                promotionType: isQuizHeuristic ? 'quiz' : 'urlreward'
-                            })
+                                offerId: finalOfferId,
+                                promotionType: isQuizHeuristic ? 'quiz' : (isPuzzle ? 'puzzle' : 'urlreward'),
+                                isQuiz: isQuizHeuristic,
+                                isPuzzle: isPuzzle
+                            } as any)
                         }
                     }
                     return { uncompletedCards, completedTitles }
@@ -1320,6 +1389,45 @@ export class Workers {
         // 4. Reconcile seluruh result berdasarkan exact offerId
         const allFreshPromos = refreshedData ? this.extractAllPromotions(refreshedData) : []
 
+        // Evaluasi status centang hijau langsung dari DOM dashboard jika API server belum merefleksikan
+        let domCompletedSet = new Set<string>()
+        if (page && !page.isClosed()) {
+            try {
+                const domStatus = await page.evaluate(() => {
+                    const finished: string[] = []
+                    const cards = Array.from(
+                        document.querySelectorAll(
+                            '.c-card, .p-card, a, [role="button"], [class*="card"], [class*="tile"], [data-bi-id]'
+                        )
+                    )
+                    for (const c of cards) {
+                        const hasCheck =
+                            c.querySelector(
+                                '.mee-icon-CheckMark, [data-icon-name="CheckMark"], .c-glyph.f-checkmark, .c-icon-check, .complete-check, svg[aria-label*="Complete"], [class*="check"]'
+                            ) !== null ||
+                            c.classList.contains('completed') ||
+                            c.classList.contains('complete') ||
+                            c.getAttribute('aria-checked') === 'true' ||
+                            (c.textContent || '').toLowerCase().includes('completed') ||
+                            (c.textContent || '').toLowerCase().includes('selesai')
+                        if (hasCheck) {
+                            const tEl = c.querySelector(
+                                'h3, h4, h5, .title, .c-heading, [class*="title"], [class*="heading"]'
+                            )
+                            const rawT = (tEl?.textContent || c.getAttribute('aria-label') || '').trim().toLowerCase()
+                            const lines = (c.textContent || '').split('\n').map(l => l.trim().toLowerCase()).filter(Boolean)
+                            const t = rawT || lines[0] || ''
+                            if (t) finished.push(t)
+                        }
+                    }
+                    return finished
+                }).catch(() => [])
+                domCompletedSet = new Set(domStatus.map(s => s.toLowerCase().trim()))
+            } catch {}
+        }
+
+        let remainingAttributedDelta = bonusGained
+
         for (const [key, result] of executionMap.entries()) {
             const freshMatch = allFreshPromos.find(
                 f =>
@@ -1332,12 +1440,29 @@ export class Workers {
                 (freshMatch.complete === true ||
                     (freshMatch.pointProgressMax > 0 && (freshMatch.pointProgress ?? 0) >= freshMatch.pointProgressMax))
             )
+            const hasDomCheck = domCompletedSet.has(result.title.toLowerCase().trim())
+            const hasSessionComplete =
+                this.completedOffersInSession.has(result.offerId) ||
+                this.completedOffersInSession.has(result.title.toLowerCase().trim())
 
-            if (isServerComplete) {
+            if (isServerComplete || hasDomCheck) {
                 const attributed =
-                    bonusGained === result.advertisedPoints && result.advertisedPoints > 0
-                        ? result.advertisedPoints
-                        : null
+                    bonusGained > 0 && result.advertisedPoints > 0
+                        ? Math.min(result.advertisedPoints, remainingAttributedDelta)
+                        : result.advertisedPoints
+                if (remainingAttributedDelta > 0 && attributed) remainingAttributedDelta -= attributed
+                executionMap.set(key, {
+                    ...result,
+                    status: 'verified-complete',
+                    serverCompleted: true,
+                    completionEvidence: isServerComplete ? 'server-dashboard-state' : 'dom-checkmark',
+                    observedBalanceDelta: bonusGained,
+                    attributedPoints: attributed
+                })
+            } else if (bonusGained > 0 && hasSessionComplete && remainingAttributedDelta > 0) {
+                // Delayed Attribution Window: Saldo server terbukti bertambah selama batch, atribusikan ke kartu yang sukses diproses
+                const attributed = Math.min(result.advertisedPoints, remainingAttributedDelta)
+                remainingAttributedDelta -= attributed
                 executionMap.set(key, {
                     ...result,
                     status: 'verified-complete',
@@ -2283,9 +2408,12 @@ export class Workers {
                     `Processing | title="${activity.title}" | type=${type} | isQuiz=${isQuiz} | tokenMissing=${isTokenMissing}`
                 )
 
+                // Jangan lempar offerId sintetis (dom_...) ke loop API ReportActivity di Quiz.ts
+                const isSyntheticDom = offerId.startsWith('dom_')
+
                 if (
                     !isTokenMissing &&
-                    !offerId.startsWith('dom_') &&
+                    !isSyntheticDom &&
                     (type === 'quiz' || type.includes('trivia') || type.includes('poll') || type.includes('survey')) &&
                     !offerId.includes('dailyset')
                 ) {
@@ -2295,7 +2423,13 @@ export class Workers {
                 } else if (name.includes('exploreonbing')) {
                     await this.bot.activities.doSearchOnBing(activity, page)
                 } else {
-                    // Default fallback: Selesaikan via Hybrid UrlReward solver (mencakup Daily Set URL, side quests 15 poin, explore cards, promo links, punchcard items, serta web quiz)
+                    // Default fallback: Selesaikan via Hybrid UrlReward solver (mencakup Daily Set URL, side quests 15 poin, explore cards, promo links, punchcard items, serta web quiz & puzzle DOM)
+                    if (isQuiz) {
+                        ;(activity as any).isQuiz = true
+                    }
+                    if (type === 'puzzle' || (activity.title || '').toLowerCase().includes('puzzle')) {
+                        ;(activity as any).isPuzzle = true
+                    }
                     await this.bot.activities.doUrlReward(activity, page, punchCard)
                 }
 

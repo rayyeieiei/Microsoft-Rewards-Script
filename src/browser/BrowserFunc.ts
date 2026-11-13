@@ -287,6 +287,7 @@ export default class BrowserFunc {
             const request: AxiosRequestConfig = {
                 url: 'https://prod.rewardsplatform.microsoft.com/dapi/me?channel=SAIOS&options=613',
                 method: 'GET',
+                timeout: 10000,
                 headers: {
                     Authorization: `Bearer ${this.bot.accessToken}`,
                     'User-Agent':
@@ -318,7 +319,7 @@ export default class BrowserFunc {
             this.bot.logger.error(
                 this.bot.isMobile,
                 'GET-APP-DASHBOARD-DATA',
-                `Error fetching dashboard data: ${error instanceof Error ? error.message : String(error)}`
+                `Error fetching dashboard data: ${error?.message || (error?.response?.status ? `HTTP ${error.response.status}` : String(error))}`
             )
             throw error
         }

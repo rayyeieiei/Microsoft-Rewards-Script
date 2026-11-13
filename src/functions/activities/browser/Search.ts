@@ -278,45 +278,56 @@ export class Search extends Workers {
                         'green'
                     )
                 } else if (counterDelta === 0) {
-                    stagnantLoop++
-                    this.bot.logger.info(
-                        isMobile,
-                        'SEARCH-BING',
-                        `No points gained ${stagnantLoop}/${stagnantLoopMax} | query="${query}" | remaining=${newMissingPointsTotal}`
-                    )
-
-                    if (stagnantLoop >= stagnantLoopMax) {
+                    const isPeriodicSync = (searchCount % 4 === 0)
+                    if (isPeriodicSync) {
                         this.bot.logger.info(
                             isMobile,
                             'SEARCH-BING',
-                            `Stagnant threshold reached (${stagnantLoop}/${stagnantLoopMax}), performing server hard-verification...`
+                            `[DAPI-SYNC] Server search counters confirmed in sync: ${isMobile ? mobileProgress : desktopProgress} | remaining=${newMissingPointsTotal}`,
+                            'cyan'
                         )
-                        const verifyRes = await this.verifyPointsWithServer(page, isMobile)
-                        if (verifyRes.verifiedGained && verifyRes.newBalance) {
-                            const actualGained = Math.max(0, verifyRes.gained ?? 0)
+                        stagnantLoop = 0
+                    } else {
+                        stagnantLoop++
+                        this.bot.logger.info(
+                            isMobile,
+                            'SEARCH-BING',
+                            `No points gained ${stagnantLoop}/${stagnantLoopMax} | query="${query}" | remaining=${newMissingPointsTotal}`
+                        )
+
+                        if (stagnantLoop >= stagnantLoopMax) {
                             this.bot.logger.info(
                                 isMobile,
                                 'SEARCH-BING',
-                                `Hard-verification SUCCESS: Server points increased by +${actualGained} (new balance: ${verifyRes.newBalance}). Resetting stagnant loop.`,
-                                'green'
+                                `Stagnant threshold reached (${stagnantLoop}/${stagnantLoopMax}), performing server hard-verification...`
                             )
-                            this.bot.userData.currentPoints = verifyRes.newBalance
-                            this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + actualGained
-                            totalGainedPoints += actualGained
-                            stagnantLoop = 0
-                        } else {
-                            this.bot.logger.warn(
-                                isMobile,
-                                'SEARCH-BING',
-                                `[COOLDOWN-DETECTED] Microsoft 15-Minute Search Cooldown aktif pada akun ini (Server verified points stagnant after ${stagnantLoopMax} queries). Aborting search loop for graceful hand-off.`
-                            )
-                            this.bot.searchCooldownActive = true
-                            const isDualMode = this.bot.config?.executionMode === 'dual'
-                            if (isDualMode && typeof (this.bot as any).triggerCircuitBreaker === 'function') {
-                                (this.bot as any).triggerCircuitBreaker(`15-Minute Search Cooldown aktif pada ${currentEmail}`)
+                            const verifyRes = await this.verifyPointsWithServer(page, isMobile)
+                            if (verifyRes.verifiedGained && verifyRes.newBalance) {
+                                const actualGained = Math.max(0, verifyRes.gained ?? 0)
+                                this.bot.logger.info(
+                                    isMobile,
+                                    'SEARCH-BING',
+                                    `Hard-verification SUCCESS: Server points increased by +${actualGained} (new balance: ${verifyRes.newBalance}). Resetting stagnant loop.`,
+                                    'green'
+                                )
+                                this.bot.userData.currentPoints = verifyRes.newBalance
+                                this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + actualGained
+                                totalGainedPoints += actualGained
+                                stagnantLoop = 0
+                            } else {
+                                this.bot.logger.warn(
+                                    isMobile,
+                                    'SEARCH-BING',
+                                    `[COOLDOWN-DETECTED] Microsoft 15-Minute Search Cooldown aktif pada akun ini (Server verified points stagnant after ${stagnantLoopMax} queries). Aborting search loop for graceful hand-off.`
+                                )
+                                this.bot.searchCooldownActive = true
+                                const isDualMode = this.bot.config?.executionMode === 'dual'
+                                if (isDualMode && typeof (this.bot as any).triggerCircuitBreaker === 'function') {
+                                    (this.bot as any).triggerCircuitBreaker(`15-Minute Search Cooldown aktif pada ${currentEmail}`)
+                                }
+                                isCooldownDetected = true
+                                break
                             }
-                            isCooldownDetected = true
-                            break
                         }
                     }
                 } else {
@@ -495,46 +506,60 @@ export class Search extends Workers {
                                 'green'
                             )
                         } else if (counterDelta === 0) {
-                            stagnantLoop++
-                            this.bot.logger.info(
-                                isMobile,
-                                'SEARCH-BING-EXTRA',
-                                `No points gained ${stagnantLoop}/${stagnantLoopMax} | query="${query}" | remaining=${newMissingPointsTotal}`
-                            )
-
-                            if (stagnantLoop >= stagnantLoopMax) {
+                            const isPeriodicSync = (searchCount % 4 === 0)
+                            if (isPeriodicSync) {
+                                const currentProg = isMobile
+                                    ? (searchCounters.mobileSearch?.[0] ? `${searchCounters.mobileSearch[0].pointProgress}/${searchCounters.mobileSearch[0].pointProgressMax}` : 'mobile')
+                                    : (searchCounters.pcSearch?.[0] ? `${searchCounters.pcSearch[0].pointProgress}/${searchCounters.pcSearch[0].pointProgressMax}` : 'desktop')
                                 this.bot.logger.info(
                                     isMobile,
                                     'SEARCH-BING-EXTRA',
-                                    `Stagnant threshold reached (${stagnantLoop}/${stagnantLoopMax}), performing server hard-verification...`
+                                    `[DAPI-SYNC] Server search counters confirmed in sync: ${currentProg} | remaining=${newMissingPointsTotal}`,
+                                    'cyan'
                                 )
-                                const verifyRes = await this.verifyPointsWithServer(page, isMobile)
-                                if (verifyRes.verifiedGained && verifyRes.newBalance) {
-                                    const actualGained = Math.max(0, verifyRes.gained ?? 0)
+                                stagnantLoop = 0
+                            } else {
+                                stagnantLoop++
+                                this.bot.logger.info(
+                                    isMobile,
+                                    'SEARCH-BING-EXTRA',
+                                    `No points gained ${stagnantLoop}/${stagnantLoopMax} | query="${query}" | remaining=${newMissingPointsTotal}`
+                                )
+
+                                if (stagnantLoop >= stagnantLoopMax) {
                                     this.bot.logger.info(
                                         isMobile,
                                         'SEARCH-BING-EXTRA',
-                                        `Hard-verification SUCCESS: Server points increased by +${actualGained} (new balance: ${verifyRes.newBalance}). Resetting stagnant loop.`,
-                                        'green'
+                                        `Stagnant threshold reached (${stagnantLoop}/${stagnantLoopMax}), performing server hard-verification...`
                                     )
-                                    this.bot.userData.currentPoints = verifyRes.newBalance
-                                    this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + actualGained
-                                    totalGainedPoints += actualGained
-                                    stagnantLoop = 0
-                                } else {
-                                    this.bot.logger.warn(
-                                        isMobile,
-                                        'SEARCH-BING-EXTRA',
-                                        `[COOLDOWN-DETECTED] Microsoft 15-Minute Search Cooldown aktif pada akun ini (Server verified points stagnant after ${stagnantLoopMax} queries). Aborting extra searches.`
-                                    )
-                                    this.bot.searchCooldownActive = true
-                                    const isDualMode = this.bot.config?.executionMode === 'dual'
-                                    if (isDualMode && typeof (this.bot as any).triggerCircuitBreaker === 'function') {
-                                        const targetAcc = this.bot.activeAccount?.email || this.bot.userData.userName
-                                        ;(this.bot as any).triggerCircuitBreaker(`15-Minute Search Cooldown aktif pada ${targetAcc}`)
+                                    const verifyRes = await this.verifyPointsWithServer(page, isMobile)
+                                    if (verifyRes.verifiedGained && verifyRes.newBalance) {
+                                        const actualGained = Math.max(0, verifyRes.gained ?? 0)
+                                        this.bot.logger.info(
+                                            isMobile,
+                                            'SEARCH-BING-EXTRA',
+                                            `Hard-verification SUCCESS: Server points increased by +${actualGained} (new balance: ${verifyRes.newBalance}). Resetting stagnant loop.`,
+                                            'green'
+                                        )
+                                        this.bot.userData.currentPoints = verifyRes.newBalance
+                                        this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + actualGained
+                                        totalGainedPoints += actualGained
+                                        stagnantLoop = 0
+                                    } else {
+                                        this.bot.logger.warn(
+                                            isMobile,
+                                            'SEARCH-BING-EXTRA',
+                                            `[COOLDOWN-DETECTED] Microsoft 15-Minute Search Cooldown aktif pada akun ini (Server verified points stagnant after ${stagnantLoopMax} queries). Aborting extra searches.`
+                                        )
+                                        this.bot.searchCooldownActive = true
+                                        const isDualMode = this.bot.config?.executionMode === 'dual'
+                                        if (isDualMode && typeof (this.bot as any).triggerCircuitBreaker === 'function') {
+                                            const targetAcc = this.bot.activeAccount?.email || this.bot.userData.userName
+                                            ;(this.bot as any).triggerCircuitBreaker(`15-Minute Search Cooldown aktif pada ${targetAcc}`)
+                                        }
+                                        isCooldownDetected = true
+                                        break
                                     }
-                                    isCooldownDetected = true
-                                    break
                                 }
                             }
                         } else {

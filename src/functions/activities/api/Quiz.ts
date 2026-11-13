@@ -13,6 +13,16 @@ export class Quiz extends Workers {
 
     async doQuiz(promotion: BasePromotion) {
         const offerId = promotion.offerId
+
+        if ((offerId || '').toLowerCase().startsWith('dom_')) {
+            this.bot.logger.warn(
+                this.bot.isMobile,
+                'QUIZ',
+                `[QUIZ-GUARD] Cannot execute ReportActivity loop for synthetic DOM offerId: ${offerId}. Bypassing HTTP loop.`
+            )
+            return
+        }
+
         this.oldBalance = Number(this.bot.userData.currentPoints ?? 0)
         const startBalance = this.oldBalance
 
