@@ -143,6 +143,10 @@ export class Search extends Workers {
                 ? (searchCounters.mobileSearch?.[0]?.pointProgressMax ?? 60)
                 : ((searchCounters.pcSearch?.[0]?.pointProgressMax ?? 0) + (searchCounters.pcSearch?.[1]?.pointProgressMax ?? 0))
             if (currentMax === 0) currentMax = isMobile ? 60 : 90
+            let lastSyncedPoints = Number(this.bot.userData.currentPoints ?? 0)
+            let lastSyncedProgress = isMobile
+                ? (searchCounters.mobileSearch?.[0]?.pointProgress ?? 0)
+                : ((searchCounters.pcSearch?.[0]?.pointProgress ?? 0) + (searchCounters.pcSearch?.[1]?.pointProgress ?? 0))
 
             for (let i = 0; i < queries.length; i++) {
                 if (signal?.aborted) {
@@ -213,6 +217,7 @@ export class Search extends Workers {
 
                 const counterDelta = missingPointsTotal - newMissingPointsTotal
                 let gainedPoints = 0
+                const isPeriodicSync = (searchCount % 4 === 0)
 
                 if (newMax > currentMax && !isLevelUpHandled) {
                     // Kenaikan kuota maksimal di tengah jalan (Level Up / Quota Leap: Level 1 -> Level 2)
@@ -277,17 +282,54 @@ export class Search extends Workers {
                         `gainedPoints=${gainedPoints} points | query="${query}" | remaining=${newMissingPointsTotal}`,
                         'green'
                     )
-                } else if (counterDelta === 0) {
-                    const isPeriodicSync = (searchCount % 4 === 0)
-                    if (isPeriodicSync) {
+                } else if (!isPeriodicSync) {
+                    // Kueri non-sync (1, 2, 3): Logging transparan optimis tanpa pemicu stagnant false-warning
+                    stagnantLoop = 0
+                    gainedPoints = 3
+                    const decrementedRemaining = Math.max(0, missingPointsTotal - 3)
+                    newMissingPointsTotal = decrementedRemaining
+
+                    void Database.getInstance().recordActivity(
+                        currentEmail,
+                        isMobile ? 'SEARCH_MOBILE' : 'SEARCH_DESKTOP',
+                        gainedPoints
+                    )
+
+                    this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
+                    this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
+                    totalGainedPoints += gainedPoints
+
+                    this.bot.logger.info(
+                        isMobile,
+                        'SEARCH-BING',
+                        `[SEARCH-OPTIMISTIC] Query submitted (+3 est) | query="${query}" | estRemaining=${newMissingPointsTotal} (Server sync at query #${Math.ceil(searchCount / 4) * 4})`,
+                        'green'
+                    )
+                } else {
+                    // DAPI Sync berkala per 4 kueri: Evaluasi kemajuan riil terhadap lastSyncedPoints & lastSyncedProgress
+                    const currentServerProgress = isMobile
+                        ? (searchCounters.mobileSearch?.[0]?.pointProgress ?? 0)
+                        : ((searchCounters.pcSearch?.[0]?.pointProgress ?? 0) + (searchCounters.pcSearch?.[1]?.pointProgress ?? 0))
+                    const currentServerBalance = Number(this.bot.userData.currentPoints ?? 0)
+
+                    const syncProgressDelta = currentServerProgress - lastSyncedProgress
+                    const syncBalanceDelta = currentServerBalance - lastSyncedPoints
+                    const serverPointsGained = Math.max(syncProgressDelta, syncBalanceDelta)
+
+                    if (serverPointsGained > 0 || counterDelta > 0) {
+                        const confirmedGained = serverPointsGained > 0 ? serverPointsGained : Math.max(3, counterDelta)
                         this.bot.logger.info(
                             isMobile,
                             'SEARCH-BING',
-                            `[DAPI-SYNC] Server search counters confirmed in sync: ${isMobile ? mobileProgress : desktopProgress} | remaining=${newMissingPointsTotal}`,
+                            `[DAPI-SYNC] Server sync confirmed: +${confirmedGained} points credited on server | currentPoints=${this.bot.userData.currentPoints} | remaining=${newMissingPointsTotal}`,
                             'cyan'
                         )
                         stagnantLoop = 0
+                        lastSyncedProgress = currentServerProgress
+                        lastSyncedPoints = currentServerBalance
+                        gainedPoints = Math.max(0, counterDelta)
                     } else {
+                        // Hanya picu counter No points gained jika saldo riil server tidak bertambah sama sekali dibanding hasil DAPI sync sebelumnya
                         stagnantLoop++
                         this.bot.logger.info(
                             isMobile,
@@ -313,6 +355,10 @@ export class Search extends Workers {
                                 this.bot.userData.currentPoints = verifyRes.newBalance
                                 this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + actualGained
                                 totalGainedPoints += actualGained
+                                lastSyncedPoints = verifyRes.newBalance
+                                lastSyncedProgress = isMobile
+                                    ? (searchCounters.mobileSearch?.[0]?.pointProgress ?? 0)
+                                    : ((searchCounters.pcSearch?.[0]?.pointProgress ?? 0) + (searchCounters.pcSearch?.[1]?.pointProgress ?? 0))
                                 stagnantLoop = 0
                             } else {
                                 this.bot.logger.warn(
@@ -330,45 +376,6 @@ export class Search extends Workers {
                             }
                         }
                     }
-                } else {
-                    stagnantLoop = 0
-                    if (counterDelta > 3) {
-                        this.bot.logger.warn(
-                            isMobile,
-                            'SEARCH-BING',
-                            `[COUNTER-ANOMALY] Terdeteksi lonjakan counter delta ${counterDelta} > 3! Mengunci penambahan poin sebesar baseline (+3 poin).`
-                        )
-                        gainedPoints = 3
-                        const decrementedRemaining = Math.max(0, missingPointsTotal - 3)
-                        newMissingPointsTotal = decrementedRemaining
-                        if (!isMobile && this.bot.browser.func.cachedCounters?.pcSearch?.[0]) {
-                            const max = this.bot.browser.func.cachedCounters.pcSearch[0].pointProgressMax
-                            this.bot.browser.func.cachedCounters.pcSearch[0].pointProgress = Math.max(0, max - decrementedRemaining)
-                        }
-                        if (!isMobile && searchCounters?.pcSearch?.[0]) {
-                            const max = searchCounters.pcSearch[0].pointProgressMax
-                            searchCounters.pcSearch[0].pointProgress = Math.max(0, max - decrementedRemaining)
-                        }
-                    } else {
-                        gainedPoints = Math.max(0, counterDelta)
-                    }
-
-                    void Database.getInstance().recordActivity(
-                        currentEmail,
-                        isMobile ? 'SEARCH_MOBILE' : 'SEARCH_DESKTOP',
-                        gainedPoints
-                    )
-
-                    this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
-                    this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
-                    totalGainedPoints += gainedPoints
-
-                    this.bot.logger.info(
-                        isMobile,
-                        'SEARCH-BING',
-                        `gainedPoints=${gainedPoints} points | query="${query}" | remaining=${newMissingPointsTotal}`,
-                        'green'
-                    )
                 }
 
                 missingPointsTotal = newMissingPointsTotal
@@ -424,6 +431,10 @@ export class Search extends Workers {
 
                 let stagnantLoop = 0
                 const stagnantLoopMax = 3
+                let lastExtraSyncedPoints = Number(this.bot.userData.currentPoints ?? 0)
+                let lastExtraSyncedProgress = isMobile
+                    ? (searchCounters.mobileSearch?.[0]?.pointProgress ?? 0)
+                    : ((searchCounters.pcSearch?.[0]?.pointProgress ?? 0) + (searchCounters.pcSearch?.[1]?.pointProgress ?? 0))
 
                 while (missingPointsTotal > 0 && !isCooldownDetected) {
                     const extra = await queryCore.queryManager({
@@ -483,6 +494,7 @@ export class Search extends Workers {
 
                         const counterDelta = missingPointsTotal - newMissingPointsTotal
                         let gainedPoints = 0
+                        const isPeriodicSync = (searchCount % 4 === 0)
 
                         if (counterDelta < 0) {
                             // Kenaikan kuota maksimal di tengah jalan (Level Up / Quota Leap: Level 1 -> Level 2)
@@ -505,19 +517,47 @@ export class Search extends Workers {
                                 `gainedPoints=${gainedPoints} points | query="${query}" | remaining=${newMissingPointsTotal}`,
                                 'green'
                             )
-                        } else if (counterDelta === 0) {
-                            const isPeriodicSync = (searchCount % 4 === 0)
-                            if (isPeriodicSync) {
+                        } else if (!isPeriodicSync) {
+                            stagnantLoop = 0
+                            gainedPoints = 3
+                            const decrementedRemaining = Math.max(0, missingPointsTotal - 3)
+                            newMissingPointsTotal = decrementedRemaining
+
+                            this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
+                            this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
+                            totalGainedPoints += gainedPoints
+
+                            this.bot.logger.info(
+                                isMobile,
+                                'SEARCH-BING-EXTRA',
+                                `[SEARCH-OPTIMISTIC] Extra query submitted (+3 est) | query="${query}" | estRemaining=${newMissingPointsTotal} (Server sync at query #${Math.ceil(searchCount / 4) * 4})`,
+                                'green'
+                            )
+                        } else {
+                            const currentServerProgress = isMobile
+                                ? (searchCounters.mobileSearch?.[0]?.pointProgress ?? 0)
+                                : ((searchCounters.pcSearch?.[0]?.pointProgress ?? 0) + (searchCounters.pcSearch?.[1]?.pointProgress ?? 0))
+                            const currentServerBalance = Number(this.bot.userData.currentPoints ?? 0)
+
+                            const syncProgressDelta = currentServerProgress - lastExtraSyncedProgress
+                            const syncBalanceDelta = currentServerBalance - lastExtraSyncedPoints
+                            const serverPointsGained = Math.max(syncProgressDelta, syncBalanceDelta)
+
+                            if (serverPointsGained > 0 || counterDelta > 0) {
                                 const currentProg = isMobile
                                     ? (searchCounters.mobileSearch?.[0] ? `${searchCounters.mobileSearch[0].pointProgress}/${searchCounters.mobileSearch[0].pointProgressMax}` : 'mobile')
                                     : (searchCounters.pcSearch?.[0] ? `${searchCounters.pcSearch[0].pointProgress}/${searchCounters.pcSearch[0].pointProgressMax}` : 'desktop')
+                                const confirmedGained = serverPointsGained > 0 ? serverPointsGained : Math.max(3, counterDelta)
                                 this.bot.logger.info(
                                     isMobile,
                                     'SEARCH-BING-EXTRA',
-                                    `[DAPI-SYNC] Server search counters confirmed in sync: ${currentProg} | remaining=${newMissingPointsTotal}`,
+                                    `[DAPI-SYNC] Server search counters confirmed in sync: ${currentProg} (+${confirmedGained} pts) | remaining=${newMissingPointsTotal}`,
                                     'cyan'
                                 )
                                 stagnantLoop = 0
+                                lastExtraSyncedProgress = currentServerProgress
+                                lastExtraSyncedPoints = currentServerBalance
+                                gainedPoints = Math.max(0, counterDelta)
                             } else {
                                 stagnantLoop++
                                 this.bot.logger.info(
@@ -544,6 +584,10 @@ export class Search extends Workers {
                                         this.bot.userData.currentPoints = verifyRes.newBalance
                                         this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + actualGained
                                         totalGainedPoints += actualGained
+                                        lastExtraSyncedPoints = verifyRes.newBalance
+                                        lastExtraSyncedProgress = isMobile
+                                            ? (searchCounters.mobileSearch?.[0]?.pointProgress ?? 0)
+                                            : ((searchCounters.pcSearch?.[0]?.pointProgress ?? 0) + (searchCounters.pcSearch?.[1]?.pointProgress ?? 0))
                                         stagnantLoop = 0
                                     } else {
                                         this.bot.logger.warn(
@@ -562,39 +606,6 @@ export class Search extends Workers {
                                     }
                                 }
                             }
-                        } else {
-                            stagnantLoop = 0
-                            if (counterDelta > 3) {
-                                this.bot.logger.warn(
-                                    isMobile,
-                                    'SEARCH-BING-EXTRA',
-                                    `[COUNTER-ANOMALY] Terdeteksi lonjakan counter delta ${counterDelta} > 3! Mengunci penambahan poin sebesar baseline (+3 poin).`
-                                )
-                                gainedPoints = 3
-                                const decrementedRemaining = Math.max(0, missingPointsTotal - 3)
-                                newMissingPointsTotal = decrementedRemaining
-                                if (!isMobile && this.bot.browser.func.cachedCounters?.pcSearch?.[0]) {
-                                    const max = this.bot.browser.func.cachedCounters.pcSearch[0].pointProgressMax
-                                    this.bot.browser.func.cachedCounters.pcSearch[0].pointProgress = Math.max(0, max - decrementedRemaining)
-                                }
-                                if (!isMobile && searchCounters?.pcSearch?.[0]) {
-                                    const max = searchCounters.pcSearch[0].pointProgressMax
-                                    searchCounters.pcSearch[0].pointProgress = Math.max(0, max - decrementedRemaining)
-                                }
-                            } else {
-                                gainedPoints = Math.max(0, counterDelta)
-                            }
-
-                            this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
-                            this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
-                            totalGainedPoints += gainedPoints
-
-                            this.bot.logger.info(
-                                isMobile,
-                                'SEARCH-BING-EXTRA',
-                                `gainedPoints=${gainedPoints} points | query="${query}" | remaining=${newMissingPointsTotal}`,
-                                'green'
-                            )
                         }
 
                         missingPointsTotal = newMissingPointsTotal

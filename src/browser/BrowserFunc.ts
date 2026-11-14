@@ -157,12 +157,37 @@ export default class BrowserFunc {
                                 signal: controller.signal
                             }))
                             const json = await res.json()
-                            return json?.dashboard || (window as any).dashboard || null
-                        } catch {
-                            return (window as any).dashboard || null
-                        } finally {
+                            if (json?.dashboard && json.dashboard.userStatus) {
+                                return json.dashboard
+                            }
+                            if ((window as any).dashboard && (window as any).dashboard.userStatus) {
+                                return (window as any).dashboard
+                            }
+                        } catch {} finally {
                             if (timeoutId) clearTimeout(timeoutId)
                         }
+
+                        // Modern DOM State Extraction: Cek __NEXT_DATA__ atau React Hydration di rewards.bing.com/earn
+                        try {
+                            const nextScript = document.getElementById('__NEXT_DATA__') || document.querySelector('script[id="__NEXT_DATA__"]')
+                            if (nextScript?.textContent) {
+                                const nextJson = JSON.parse(nextScript.textContent)
+                                const pageProps = nextJson?.props?.pageProps
+                                if (pageProps?.dashboard && pageProps.dashboard.userStatus) return pageProps.dashboard
+                                if (pageProps?.userStatus) return pageProps
+                                if (pageProps?.state?.dashboard?.userStatus) return pageProps.state.dashboard
+                            }
+                        } catch {}
+
+                        const win = window as any
+                        if (win.__NEXT_DATA__?.props?.pageProps?.dashboard?.userStatus) {
+                            return win.__NEXT_DATA__.props.pageProps.dashboard
+                        }
+                        if (win.__INITIAL_STATE__?.dashboard?.userStatus) {
+                            return win.__INITIAL_STATE__.dashboard
+                        }
+
+                        return (window as any).dashboard || null
                     }).catch(() => null)
 
                     if (inPageData && inPageData.userStatus) {
@@ -251,6 +276,19 @@ export default class BrowserFunc {
                         if (parsed?.userStatus) {
                             return parsed
                         }
+                    }
+
+                    // Modern Next.js DOM Parser: Ekstraksi <script id="__NEXT_DATA__" type="application/json">
+                    const nextMatch = response.data.match(/<script\s+id="__NEXT_DATA__"\s+type="application\/json">([\s\S]*?)<\/script>/)
+                    if (nextMatch?.[1]) {
+                        try {
+                            const nextData = JSON.parse(nextMatch[1])
+                            const pageProps = nextData?.props?.pageProps
+                            const modernDash = pageProps?.dashboard?.userStatus ? pageProps.dashboard : (pageProps?.userStatus ? pageProps : null)
+                            if (modernDash) {
+                                return modernDash as DashboardData
+                            }
+                        } catch {}
                     }
                 } catch {}
             }

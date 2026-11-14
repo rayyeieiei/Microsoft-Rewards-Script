@@ -611,7 +611,8 @@ export class Workers {
 
         if (uniqueDailySet.length === 0) {
             const currentGeo = (this.bot.userData.geoLocale || 'auto').toUpperCase()
-            if (currentGeo === 'ID') {
+            const activeIpCountry = ((this.bot as any).currentActiveIpCountry || '').toUpperCase()
+            if (currentGeo === 'ID' || activeIpCountry === 'ID') {
                 this.bot.logger.info(
                     this.bot.isMobile,
                     'DAILY-SET',

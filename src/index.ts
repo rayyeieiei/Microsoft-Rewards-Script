@@ -2513,25 +2513,57 @@ export class MicrosoftRewardsBot {
                     this.logger.warn(
                         'main',
                         'GET-DASHBOARD-DATA',
-                        `Gagal mengambil dashboard data via browser (${dashErr instanceof Error ? dashErr.message : String(dashErr)}), beralih ke fallback DAPI appData...`
+                        `Gagal mengambil dashboard data via browser (${dashErr instanceof Error ? dashErr.message : String(dashErr)}), mencoba parser modern DOM (__NEXT_DATA__)...`
                     )
-                    const fallbackData = appData ? this.browser.func.mapAppDataToDashboard(appData) : null
-                    if (fallbackData) {
-                        data = fallbackData
-                    } else {
-                        const availPts = appData?.response?.balance ?? this.userData.initialPoints ?? 0
-                        data = {
-                            userStatus: {
-                                availablePoints: availPts,
-                                counters: {
-                                    pcSearch: [{ pointProgress: 0, pointProgressMax: 90 }],
-                                    mobileSearch: [{ pointProgress: 0, pointProgressMax: 60 }]
+                    // Ekstraksi state JSON dari DOM modern (__NEXT_DATA__ di rewards.bing.com/earn)
+                    let modernDomData: DashboardData | null = null
+                    const targetPage = this.mainMobilePage || this.mainDesktopPage
+                    if (targetPage && !targetPage.isClosed()) {
+                        modernDomData = await targetPage.evaluate(() => {
+                            try {
+                                const nextEl = document.getElementById('__NEXT_DATA__') || document.querySelector('script[id="__NEXT_DATA__"]')
+                                if (nextEl?.textContent) {
+                                    const parsed = JSON.parse(nextEl.textContent)
+                                    const props = parsed?.props?.pageProps
+                                    if (props?.dashboard?.userStatus) return props.dashboard
+                                    if (props?.userStatus) return props
+                                    if (props?.state?.dashboard?.userStatus) return props.state.dashboard
                                 }
-                            },
-                            dailySetPromotions: {},
-                            morePromotions: [],
-                            punchCards: []
-                        } as unknown as DashboardData
+                                const win = window as any
+                                if (win.__NEXT_DATA__?.props?.pageProps?.dashboard?.userStatus) {
+                                    return win.__NEXT_DATA__.props.pageProps.dashboard
+                                }
+                            } catch {}
+                            return null
+                        }).catch(() => null)
+                    }
+
+                    if (modernDomData && modernDomData.userStatus) {
+                        data = modernDomData
+                    } else {
+                        this.logger.warn(
+                            'main',
+                            'GET-DASHBOARD-DATA',
+                            `Parser modern DOM tidak menemukan data, beralih ke fallback DAPI appData...`
+                        )
+                        const fallbackData = appData ? this.browser.func.mapAppDataToDashboard(appData) : null
+                        if (fallbackData) {
+                            data = fallbackData
+                        } else {
+                            const availPts = appData?.response?.balance ?? this.userData.initialPoints ?? 0
+                            data = {
+                                userStatus: {
+                                    availablePoints: availPts,
+                                    counters: {
+                                        pcSearch: [{ pointProgress: 0, pointProgressMax: 90 }],
+                                        mobileSearch: [{ pointProgress: 0, pointProgressMax: 60 }]
+                                    }
+                                },
+                                dailySetPromotions: {},
+                                morePromotions: [],
+                                punchCards: []
+                            } as unknown as DashboardData
+                        }
                     }
                 }
 
