@@ -2365,20 +2365,72 @@ export class MicrosoftRewardsBot {
                     }
                 }
 
-                // Immediate Execution Pipeline: begitu token mobile diterima, langsung panggil doDailyCheckIn() dan doReadToEarn()
+                // Immediate Execution Pipeline: begitu token mobile diterima, langsung sinkronisasi profil resmi & pasar akun sebelum menjalankan Daily Check-In & Read to Earn
                 let immediateMobileExecuted = false
+                let appData: AppDashboardData | null = null
                 if (this.accessToken) {
                     this.logger.info(
                         'main',
                         'IMMEDIATE-PIPELINE',
-                        'Mobile access token received. Triggering immediate Daily Check-In & Read to Earn...'
+                        'Mobile access token received. Resolving account market & triggering immediate Daily Check-In & Read to Earn...'
                     )
 
-                    // Pastikan saldo awal akun diambil terlebih dahulu secara valid sebelum menjalankan aktivitas:
-                    if (this.currentPoints <= 0) {
-                        let startingPoints = 0
+                    // 1. Ambil data profil & katalog promosi mobile resmi dari DAPI (/dapi/me)
+                    try {
+                        appData = await this.browser.func.getAppDashboardData().catch(() => null)
+                    } catch {}
 
-                        // 1. Ambil saldo akun via DAPI user endpoint (GET /dapi/me/user)
+                    // 2. Resolusi negara & pasar akun secara presisi dari DAPI profile
+                    const detectedCountry = (appData?.response?.profile?.attributes?.country || 'ID').toUpperCase()
+                    if (account.geoLocale === 'auto') {
+                        this.userData.geoLocale = detectedCountry
+                    } else if (account.geoLocale) {
+                        this.userData.geoLocale = account.geoLocale.toUpperCase()
+                    }
+                    this.logger.info(
+                        'main',
+                        'IMMEDIATE-PIPELINE',
+                        `[GEO-RESOLVED] Pasar akun terkonfirmasi: ${this.userData.geoLocale} (profile=${detectedCountry}) | ${accountEmail}`
+                    )
+
+                    // 3. Deteksi penawaran Read to Earn resmi dari katalog promosi akun
+                    let readOfferId: string | undefined = undefined
+                    for (const item of (appData?.response?.promotions || [])) {
+                        const attrs = item.attributes || {}
+                        const offerId = (attrs.offerid ?? '').toLowerCase()
+                        if (
+                            attrs.type === 'msnreadearn' ||
+                            offerId.includes('readarticle') ||
+                            (item.name ?? '').toLowerCase().includes('readarticle')
+                        ) {
+                            if (attrs.offerid) {
+                                readOfferId = attrs.offerid
+                                ;(this as any).detectedReadArticleOfferId = attrs.offerid
+                                break
+                            }
+                        }
+                    }
+                    if (readOfferId) {
+                        this.logger.info(
+                            'main',
+                            'IMMEDIATE-PIPELINE',
+                            `[READ-TO-EARN] Penawaran aktif terdeteksi di server: "${readOfferId}"`
+                        )
+                    }
+
+                    // 4. Inisialisasi saldo awal dari server resmi DAPI
+                    const startingPoints = Number(appData?.response?.balance ?? (appData?.response as any)?.user?.balance ?? 0)
+                    if (startingPoints > 0) {
+                        this.initialPoints = startingPoints
+                        this.currentPoints = startingPoints
+                        this.updateDashboardAccount(accountEmail, { initialPoints: startingPoints })
+                        this.logger.info(
+                            'main',
+                            'IMMEDIATE-PIPELINE',
+                            `[IMMEDIATE-PIPELINE] Saldo awal berhasil diinisialisasi via DAPI: ${startingPoints} Pts | ${accountEmail}`
+                        )
+                    } else if (this.currentPoints <= 0) {
+                        // Fallback jika saldo dari appData belum terbaca
                         try {
                             const userRes = await this.axios.request({
                                 url: 'https://prod.rewardsplatform.microsoft.com/dapi/me/user',
@@ -2386,47 +2438,26 @@ export class MicrosoftRewardsBot {
                                 headers: {
                                     Authorization: `Bearer ${this.accessToken}`,
                                     'User-Agent': UserAgentManager.DEFAULT_MOBILE_UA,
-                                    'X-Rewards-Country': this.userData.geoLocale || 'US',
+                                    'x-rewards-appid': 'SAAndroid/32.5.431027001',
+                                    'X-Rewards-Country': this.userData.geoLocale || 'ID',
                                     'X-Rewards-Language': 'en',
                                     'X-Rewards-ismobile': 'true'
                                 },
                                 validateStatus: () => true,
                                 timeout: 7000
                             })
-                            startingPoints = Number(userRes?.data?.response?.balance ?? userRes?.data?.balance ?? 0)
+                            const fallbackBal = Number(userRes?.data?.response?.balance ?? userRes?.data?.balance ?? 0)
+                            if (fallbackBal > 0) {
+                                this.initialPoints = fallbackBal
+                                this.currentPoints = fallbackBal
+                                this.updateDashboardAccount(accountEmail, { initialPoints: fallbackBal })
+                                this.logger.info(
+                                    'main',
+                                    'IMMEDIATE-PIPELINE',
+                                    `[IMMEDIATE-PIPELINE] Saldo awal berhasil diinisialisasi via /dapi/me/user: ${fallbackBal} Pts | ${accountEmail}`
+                                )
+                            }
                         } catch {}
-
-                        // 2. Fallback: DAPI status profil / getAppDashboardData
-                        if (startingPoints <= 0) {
-                            try {
-                                const appData = await this.browser.func.getAppDashboardData().catch(() => null)
-                                startingPoints = Number(appData?.response?.balance ?? 0)
-                            } catch {}
-                        }
-
-                        // 3. Fallback: Tunggu dashboard termuat jika DAPI belum menghasilkan saldo
-                        if (startingPoints <= 0 && this.mainMobilePage && !this.mainMobilePage.isClosed()) {
-                            try {
-                                const currentUrl = this.mainMobilePage.url()
-                                if (!currentUrl.includes('rewards.bing.com')) {
-                                    await this.mainMobilePage
-                                        .goto(this.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 15000 })
-                                        .catch(() => {})
-                                }
-                                startingPoints = await this.browser.func.getCurrentPoints(this.mainMobilePage).catch(() => 0)
-                            } catch {}
-                        }
-
-                        if (startingPoints > 0) {
-                            this.initialPoints = startingPoints
-                            this.currentPoints = startingPoints
-                            this.updateDashboardAccount(accountEmail, { initialPoints: startingPoints })
-                            this.logger.info(
-                                'main',
-                                'IMMEDIATE-PIPELINE',
-                                `[IMMEDIATE-PIPELINE] Saldo awal berhasil diinisialisasi via DAPI/Dashboard: ${startingPoints} Pts | ${accountEmail}`
-                            )
-                        }
                     }
                     if (this.config.workers.doDailyCheckIn) {
                         try {
@@ -2489,18 +2520,19 @@ export class MicrosoftRewardsBot {
                 this.cookies.mobile = await initialContext.cookies()
                 this.fingerprint = mobileSession.fingerprint
 
-                let appData: AppDashboardData | null = null
-                try {
-                    appData = await this.browser.func.getAppDashboardData()
-                } catch (error) {
-                    if (error instanceof AccountSuspendedError || (error as any)?.name === 'AccountSuspendedError') {
-                        throw error
+                if (!appData) {
+                    try {
+                        appData = await this.browser.func.getAppDashboardData()
+                    } catch (error) {
+                        if (error instanceof AccountSuspendedError || (error as any)?.name === 'AccountSuspendedError') {
+                            throw error
+                        }
                     }
                 }
 
-                const detectedCountry = (appData?.response?.profile?.attributes?.country || 'ID').toUpperCase()
+                const finalDetectedCountry = (appData?.response?.profile?.attributes?.country || 'ID').toUpperCase()
                 this.userData.geoLocale =
-                    account.geoLocale === 'auto' ? detectedCountry : account.geoLocale.toLowerCase()
+                    account.geoLocale === 'auto' ? finalDetectedCountry : account.geoLocale.toLowerCase()
 
                 if (this.mainMobilePage) {
                     await ensureOnRewardsDashboard(this.mainMobilePage)

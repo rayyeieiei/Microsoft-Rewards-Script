@@ -37,11 +37,11 @@ export class ReadToEarn extends Workers {
 
                     for (const section of data.sections || []) {
                         for (const card of section.cards || []) {
-                            if (card.id && typeof card.id === 'string') {
+                            if (card.id && typeof card.id === 'string' && !card.id.startsWith('CanonicalName')) {
                                 articleIds.push(card.id)
                             }
                             for (const subCard of card.subCards || []) {
-                                if (subCard.id && typeof subCard.id === 'string') {
+                                if (subCard.id && typeof subCard.id === 'string' && !subCard.id.startsWith('CanonicalName')) {
                                     articleIds.push(subCard.id)
                                 }
                             }
@@ -114,6 +114,7 @@ export class ReadToEarn extends Workers {
                             headers: {
                                 Authorization: `Bearer ${this.bot.accessToken}`,
                                 'User-Agent': this.getMobileUserAgent(),
+                                'x-rewards-appid': 'SAAndroid/32.5.431027001',
                                 'Content-Type': 'application/json',
                                 'X-Rewards-Country': geoCountry,
                                 'X-Rewards-Language': 'en',
@@ -123,7 +124,7 @@ export class ReadToEarn extends Workers {
                             validateStatus: () => true
                         }).catch(() => null)
 
-                        const probeBal = Number(probeRes?.data?.response?.user?.balance ?? 0)
+                        const probeBal = Number(probeRes?.data?.response?.balance ?? probeRes?.data?.response?.user?.balance ?? 0)
                         if (probeBal > startBalance) {
                             const gained = probeBal - startBalance
                             this.bot.logger.info(
@@ -172,6 +173,8 @@ export class ReadToEarn extends Workers {
             let totalGained = 0
             let articlesRead = 0
             let attemptIndex = 0
+            let consecutiveNoPoints = 0
+            let currentBalance = Number(this.bot.userData.currentPoints ?? startBalance)
             const maxAttempts = 30
 
             while (articlesRead < articleCount && attemptIndex < maxAttempts) {
@@ -191,6 +194,7 @@ export class ReadToEarn extends Workers {
                     headers: {
                         Authorization: `Bearer ${this.bot.accessToken}`,
                         'User-Agent': this.getMobileUserAgent(),
+                        'x-rewards-appid': 'SAAndroid/32.5.431027001',
                         'Content-Type': 'application/json',
                         'X-Rewards-Country': geoCountry,
                         'X-Rewards-Language': 'en',
@@ -246,33 +250,66 @@ export class ReadToEarn extends Workers {
                     continue
                 }
 
-                articlesRead++
-                const gainedPoints = 3
-                this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
-                this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
-                totalGained += gainedPoints
+                const resData = response?.data?.response
+                const serverBalance = Number(resData?.balance ?? resData?.user?.balance ?? 0)
+                const isDuplicate = Boolean(resData?.isDuplicate)
 
-                void Database.getInstance().recordActivity(
-                    this.bot.activeAccount?.email || '',
-                    'READ_TO_EARN',
-                    gainedPoints
-                )
+                if (serverBalance > currentBalance) {
+                    const gainedPoints = serverBalance - currentBalance
+                    currentBalance = serverBalance
+                    this.bot.userData.currentPoints = serverBalance
+                    this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
+                    totalGained += gainedPoints
+                    articlesRead++
+                    consecutiveNoPoints = 0
 
-                this.bot.logger.info(
-                    this.bot.isMobile,
-                    'READ-TO-EARN',
-                    `Read article ${articlesRead}/${articleCount} | status=${response.status} | gainedPoints=+${gainedPoints} | newBalance=${this.bot.userData.currentPoints}`,
-                    'green'
-                )
+                    void Database.getInstance().recordActivity(
+                        this.bot.activeAccount?.email || '',
+                        'READ_TO_EARN',
+                        gainedPoints
+                    )
 
-                // Wait random delay between articles
-                if (articlesRead < articleCount) {
-                    this.bot.logger.debug(
+                    this.bot.logger.info(
                         this.bot.isMobile,
                         'READ-TO-EARN',
-                        `Waiting between articles | article=${articlesRead}/${articleCount} | delayRange=${delayMin}-${delayMax}`
+                        `Read article ${articlesRead}/${articleCount} | status=200 | gainedPoints=+${gainedPoints} | newBalance=${serverBalance}`,
+                        'green'
                     )
-                    await this.bot.utils.wait(this.bot.utils.randomDelay(delayMin, delayMax))
+
+                    // Wait random delay between articles
+                    if (articlesRead < articleCount) {
+                        this.bot.logger.debug(
+                            this.bot.isMobile,
+                            'READ-TO-EARN',
+                            `Waiting between articles | article=${articlesRead}/${articleCount} | delayRange=${delayMin}-${delayMax}`
+                        )
+                        await this.bot.utils.wait(this.bot.utils.randomDelay(delayMin, delayMax))
+                    }
+                } else {
+                    consecutiveNoPoints++
+                    if (isDuplicate) {
+                        this.bot.logger.info(
+                            this.bot.isMobile,
+                            'READ-TO-EARN',
+                            `[READ-TO-EARN-CAP] Server mendeteksi kuota Read to Earn sudah tercapai / artikel duplikat (balance=${currentBalance}). Menghentikan pembacaan.`,
+                            'yellow'
+                        )
+                        break
+                    } else {
+                        this.bot.logger.warn(
+                            this.bot.isMobile,
+                            'READ-TO-EARN',
+                            `[NO-POINTS] Server merespons HTTP ${response?.status} namun saldo server tidak bertambah (${currentBalance} -> ${serverBalance || currentBalance}). Artikel "${articleId}" tidak menghasilkan poin.`
+                        )
+                        if (consecutiveNoPoints >= 3) {
+                            this.bot.logger.warn(
+                                this.bot.isMobile,
+                                'READ-TO-EARN',
+                                `[BAIL-OUT] 3 artikel berturut-turut tidak menambah saldo di server. Menghentikan loop Read to Earn agar tidak memicu deteksi anomali.`
+                            )
+                            break
+                        }
+                    }
                 }
             }
 

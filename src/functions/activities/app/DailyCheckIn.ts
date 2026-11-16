@@ -171,30 +171,37 @@ export class DailyCheckIn extends Workers {
                         gained = expectedPoints > 0 ? expectedPoints : 10
                     }
                 } else {
-                    gained = expectedPoints > 0
-                        ? expectedPoints
-                        : (rawServerBalance > this.oldBalance ? (rawServerBalance - this.oldBalance) : 10)
+                    gained = rawServerBalance > this.oldBalance
+                        ? (rawServerBalance - this.oldBalance)
+                        : 0
                 }
 
-                const newBal = rawServerBalance > 0
-                    ? rawServerBalance
-                    : (Number(this.bot.userData.currentPoints ?? this.oldBalance) + gained)
+                if (gained > 0) {
+                    const newBal = rawServerBalance > 0 ? rawServerBalance : (this.oldBalance + gained)
+                    this.oldBalance = newBal
+                    this.bot.userData.currentPoints = newBal
+                    this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gained
 
-                this.bot.userData.currentPoints = newBal
-                this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gained
+                    void Database.getInstance().recordActivity(
+                        this.bot.activeAccount?.email || '',
+                        'DAILY_CHECK_IN',
+                        gained
+                    )
 
-                void Database.getInstance().recordActivity(
-                    this.bot.activeAccount?.email || '',
-                    'DAILY_CHECK_IN',
-                    gained
-                )
-
-                this.bot.logger.info(
-                    this.bot.isMobile,
-                    'DAILY-CHECK-IN',
-                    `Completed Daily Check-In | gainedPoints=+${gained} | oldBalance=${this.oldBalance} | newBalance=${newBal}`,
-                    'green'
-                )
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'DAILY-CHECK-IN',
+                        `Completed Daily Check-In | gainedPoints=+${gained} | oldBalance=${this.oldBalance - gained} | newBalance=${newBal}`,
+                        'green'
+                    )
+                } else {
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'DAILY-CHECK-IN',
+                        `[DAILY-CHECK-IN] Daily Check-In terkonfirmasi selesai di server (balance=${this.oldBalance}). Tidak ada penambahan poin baru (sudah diklaim hari ini).`,
+                        'green'
+                    )
+                }
             } else if (alreadyClaimed) {
                 this.bot.logger.info(
                     this.bot.isMobile,
@@ -242,6 +249,7 @@ export class DailyCheckIn extends Workers {
                 headers: {
                     Authorization: `Bearer ${this.bot.accessToken}`,
                     'User-Agent': UserAgentManager.DEFAULT_MOBILE_UA,
+                    'x-rewards-appid': 'SAAndroid/32.5.431027001',
                     'Content-Type': 'application/json',
                     'X-Rewards-Country': this.bot.userData.geoLocale,
                     'X-Rewards-Language': 'en',
