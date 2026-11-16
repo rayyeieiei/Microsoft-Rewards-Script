@@ -20,6 +20,7 @@ import {
 } from './activities/ActivitySemantics'
 import { isLocalSystemProtocol, resolvePunchCardExecutionUrl } from './activities/api/UrlProtocolGuard'
 export { isLocalSystemProtocol, resolvePunchCardExecutionUrl }
+import { performBoundedSafeScroll } from '../runtime/BrowserOperationGuard'
 
 export async function ensureOnRewardsDashboard(page: Page): Promise<void> {
     if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return
@@ -447,15 +448,59 @@ export class Workers {
             return true
         })
 
-        // 1. Jika API menemukan item Daily Set untuk hari ini dan semuanya sudah berstatus complete, Daily Set tuntas!
+        // 1. Jika API menemukan item Daily Set untuk hari ini dan semuanya sudah berstatus complete,
+        // pastikan tidak ada desinkronisasi dengan kartu aktif di Flyout Drawer (Streak vs Quest Discrepancy Guard)
         if (todayDailySetItems.length > 0 && activitiesUncompleted.length === 0) {
-            this.bot.logger.info(
-                this.bot.isMobile,
-                'DAILY-SET',
-                `Daily Set already completed for today! (${todayDailySetItems.length}/${todayDailySetItems.length} verified on server)`,
-                'green'
-            )
-            return
+            let hasUnfinishedFlyoutCards = false
+            if (page && !page.isClosed()) {
+                try {
+                    const drawerLocator = page
+                        .locator('[role="dialog"], aside, [class*="flyout"], [class*="drawer"], div:has(> button[aria-label*="Close"])')
+                        .filter({ hasText: /Daily Set Streak|Complete all 3 activities/i })
+                        .first()
+                    let isDrawerVisible = await drawerLocator.isVisible().catch(() => false)
+                    if (!isDrawerVisible) {
+                        const streakCard = page
+                            .locator('div, a, button, [role="button"]')
+                            .filter({ hasText: /Daily Set Streak/i })
+                            .first()
+                        if (await streakCard.isVisible().catch(() => false)) {
+                            await streakCard.click().catch(() => {})
+                            await this.bot.utils.wait(1000)
+                            isDrawerVisible = await drawerLocator.isVisible().catch(() => false)
+                        }
+                    }
+
+                    if (isDrawerVisible) {
+                        const plusCardsCount = await drawerLocator
+                            .locator('div, [role="button"]')
+                            .filter({ hasText: /\+\d+/ })
+                            .count()
+                            .catch(() => 0)
+                        if (plusCardsCount > 0) {
+                            hasUnfinishedFlyoutCards = true
+                        }
+                    }
+                } catch {}
+            }
+
+            if (!hasUnfinishedFlyoutCards) {
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'DAILY-SET',
+                    `Daily Set already completed for today! (${todayDailySetItems.length}/${todayDailySetItems.length} verified on server)`,
+                    'green'
+                )
+                return
+            } else {
+                this.bot.logger.warn(
+                    this.bot.isMobile,
+                    'DAILY-SET',
+                    '⚠️ [STREAK-DISCREPANCY] Status streak API tercatat selesai, namun kartu di Flyout Drawer masih memiliki poin aktif (+10). Membatalkan fast-bailout & mengeksekusi kartu!',
+                    'yellow'
+                )
+                activitiesUncompleted = todayDailySetItems
+            }
         }
 
         // 2. Fallback: HANYA jika dari API sama sekali tidak ditemukan item Daily Set hari ini, periksa Live DOM Dashboard
@@ -658,8 +703,18 @@ export class Workers {
                 await this.bot.utils.wait(1000)
             }
 
-            // 2. Selesaikan batch seperti flow lama
-            await this.solveActivities(activitiesUncompleted, page)
+            // 2. Coba selesaikan via Modern Flyout Drawer (prioritas pertama untuk modern UI rewards.bing.com/earn)
+            await this.solveModernDailySetFlyout(page, activitiesUncompleted, executionMap)
+
+            // Selesaikan kartu yang masih belum berstatus verified-complete melalui solver fallback
+            const remainingToSolve = activitiesUncompleted.filter(act => {
+                const key = act.offerId || act.title
+                return executionMap.get(key)?.status !== 'verified-complete'
+            })
+
+            if (remainingToSolve.length > 0) {
+                await this.solveActivities(remainingToSolve, page)
+            }
 
             // 3. Ambil SATU server snapshot setelah batch
             await this.bot.utils.wait(2000)
@@ -693,7 +748,9 @@ export class Workers {
                     domCheckmarkMap = await page.evaluate(() => {
                         const statusMap: Record<string, boolean> = {}
                         const dailyContainers = Array.from(
-                            document.querySelectorAll('#daily-sets, [data-bi-area*="DailySet"], section#dailyset, .daily-set, .daily-sets, [id*="daily-set"]')
+                            document.querySelectorAll(
+                                '#daily-sets, [data-bi-area*="DailySet"], section#dailyset, .daily-set, .daily-sets, [id*="daily-set"], [role="dialog"], aside, [class*="flyout"], [class*="drawer"]'
+                            )
                         )
                         const candidateCards: Element[] = []
                         if (dailyContainers.length > 0) {
@@ -718,6 +775,12 @@ export class Workers {
                             const rawTitle = (titleEl?.textContent || card.getAttribute('aria-label') || '').trim().toLowerCase()
                             const lines = (card.textContent || '').split('\n').map(l => l.trim().toLowerCase()).filter(Boolean)
                             const title = rawTitle || lines[0] || ''
+
+                            // Abaikan kartu ringkasan streak ("Daily Set Streak", "Bing Search Streak") agar centang streak tidak disalahartikan sebagai selesai misi
+                            if (title.includes('streak') || title === 'daily set streak' || title === 'bing search streak') {
+                                continue
+                            }
+
                             const hasCheck =
                                 card.querySelector(
                                     '.mee-icon-CheckMark, [data-icon-name="CheckMark"], .c-glyph.f-checkmark, .c-icon-check, .complete-check, svg[aria-label*="Complete"], [class*="check"]'
@@ -826,7 +889,15 @@ export class Workers {
                 )
                 await this.bot.utils.wait(2000)
                 await ensureOnRewardsDashboard(page)
-                await this.solveActivities(unverifiedItems, page)
+                // Coba auto-retry via Flyout Drawer terlebih dahulu
+                await this.solveModernDailySetFlyout(page, unverifiedItems, executionMap)
+                const stillUnverified = unverifiedItems.filter(act => {
+                    const key = act.offerId || act.title
+                    return executionMap.get(key)?.status !== 'verified-complete'
+                })
+                if (stillUnverified.length > 0) {
+                    await this.solveActivities(stillUnverified, page)
+                }
 
                 // Re-fetch snapshot setelah auto-retry
                 await this.bot.utils.wait(2000)
@@ -855,7 +926,9 @@ export class Workers {
                     retryDomCheckmarkMap = await page.evaluate(() => {
                         const statusMap: Record<string, boolean> = {}
                         const dailyContainers = Array.from(
-                            document.querySelectorAll('#daily-sets, [data-bi-area*="DailySet"], section#dailyset, .daily-set, .daily-sets, [id*="daily-set"]')
+                            document.querySelectorAll(
+                                '#daily-sets, [data-bi-area*="DailySet"], section#dailyset, .daily-set, .daily-sets, [id*="daily-set"], [role="dialog"], aside, [class*="flyout"], [class*="drawer"]'
+                            )
                         )
                         const candidateCards: Element[] = []
                         if (dailyContainers.length > 0) {
@@ -880,6 +953,12 @@ export class Workers {
                             const rawTitle = (titleEl?.textContent || card.getAttribute('aria-label') || '').trim().toLowerCase()
                             const lines = (card.textContent || '').split('\n').map(l => l.trim().toLowerCase()).filter(Boolean)
                             const title = rawTitle || lines[0] || ''
+
+                            // Abaikan kartu ringkasan streak agar tidak salah teridentifikasi
+                            if (title.includes('streak') || title === 'daily set streak' || title === 'bing search streak') {
+                                continue
+                            }
+
                             const hasCheck =
                                 card.querySelector(
                                     '.mee-icon-CheckMark, [data-icon-name="CheckMark"], .c-glyph.f-checkmark, .c-icon-check, .complete-check, svg[aria-label*="Complete"], [class*="check"]'
@@ -2586,6 +2665,405 @@ export class Workers {
             }
         }
         return false
+    }
+
+    /**
+     * Selesaikan kartu Daily Set langsung via Modern Flyout Drawer (rewards.bing.com/earn)
+     */
+    public async solveModernDailySetFlyout(
+        page: Page,
+        activities: BasePromotion[],
+        executionMap: Map<string, ActivityExecutionResult>
+    ): Promise<boolean> {
+        if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return false
+
+        try {
+            await ensureOnRewardsDashboard(page)
+            await this.bot.utils.wait(1500)
+
+            const drawerSelector =
+                '[role="dialog"], aside, div[class*="flyout"], div[class*="drawer"], div[class*="panel"], div:has(> button[aria-label*="Close"])'
+            let drawer = page
+                .locator(drawerSelector)
+                .filter({ hasText: /Daily Set Streak|Complete all 3 activities/i })
+                .first()
+            let isDrawerOpen = await drawer.isVisible().catch(() => false)
+
+            if (!isDrawerOpen) {
+                // Cari kartu "Daily Set Streak" di dashboard untuk membuka drawer
+                const streakCard = page
+                    .locator('div, a, button, [role="button"]')
+                    .filter({ hasText: /Daily Set Streak/i })
+                    .first()
+
+                if (await streakCard.isVisible().catch(() => false)) {
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'DAILY-SET',
+                        'Membuka Flyout Drawer "Daily Set Streak" langsung dari dashboard...',
+                        'cyan'
+                    )
+                    await streakCard.scrollIntoViewIfNeeded().catch(() => {})
+                    await streakCard.click().catch(async () => {
+                        await streakCard.evaluate((el: HTMLElement) => el.click()).catch(() => {})
+                    })
+                    await this.bot.utils.wait(2000)
+
+                    drawer = page
+                        .locator(drawerSelector)
+                        .filter({ hasText: /Daily Set Streak|Complete all 3 activities/i })
+                        .first()
+                    isDrawerOpen = await drawer.isVisible().catch(() => false)
+                }
+            }
+
+            if (!isDrawerOpen) {
+                this.bot.logger.debug(
+                    this.bot.isMobile,
+                    'DAILY-SET',
+                    'Flyout Drawer tidak terdeteksi di dashboard. Melanjutkan ke runner aktivitas standar.'
+                )
+                return false
+            }
+
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'DAILY-SET',
+                '🎯 Flyout Drawer "Daily Set Streak" aktif! Memproses kartu aktivitas...',
+                'green'
+            )
+
+            // Eksekusi tiap kartu di dalam drawer
+            for (const activity of activities) {
+                const key = activity.offerId || activity.title
+                if (executionMap.get(key)?.status === 'verified-complete') continue
+
+                const cleanTitle = (activity.title || '').replace(/[^\w\s]/g, ' ').trim()
+                const firstKeywords = cleanTitle.split(/\s+/).slice(0, 3).join(' ')
+                const firstWord = cleanTitle.split(/\s+/)[0] || ''
+
+                // Cari kartu di dalam drawer
+                const cardLocators = [
+                    drawer.locator(`div, [role="button"]`).filter({ hasText: activity.title }).first(),
+                    drawer.locator(`div, [role="button"]`).filter({ hasText: firstKeywords }).first(),
+                    drawer.locator(`div, [role="button"]`).filter({ hasText: firstWord }).first()
+                ]
+
+                let cardEl: any = null
+                for (const loc of cardLocators) {
+                    if (await loc.isVisible().catch(() => false)) {
+                        cardEl = loc
+                        break
+                    }
+                }
+
+                if (!cardEl) continue
+
+                // Periksa apakah kartu sudah memiliki centang selesai
+                const cardCheck = await cardEl
+                    .evaluate((node: HTMLElement) => {
+                        const txt = (node.innerText || '').toLowerCase()
+                        const hasCheck =
+                            node.querySelector(
+                                '.mee-icon-CheckMark, [data-icon-name="CheckMark"], svg[aria-label*="Complete"], [class*="check"]'
+                            ) !== null ||
+                            node.classList.contains('completed') ||
+                            node.classList.contains('complete') ||
+                            node.getAttribute('aria-checked') === 'true'
+                        const hasPoints = /\+\d+/.test(txt)
+                        const ptMatch = txt.match(/\+(\d+)/)
+                        return {
+                            isComplete: hasCheck || (!hasPoints && (txt.includes('complete') || txt.includes('selesai'))),
+                            points: ptMatch && ptMatch[1] ? parseInt(ptMatch[1], 10) : 10
+                        }
+                    })
+                    .catch(() => ({ isComplete: false, points: 10 }))
+
+                if (cardCheck.isComplete) {
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'DAILY-SET',
+                        `Kartu "${activity.title}" sudah tercentang selesai di Flyout Drawer.`,
+                        'green'
+                    )
+                    executionMap.set(key, {
+                        offerId: activity.offerId,
+                        title: activity.title,
+                        status: 'verified-complete',
+                        advertisedPoints: cardCheck.points,
+                        observedBalanceDelta: cardCheck.points,
+                        attributedPoints: cardCheck.points,
+                        serverCompleted: true,
+                        completionEvidence: 'dom-checkmark'
+                    })
+                    continue
+                }
+
+                // Cari tombol atau elemen klik di dalam kartu
+                const actionBtn = cardEl
+                    .locator('button, a, [role="button"], div:has-text("+"), svg')
+                    .first()
+                const clickTarget = (await actionBtn.isVisible().catch(() => false)) ? actionBtn : cardEl
+
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'DAILY-SET',
+                    `[FLYOUT-EXEC] Mengklik "${activity.title}" (+${cardCheck.points} pts) langsung dari Flyout Drawer...`
+                )
+
+                const balanceBefore = Number(this.bot.userData.currentPoints ?? 0)
+                const popupPromise = page.context().waitForEvent('page', { timeout: 8000 }).catch(() => null)
+
+                await clickTarget.scrollIntoViewIfNeeded().catch(() => {})
+                await clickTarget.click({ timeout: 5000 }).catch(async () => {
+                    await clickTarget.evaluate((el: HTMLElement) => el.click()).catch(() => {})
+                })
+
+                const popup = await popupPromise
+
+                if (popup) {
+                    this.bot.accountScope?.trackPage(popup)
+                    try {
+                        await popup.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {})
+                        await this.bot.utils.wait(2000)
+
+                        const isQuiz = Boolean((activity as any).isQuiz || this.isQuizPromotion(activity))
+                        const isPuzzle = Boolean(
+                            (activity as any).isPuzzle ||
+                            (activity.title || '').toLowerCase().includes('puzzle')
+                        )
+
+                        if (isQuiz) {
+                            this.bot.logger.info(
+                                this.bot.isMobile,
+                                'DAILY-SET',
+                                `[FLYOUT-QUIZ] Menjalankan solver kuis interaktif untuk "${activity.title}"...`
+                            )
+                            await this.solveInteractiveQuizOnTab(popup)
+                        } else if (isPuzzle) {
+                            this.bot.logger.info(
+                                this.bot.isMobile,
+                                'DAILY-SET',
+                                `[FLYOUT-PUZZLE] Menjalankan simulasi puzzle untuk "${activity.title}"...`
+                            )
+                            await this.solvePuzzleOnTab(popup)
+                        } else {
+                            this.bot.logger.info(
+                                this.bot.isMobile,
+                                'DAILY-SET',
+                                `[FLYOUT-VISIT] Menjalankan simulasi aman & dwell time untuk "${activity.title}"...`
+                            )
+                            await performBoundedSafeScroll(popup, {
+                                maxDurationMs: 2500,
+                                maxSteps: 3,
+                                stepDelayMs: 600,
+                                logger: this.bot.logger,
+                                isMobile: this.bot.isMobile
+                            }).catch(() => {})
+                            await this.bot.utils.wait(this.bot.utils.randomDelay(3000, 4500))
+                        }
+                    } finally {
+                        await popup.close().catch(() => {})
+                        this.bot.accountScope?.untrackPage(popup)
+                    }
+                } else {
+                    // Cek jika halaman utama berpindah URL
+                    const curUrl = page.url().toLowerCase()
+                    if (!curUrl.includes('rewards.bing.com/earn') && !curUrl.includes('rewards.bing.com/dashboard')) {
+                        const isQuiz = Boolean((activity as any).isQuiz || this.isQuizPromotion(activity))
+                        if (isQuiz) {
+                            await this.solveInteractiveQuizOnTab(page)
+                        } else {
+                            await performBoundedSafeScroll(page, {
+                                maxDurationMs: 2500,
+                                maxSteps: 3,
+                                stepDelayMs: 600,
+                                logger: this.bot.logger,
+                                isMobile: this.bot.isMobile
+                            }).catch(() => {})
+                            await this.bot.utils.wait(2500)
+                        }
+                        await ensureOnRewardsDashboard(page)
+                        await this.bot.utils.wait(1500)
+                        // Buka kembali flyout drawer jika tertutup setelah navigasi ulang
+                        drawer = page
+                            .locator(drawerSelector)
+                            .filter({ hasText: /Daily Set Streak|Complete all 3 activities/i })
+                            .first()
+                        if (!(await drawer.isVisible().catch(() => false))) {
+                            const streakCard = page
+                                .locator('div, a, button, [role="button"]')
+                                .filter({ hasText: /Daily Set Streak/i })
+                                .first()
+                            if (await streakCard.isVisible().catch(() => false)) {
+                                await streakCard.click().catch(() => {})
+                                await this.bot.utils.wait(1500)
+                            }
+                        }
+                    } else {
+                        await this.bot.utils.wait(2500)
+                    }
+                }
+
+                // Verifikasi centang selesai pasca-eksekusi di dalam drawer
+                await this.bot.utils.wait(2000)
+                const isNowDone = await cardEl
+                    .evaluate((node: HTMLElement) => {
+                        const hasCheck =
+                            node.querySelector(
+                                '.mee-icon-CheckMark, [data-icon-name="CheckMark"], svg[aria-label*="Complete"], [class*="check"]'
+                            ) !== null ||
+                            node.classList.contains('completed') ||
+                            node.classList.contains('complete') ||
+                            node.getAttribute('aria-checked') === 'true'
+                        const hasPoints = /\+\d+/.test(node.innerText || '')
+                        return hasCheck || !hasPoints
+                    })
+                    .catch(() => false)
+
+                const balanceAfter = await this.bot.browser.func.getCurrentPoints().catch(() => balanceBefore)
+                const delta = Math.max(0, balanceAfter - balanceBefore)
+
+                if (isNowDone || delta > 0) {
+                    const gained = delta > 0 ? delta : cardCheck.points
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'DAILY-SET',
+                        `[FLYOUT-SUCCESS] ✅ Kartu "${activity.title}" (+${gained} pts) berhasil diverifikasi selesai di Flyout! (evidence=${isNowDone ? 'dom-checkmark' : 'balance-delta'})`,
+                        'green'
+                    )
+                    this.bot.userData.currentPoints = balanceAfter
+                    executionMap.set(key, {
+                        offerId: activity.offerId,
+                        title: activity.title,
+                        status: 'verified-complete',
+                        advertisedPoints: cardCheck.points,
+                        observedBalanceDelta: gained,
+                        attributedPoints: gained,
+                        serverCompleted: true,
+                        completionEvidence: isNowDone ? 'dom-checkmark' : 'server-dashboard-state'
+                    })
+                } else {
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'DAILY-SET',
+                        `[FLYOUT-WARN] Kartu "${activity.title}" belum menampilkan centang pasca klik.`
+                    )
+                }
+
+                await this.bot.utils.wait(1500)
+            }
+
+            // Tutup drawer agar tidak menghalangi elemen dashboard lainnya
+            const closeBtn = drawer
+                .locator('button[aria-label*="Close"], button:has-text("✕"), button:has-text("Close"), .ms-Dialog-button--close, [class*="close"]')
+                .first()
+            if (await closeBtn.isVisible().catch(() => false)) {
+                await closeBtn.click().catch(() => {})
+                await this.bot.utils.wait(1000)
+            }
+
+            return true
+        } catch (err) {
+            this.bot.logger.warn(
+                this.bot.isMobile,
+                'DAILY-SET',
+                `Terjadi kendala pada solveModernDailySetFlyout: ${err instanceof Error ? err.message : String(err)}. Melanjutkan ke fallback standard.`
+            )
+            return false
+        }
+    }
+
+    public async solveInteractiveQuizOnTab(tab: Page): Promise<void> {
+        if (!tab || (typeof tab.isClosed === 'function' && tab.isClosed())) return
+
+        const startQuizSelector =
+            '#rqStartQuiz, #rqStartQuizToken, input[value*="Start"], button:has-text("Start"), div[role="button"]:has-text("Start"), button:has-text("Mulai"), div[role="button"]:has-text("Mulai"), .btOption, [data-bi-name="startQuiz"], [id*="StartQuiz"]'
+        const quizOptionsSelector =
+            '[id^="rqAnswerOption"], .btOption, [id^="btoption"], .rqOptions, .wk_Option, [role="radio"], button.optionBtn, .bt_poll, input[type="radio"], .rqOption, .rq_button, [data-option], .rq-option, [data-option-id], .quiz-option, .c-card__content [role="button"], div[class*="option"]:not([class*="disabled"]), button[class*="option"], div[role="radio"], button[role="radio"]'
+        const nextBtnSelector =
+            '#rqNextQuestion, input#rqNextQuestion, input[value*="Next"], button:has-text("Next"), button:has-text("Berikutnya"), [id*="nextQuestion"], [data-bi-name="nextQuestion"]'
+
+        try {
+            await tab.waitForSelector(`${startQuizSelector}, ${quizOptionsSelector}`, {
+                state: 'attached',
+                timeout: 5000
+            }).catch(() => {})
+        } catch {}
+
+        for (let q = 0; q < 10; q++) {
+            if (typeof tab.isClosed === 'function' && tab.isClosed()) break
+
+            const startBtn = tab.locator(startQuizSelector).first()
+            if (await startBtn.isVisible().catch(() => false)) {
+                this.bot.logger.info(this.bot.isMobile, 'DAILY-SET-QUIZ', 'Menekan tombol mulai kuis...')
+                await startBtn.click({ force: true }).catch(() => {})
+                await this.bot.utils.wait(2000)
+            }
+
+            const quizOptions = tab.locator(quizOptionsSelector)
+            const optCount = await quizOptions.count().catch(() => 0)
+
+            if (optCount > 0) {
+                let clicked = false
+                const randIdx = Math.floor(Math.random() * Math.min(optCount, 4))
+                const targetOpt = quizOptions.nth(randIdx)
+                if (await targetOpt.isVisible().catch(() => false)) {
+                    await targetOpt.scrollIntoViewIfNeeded().catch(() => {})
+                    await targetOpt.click({ force: true }).catch(() => {})
+                    clicked = true
+                } else {
+                    for (let i = 0; i < Math.min(optCount, 6); i++) {
+                        const opt = quizOptions.nth(i)
+                        if (await opt.isVisible().catch(() => false)) {
+                            await opt.scrollIntoViewIfNeeded().catch(() => {})
+                            await opt.click({ force: true }).catch(() => {})
+                            clicked = true
+                            break
+                        }
+                    }
+                }
+
+                if (clicked) {
+                    this.bot.logger.debug(
+                        this.bot.isMobile,
+                        'DAILY-SET-QUIZ',
+                        `[QUIZ-CLICK] Mengklik opsi jawaban (pertanyaan ${q + 1})`
+                    )
+                    await this.bot.utils.wait(1500)
+                }
+
+                const nextBtn = tab.locator(nextBtnSelector).first()
+                if (await nextBtn.isVisible().catch(() => false)) {
+                    await nextBtn.click({ force: true }).catch(() => {})
+                    await this.bot.utils.wait(1500)
+                }
+            } else {
+                const nextBtn = tab.locator(nextBtnSelector).first()
+                if (await nextBtn.isVisible().catch(() => false)) {
+                    await nextBtn.click({ force: true }).catch(() => {})
+                    await this.bot.utils.wait(1500)
+                    continue
+                }
+                break
+            }
+        }
+        await this.bot.utils.wait(1500)
+    }
+
+    public async solvePuzzleOnTab(tab: Page): Promise<void> {
+        if (!tab || (typeof tab.isClosed === 'function' && tab.isClosed())) return
+        const puzzleSelector =
+            '#puzzle, .puzzle, [id*="puzzle"], [class*="puzzle"], .slide-tile, .puzzle-piece, #overlay, canvas, .game-canvas, #gameContainer'
+        try {
+            await tab.waitForSelector(puzzleSelector, { state: 'attached', timeout: 3500 }).catch(() => {})
+            const puzzleEl = tab.locator(puzzleSelector).first()
+            if (await puzzleEl.isVisible().catch(() => false)) {
+                await puzzleEl.scrollIntoViewIfNeeded().catch(() => {})
+                await puzzleEl.click({ force: true }).catch(() => {})
+            }
+            await this.bot.utils.wait(this.bot.utils.randomDelay(3000, 4500))
+        } catch {}
     }
 }
 

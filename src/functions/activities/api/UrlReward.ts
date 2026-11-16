@@ -283,6 +283,22 @@ export class UrlReward extends Workers {
                             .catch(() => {})
                         await this.bot.utils.wait(1500)
                     }
+
+                    // Buka Flyout Drawer jika belum terbuka di halaman
+                    const drawerLocator = page
+                        .locator('[role="dialog"], aside, [class*="flyout"], [class*="drawer"], div:has(> button[aria-label*="Close"])')
+                        .filter({ hasText: /Daily Set Streak|Complete all 3 activities/i })
+                        .first()
+                    if (!(await drawerLocator.isVisible().catch(() => false))) {
+                        const streakCard = page
+                            .locator('div, a, button, [role="button"]')
+                            .filter({ hasText: /Daily Set Streak/i })
+                            .first()
+                        if (await streakCard.isVisible().catch(() => false)) {
+                            await streakCard.click().catch(() => {})
+                            await this.bot.utils.wait(1500)
+                        }
+                    }
                 } else {
                     if (!punchCard) {
                         if (!currentUrl.includes('/earn')) {
@@ -318,6 +334,18 @@ export class UrlReward extends Workers {
                 const firstWord = cleanTitle.split(/\s+/)[0] || ''
 
                 const selectors = [
+                    `[role="dialog"] [data-bi-id*="${promotion.offerId}"]`,
+                    `[role="dialog"] a[href*="${promotion.offerId}"]`,
+                    `[role="dialog"] a:has-text("${promotion.title}")`,
+                    `[role="dialog"] div[role="button"]:has-text("${promotion.title}")`,
+                    `[role="dialog"] button:has-text("${promotion.title}")`,
+                    `[role="dialog"] div:has-text("${promotion.title}")`,
+                    `aside [data-bi-id*="${promotion.offerId}"]`,
+                    `aside a[href*="${promotion.offerId}"]`,
+                    `aside a:has-text("${promotion.title}")`,
+                    `aside div[role="button"]:has-text("${promotion.title}")`,
+                    `aside button:has-text("${promotion.title}")`,
+                    `aside div:has-text("${promotion.title}")`,
                     `#daily-sets [data-bi-id*="${promotion.offerId}"]`,
                     `#daily-sets a[href*="${promotion.offerId}"]`,
                     `#daily-sets a:has-text("${promotion.title}")`,

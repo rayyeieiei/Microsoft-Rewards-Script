@@ -91,15 +91,60 @@ export class ReadToEarn extends Workers {
                 const appEarnable = await this.bot.browser.func.getAppEarnablePoints()
                 if (appEarnable) {
                     if (appEarnable.readToEarnCompleted === true) {
-                        this.bot.logger.info(
+                        this.bot.logger.debug(
                             this.bot.isMobile,
                             'READ-TO-EARN',
-                            'All Read to Earn points already completed for today (30/30 pts)! Skipping.',
-                            'green'
+                            'DAPI melaporkan Read to Earn selesai hari ini. Menjalankan 1x probe verifikasi ke server...'
                         )
-                        return
-                    }
-                    if (typeof appEarnable.readToEarn === 'number' && appEarnable.readToEarn > 0) {
+                        const testValidArticles = await this.fetchValidMsnArticles(3)
+                        const probeId = testValidArticles[0] || randomBytes(16).toString('hex')
+                        const probeOfferId = (this.bot as any).detectedReadArticleOfferId || 'ENUS_readarticle3_30points'
+                        const probeJsonData = {
+                            amount: 1,
+                            id: probeId,
+                            type: 101,
+                            attributes: {
+                                offerid: probeOfferId
+                            },
+                            country: geoCountry
+                        }
+                        const probeRes = await this.bot.axios.request({
+                            url: 'https://prod.rewardsplatform.microsoft.com/dapi/me/activities',
+                            method: 'POST',
+                            headers: {
+                                Authorization: `Bearer ${this.bot.accessToken}`,
+                                'User-Agent': this.getMobileUserAgent(),
+                                'Content-Type': 'application/json',
+                                'X-Rewards-Country': geoCountry,
+                                'X-Rewards-Language': 'en',
+                                'X-Rewards-ismobile': 'true'
+                            },
+                            data: JSON.stringify(probeJsonData),
+                            validateStatus: () => true
+                        }).catch(() => null)
+
+                        const probeBal = Number(probeRes?.data?.response?.user?.balance ?? 0)
+                        if (probeBal > startBalance) {
+                            const gained = probeBal - startBalance
+                            this.bot.logger.info(
+                                this.bot.isMobile,
+                                'READ-TO-EARN',
+                                `[PROBE-RECOVERY] Probe verifikasi berhasil mendapatkan +${gained} pts! DAPI false-positive teratasi, melanjutkan pembacaan artikel...`,
+                                'green'
+                            )
+                            this.bot.userData.currentPoints = probeBal
+                            this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gained
+                            remainingQuota = Math.max(0, 30 - gained)
+                        } else {
+                            this.bot.logger.info(
+                                this.bot.isMobile,
+                                'READ-TO-EARN',
+                                'All Read to Earn points already completed for today (30/30 pts)! Skipping.',
+                                'green'
+                            )
+                            return
+                        }
+                    } else if (typeof appEarnable.readToEarn === 'number' && appEarnable.readToEarn > 0) {
                         remainingQuota = appEarnable.readToEarn
                     } else {
                         remainingQuota = 30

@@ -600,9 +600,31 @@ export default class BrowserFunc {
                     readOfferFound = true
                     const pointMax = parseInt(attrs.pointmax ?? '30', 10) || 30
                     const pointProgress = parseInt(attrs.pointprogress ?? '0', 10) || 0
+
+                    const lastUpdated = attrs.last_updated ? new Date(attrs.last_updated) : null
+                    const now = new Date()
+                    const isUpdatedToday = lastUpdated && (
+                        (lastUpdated.getUTCFullYear() === now.getUTCFullYear() &&
+                         lastUpdated.getUTCMonth() === now.getUTCMonth() &&
+                         lastUpdated.getUTCDate() === now.getUTCDate()) ||
+                        (lastUpdated.getFullYear() === now.getFullYear() &&
+                         lastUpdated.getMonth() === now.getMonth() &&
+                         lastUpdated.getDate() === now.getDate())
+                    )
+
                     if (pointProgress >= pointMax) {
-                        readToEarn = 0
-                        readToEarnCompleted = true
+                        if (lastUpdated && !isUpdatedToday) {
+                            // Data lama kemarin yang belum di-reset oleh server DAPI
+                            readToEarn = pointMax
+                            readToEarnCompleted = false
+                        } else if (!lastUpdated) {
+                            // Tanpa timestamp: jangan berasumsi selesai, tetap berikan kuota
+                            readToEarn = pointMax
+                            readToEarnCompleted = false
+                        } else {
+                            readToEarn = 0
+                            readToEarnCompleted = true
+                        }
                     } else {
                         readToEarn = Math.max(0, pointMax - pointProgress)
                         readToEarnCompleted = false
