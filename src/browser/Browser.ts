@@ -339,7 +339,8 @@ class Browser {
                     url.includes('rewards.bing.com') ||
                     url.includes('activityid=') ||
                     url.includes('/rewards/log') ||
-                    url.includes('/fd/ls/lsp.aspx')
+                    url.includes('/fd/ls/lsp.aspx') ||
+                    url.includes('rewardsapp/reportactivity')
 
                 // 1. Blokir resource tipe berat non-telemetri (Video, Audio, Font, WebSocket)
                 if (type === 'media' || type === 'font' || type === 'websocket') {
@@ -347,7 +348,7 @@ class Browser {
                     return route.abort().catch(() => {})
                 }
 
-                // 2. Blokir gambar secara absolut (termasuk CDN mm.bing.net, bing.net/th, th.bing.com, sprite /sa/simg/, /rp/)
+                // 2. Blokir gambar secara absolut (termasuk CDN mm.bing.net, bing.net/th, th.bing.com, sprite /sa/simg/)
                 // Hanya izinkan tracking beacon 1x1 esensial (/fd/ls/lsp.aspx)
                 if (type === 'image') {
                     const isTelemetryBeacon = url.includes('/fd/ls/lsp.aspx') || url.includes('/fd/ls/')
@@ -361,13 +362,12 @@ class Browser {
                     return route.continue().catch(() => {})
                 }
 
-                // 3. Blokir domain CDN thumbnail, gambar terkompresi, domain iklan, dan tracker eksternal
+                // 3. Blokir domain CDN thumbnail, gambar terkompresi, domain iklan, dan tracker eksternal (JANGAN memblokir /rp/ karena memuat JS inti Bing)
                 if (
                     url.includes('bing.net/th') ||
                     url.includes('mm.bing.net') ||
                     url.includes('th.bing.com') ||
                     url.includes('bing.com/sa/simg') ||
-                    url.includes('bing.com/rp/') ||
                     url.includes('bing.com/th?id=') ||
                     url.includes('static-news.msn.com') ||
                     url.includes('assets.msn.com') ||

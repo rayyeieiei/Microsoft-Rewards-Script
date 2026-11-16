@@ -457,16 +457,16 @@ export default class BrowserFunc {
             }
         }
 
-        // Jangan menimpa pointProgress menjadi 0 jika di sesi sudah ada progres pencarian yang valid
-        if (counters && this.cachedCounters) {
+        // Jangan menimpa pointProgress menjadi 0 jika di sesi sudah ada progres pencarian yang valid dan counters yang baru adalah 0 akibat fallback kosong
+        if (!forceDapi && counters && this.cachedCounters) {
             if (!isMobile && counters.pcSearch?.[0] && this.cachedCounters.pcSearch?.[0]) {
                 const prevPcProgress = this.cachedCounters.pcSearch[0].pointProgress ?? 0
-                if ((counters.pcSearch[0].pointProgress ?? 0) < prevPcProgress) {
+                if ((counters.pcSearch[0].pointProgress ?? 0) === 0 && prevPcProgress > 0) {
                     counters.pcSearch[0].pointProgress = prevPcProgress
                 }
             } else if (isMobile && counters.mobileSearch?.[0] && this.cachedCounters.mobileSearch?.[0]) {
                 const prevMobileProgress = this.cachedCounters.mobileSearch[0].pointProgress ?? 0
-                if ((counters.mobileSearch[0].pointProgress ?? 0) < prevMobileProgress) {
+                if ((counters.mobileSearch[0].pointProgress ?? 0) === 0 && prevMobileProgress > 0) {
                     counters.mobileSearch[0].pointProgress = prevMobileProgress
                 }
             }

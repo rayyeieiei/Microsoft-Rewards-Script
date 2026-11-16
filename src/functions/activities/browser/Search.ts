@@ -103,11 +103,30 @@ export class Search extends Workers {
                 const resourceType = req.resourceType()
                 const url = req.url().toLowerCase()
 
+                // Whitelist telemetri penting & verifikasi poin: JANGAN PERNAH dibatalkan
+                const isRewardsTelemetry =
+                    url.includes('/fd/ls/') ||
+                    url.includes('/rewards/api/') ||
+                    url.includes('c.bing.com') ||
+                    url.includes('rewards.bing.com') ||
+                    url.includes('activityid=') ||
+                    url.includes('/rewards/log') ||
+                    url.includes('/fd/ls/lsp.aspx') ||
+                    url.includes('rewardsapp/reportactivity')
+
                 if (['image', 'media', 'font', 'websocket'].includes(resourceType)) {
+                    if (resourceType === 'image' && (url.includes('/fd/ls/lsp.aspx') || url.includes('/fd/ls/'))) {
+                        return route.continue().catch(() => {})
+                    }
                     this.bot.trackBlockedRequest()
                     return route.abort().catch(() => {})
                 }
 
+                if (isRewardsTelemetry) {
+                    return route.continue().catch(() => {})
+                }
+
+                // Blokir tracker & domain berat (JANGAN blokir bing.com/rp/ karena memuat JS inti Bing)
                 if (
                     url.includes('copilot.microsoft.com') ||
                     url.includes('sydney.bing.com') ||
@@ -119,8 +138,7 @@ export class Search extends Workers {
                     url.includes('bing.net/th') ||
                     url.includes('mm.bing.net') ||
                     url.includes('th.bing.com') ||
-                    url.includes('bing.com/sa/simg') ||
-                    url.includes('bing.com/rp/')
+                    url.includes('bing.com/sa/simg')
                 ) {
                     this.bot.trackBlockedRequest()
                     return route.abort().catch(() => {})
@@ -217,77 +235,46 @@ export class Search extends Workers {
                     : ((searchCounters.pcSearch?.[0]?.pointProgressMax ?? 0) + (searchCounters.pcSearch?.[1]?.pointProgressMax ?? 0))
 
                 const counterDelta = missingPointsTotal - newMissingPointsTotal
-                let gainedPoints = 0
-                const isPeriodicSync = (searchCount % 4 === 0)
+                const currentServerProgress = isMobile
+                    ? (searchCounters.mobileSearch?.[0]?.pointProgress ?? 0)
+                    : ((searchCounters.pcSearch?.[0]?.pointProgress ?? 0) + (searchCounters.pcSearch?.[1]?.pointProgress ?? 0))
+                const currentServerBalance = Number(this.bot.userData.currentPoints ?? 0)
 
-                if (newMax > currentMax && !isLevelUpHandled) {
-                    // Kenaikan kuota maksimal di tengah jalan (Level Up / Quota Leap: Level 1 -> Level 2)
-                    isLevelUpHandled = true
-                    const previousMax = currentMax
-                    currentMax = newMax
+                // Verifikasi riil saldo server dan header bing
+                const verifyRes = await this.verifyPointsWithServer(page, isMobile)
+                const confirmedServerBalance = verifyRes.newBalance ?? currentServerBalance
+                const serverBalanceDelta = confirmedServerBalance - lastSyncedPoints
+                const progressDelta = currentServerProgress - lastSyncedProgress
+                const serverPointsGained = Math.max(
+                    verifyRes.gained ?? 0,
+                    serverBalanceDelta > 0 ? serverBalanceDelta : 0,
+                    progressDelta > 0 ? progressDelta : 0,
+                    counterDelta > 0 ? counterDelta : 0
+                )
 
-                    // Kunci sisa poin agar TIDAK melompat melebihi sisa target sesi awal (Anti-Lonjakan Point)
-                    const sessionRemaining = Math.max(0, initialSessionTarget - totalGainedPoints)
-                    newMissingPointsTotal = Math.min(newMissingPointsTotal, sessionRemaining)
+                if (counterDelta < 0 || (newMax > currentMax && !isLevelUpHandled)) {
+                    if (newMax > currentMax && !isLevelUpHandled) {
+                        isLevelUpHandled = true
+                        const previousMax = currentMax
+                        currentMax = newMax
+                        const sessionRemaining = Math.max(0, initialSessionTarget - totalGainedPoints)
+                        newMissingPointsTotal = Math.min(newMissingPointsTotal, sessionRemaining)
 
-                    this.bot.logger.info(
-                        isMobile,
-                        'SEARCH-BING',
-                        `[LEVEL-UP] Search quota expanded mid-session (Level 1 -> Level 2 detected: max ${previousMax} -> ${newMax}). Locking session target to initial budget (${newMissingPointsTotal} pts remaining) to prevent abnormal activity surge.`,
-                        'green'
-                    )
-                    gainedPoints = 3
+                        this.bot.logger.info(
+                            isMobile,
+                            'SEARCH-BING',
+                            `[LEVEL-UP] Search quota expanded mid-session (Level 1 -> Level 2 detected: max ${previousMax} -> ${newMax}). Locking session target to initial budget (${newMissingPointsTotal} pts remaining) to prevent abnormal activity surge.`,
+                            'green'
+                        )
+                    }
+                }
+
+                let gainedPoints = Math.max(0, counterDelta)
+                if (serverPointsGained > 0) {
+                    gainedPoints = Math.min(3, Math.max(gainedPoints, serverPointsGained))
                     stagnantLoop = 0
 
-                    void Database.getInstance().recordActivity(
-                        currentEmail,
-                        isMobile ? 'SEARCH_MOBILE' : 'SEARCH_DESKTOP',
-                        gainedPoints
-                    )
-
-                    this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
-                    this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
-                    totalGainedPoints += gainedPoints
-
-                    this.bot.logger.info(
-                        isMobile,
-                        'SEARCH-BING',
-                        `gainedPoints=${gainedPoints} points | query="${query}" | remaining=${newMissingPointsTotal}`,
-                        'green'
-                    )
-                } else if (counterDelta < 0) {
-                    // Delta negatif tanpa ekspansi kuota resmi / anomali DAPI: JANGAN izinkan reset target mentah ke 90!
-                    this.bot.logger.warn(
-                        isMobile,
-                        'SEARCH-BING',
-                        `[COUNTER-ANOMALY] Negative counter delta detected (${counterDelta}) without quota expansion or Level-Up already handled. Preserving current remaining target (${missingPointsTotal}).`
-                    )
-                    gainedPoints = 3
-                    const decrementedRemaining = Math.max(0, missingPointsTotal - 3)
-                    newMissingPointsTotal = decrementedRemaining
-                    stagnantLoop = 0
-
-                    void Database.getInstance().recordActivity(
-                        currentEmail,
-                        isMobile ? 'SEARCH_MOBILE' : 'SEARCH_DESKTOP',
-                        gainedPoints
-                    )
-
-                    this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
-                    this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
-                    totalGainedPoints += gainedPoints
-
-                    this.bot.logger.info(
-                        isMobile,
-                        'SEARCH-BING',
-                        `gainedPoints=${gainedPoints} points | query="${query}" | remaining=${newMissingPointsTotal}`,
-                        'green'
-                    )
-                } else if (!isPeriodicSync) {
-                    // Kueri non-sync (1, 2, 3): Logging transparan optimis tanpa pemicu stagnant false-warning
-                    stagnantLoop = 0
-                    gainedPoints = 3
-                    const decrementedRemaining = Math.max(0, missingPointsTotal - 3)
+                    const decrementedRemaining = Math.max(0, missingPointsTotal - gainedPoints)
                     newMissingPointsTotal = decrementedRemaining
 
                     void Database.getInstance().recordActivity(
@@ -296,87 +283,64 @@ export class Search extends Workers {
                         gainedPoints
                     )
 
-                    this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
+                    this.bot.userData.currentPoints = confirmedServerBalance > curPoints ? confirmedServerBalance : curPoints + gainedPoints
                     this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
                     totalGainedPoints += gainedPoints
+                    lastSyncedPoints = Number(this.bot.userData.currentPoints ?? 0)
+                    lastSyncedProgress = currentServerProgress
 
                     this.bot.logger.info(
                         isMobile,
                         'SEARCH-BING',
-                        `[SEARCH-OPTIMISTIC] Query submitted (+3 est) | query="${query}" | estRemaining=${newMissingPointsTotal} (Server sync at query #${Math.ceil(searchCount / 4) * 4})`,
+                        `[SEARCH-VERIFIED] Server confirmed +${gainedPoints} points | query="${query}" | remaining=${newMissingPointsTotal} | balance=${this.bot.userData.currentPoints}`,
                         'green'
                     )
                 } else {
-                    // DAPI Sync berkala per 4 kueri: Evaluasi kemajuan riil terhadap lastSyncedPoints & lastSyncedProgress
-                    const currentServerProgress = isMobile
-                        ? (searchCounters.mobileSearch?.[0]?.pointProgress ?? 0)
-                        : ((searchCounters.pcSearch?.[0]?.pointProgress ?? 0) + (searchCounters.pcSearch?.[1]?.pointProgress ?? 0))
-                    const currentServerBalance = Number(this.bot.userData.currentPoints ?? 0)
+                    stagnantLoop++
+                    newMissingPointsTotal = missingPointsTotal
+                    this.bot.logger.warn(
+                        isMobile,
+                        'SEARCH-BING',
+                        `No points gained ${stagnantLoop}/${stagnantLoopMax} | query="${query}" | remaining=${newMissingPointsTotal}`
+                    )
 
-                    const syncProgressDelta = currentServerProgress - lastSyncedProgress
-                    const syncBalanceDelta = currentServerBalance - lastSyncedPoints
-                    const serverPointsGained = Math.max(syncProgressDelta, syncBalanceDelta)
-
-                    if (serverPointsGained > 0 || counterDelta > 0) {
-                        const confirmedGained = serverPointsGained > 0 ? serverPointsGained : Math.max(3, counterDelta)
-                        const sessionRemaining = Math.max(0, initialSessionTarget - totalGainedPoints)
-                        newMissingPointsTotal = Math.min(newMissingPointsTotal, sessionRemaining)
+                    if (stagnantLoop >= stagnantLoopMax) {
                         this.bot.logger.info(
                             isMobile,
                             'SEARCH-BING',
-                            `[DAPI-SYNC] Server sync confirmed: +${confirmedGained} points credited on server | currentPoints=${this.bot.userData.currentPoints} | remaining=${newMissingPointsTotal}`,
-                            'cyan'
+                            `Stagnant threshold reached (${stagnantLoop}/${stagnantLoopMax}), performing server hard-verification...`
                         )
-                        stagnantLoop = 0
-                        lastSyncedProgress = currentServerProgress
-                        lastSyncedPoints = currentServerBalance
-                        gainedPoints = Math.max(0, counterDelta)
-                    } else {
-                        // Hanya picu counter No points gained jika saldo riil server tidak bertambah sama sekali dibanding hasil DAPI sync sebelumnya
-                        stagnantLoop++
-                        this.bot.logger.info(
-                            isMobile,
-                            'SEARCH-BING',
-                            `No points gained ${stagnantLoop}/${stagnantLoopMax} | query="${query}" | remaining=${newMissingPointsTotal}`
-                        )
-
-                        if (stagnantLoop >= stagnantLoopMax) {
+                        const hardRes = await this.verifyPointsWithServer(page, isMobile)
+                        if (hardRes.verifiedGained && hardRes.newBalance && hardRes.gained) {
+                            const actualGained = Math.max(0, hardRes.gained)
                             this.bot.logger.info(
                                 isMobile,
                                 'SEARCH-BING',
-                                `Stagnant threshold reached (${stagnantLoop}/${stagnantLoopMax}), performing server hard-verification...`
+                                `Hard-verification SUCCESS: Server points increased by +${actualGained} (new balance: ${hardRes.newBalance}). Resetting stagnant loop.`,
+                                'green'
                             )
-                            const verifyRes = await this.verifyPointsWithServer(page, isMobile)
-                            if (verifyRes.verifiedGained && verifyRes.newBalance) {
-                                const actualGained = Math.max(0, verifyRes.gained ?? 0)
-                                this.bot.logger.info(
-                                    isMobile,
-                                    'SEARCH-BING',
-                                    `Hard-verification SUCCESS: Server points increased by +${actualGained} (new balance: ${verifyRes.newBalance}). Resetting stagnant loop.`,
-                                    'green'
-                                )
-                                this.bot.userData.currentPoints = verifyRes.newBalance
-                                this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + actualGained
-                                totalGainedPoints += actualGained
-                                lastSyncedPoints = verifyRes.newBalance
-                                lastSyncedProgress = isMobile
-                                    ? (searchCounters.mobileSearch?.[0]?.pointProgress ?? 0)
-                                    : ((searchCounters.pcSearch?.[0]?.pointProgress ?? 0) + (searchCounters.pcSearch?.[1]?.pointProgress ?? 0))
-                                stagnantLoop = 0
-                            } else {
-                                this.bot.logger.warn(
-                                    isMobile,
-                                    'SEARCH-BING',
-                                    `[COOLDOWN-DETECTED] Microsoft 15-Minute Search Cooldown aktif pada akun ini (Server verified points stagnant after ${stagnantLoopMax} queries). Aborting search loop for graceful hand-off.`
-                                )
-                                this.bot.searchCooldownActive = true
-                                const isDualMode = this.bot.config?.executionMode === 'dual'
-                                if (isDualMode && typeof (this.bot as any).triggerCircuitBreaker === 'function') {
-                                    (this.bot as any).triggerCircuitBreaker(`15-Minute Search Cooldown aktif pada ${currentEmail}`)
-                                }
-                                isCooldownDetected = true
-                                break
+                            this.bot.userData.currentPoints = hardRes.newBalance
+                            this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + actualGained
+                            totalGainedPoints += actualGained
+                            lastSyncedPoints = hardRes.newBalance
+                            lastSyncedProgress = isMobile
+                                ? (searchCounters.mobileSearch?.[0]?.pointProgress ?? 0)
+                                : ((searchCounters.pcSearch?.[0]?.pointProgress ?? 0) + (searchCounters.pcSearch?.[1]?.pointProgress ?? 0))
+                            stagnantLoop = 0
+                            newMissingPointsTotal = Math.max(0, missingPointsTotal - actualGained)
+                        } else {
+                            this.bot.logger.warn(
+                                isMobile,
+                                'SEARCH-BING',
+                                `[COOLDOWN-DETECTED] Microsoft 15-Minute Search Cooldown aktif pada akun ini (Server verified points stagnant after ${stagnantLoopMax} queries). Aborting search loop for graceful hand-off.`
+                            )
+                            this.bot.searchCooldownActive = true
+                            const isDualMode = this.bot.config?.executionMode === 'dual'
+                            if (isDualMode && typeof (this.bot as any).triggerCircuitBreaker === 'function') {
+                                (this.bot as any).triggerCircuitBreaker(`15-Minute Search Cooldown aktif pada ${currentEmail}`)
                             }
+                            isCooldownDetected = true
+                            break
                         }
                     }
                 }
@@ -496,118 +460,97 @@ export class Search extends Workers {
                         let newMissingPointsTotal = newMissingPoints.totalPoints
 
                         const counterDelta = missingPointsTotal - newMissingPointsTotal
+                        const currentServerProgress = isMobile
+                            ? (searchCounters.mobileSearch?.[0]?.pointProgress ?? 0)
+                            : ((searchCounters.pcSearch?.[0]?.pointProgress ?? 0) + (searchCounters.pcSearch?.[1]?.pointProgress ?? 0))
+                        const currentServerBalance = Number(this.bot.userData.currentPoints ?? 0)
+
+                        // Verifikasi riil saldo server dan header bing
+                        const verifyRes = await this.verifyPointsWithServer(page, isMobile)
+                        const confirmedServerBalance = verifyRes.newBalance ?? currentServerBalance
+                        const serverBalanceDelta = confirmedServerBalance - lastExtraSyncedPoints
+                        const progressDelta = currentServerProgress - lastExtraSyncedProgress
+                        const serverPointsGained = Math.max(
+                            verifyRes.gained ?? 0,
+                            serverBalanceDelta > 0 ? serverBalanceDelta : 0,
+                            progressDelta > 0 ? progressDelta : 0,
+                            counterDelta > 0 ? counterDelta : 0
+                        )
+
                         let gainedPoints = 0
-                        const isPeriodicSync = (searchCount % 4 === 0)
-
-                        if (counterDelta < 0) {
-                            // Kenaikan kuota maksimal di tengah jalan (Level Up / Quota Leap: Level 1 -> Level 2)
-                            newMissingPointsTotal = Math.max(0, missingPointsTotal - 3)
-                            this.bot.logger.info(
-                                isMobile,
-                                'SEARCH-BING-EXTRA',
-                                `[LEVEL-UP] Search quota expanded mid-session. Preserving current remaining target (${newMissingPointsTotal} pts) to prevent quota surge.`,
-                                'green'
-                            )
-                            gainedPoints = 3
+                        if (serverPointsGained > 0) {
+                            gainedPoints = Math.min(3, serverPointsGained)
                             stagnantLoop = 0
 
-                            this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
-                            this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
-                            totalGainedPoints += gainedPoints
-
-                            this.bot.logger.info(
-                                isMobile,
-                                'SEARCH-BING-EXTRA',
-                                `gainedPoints=${gainedPoints} points | query="${query}" | remaining=${newMissingPointsTotal}`,
-                                'green'
-                            )
-                        } else if (!isPeriodicSync) {
-                            stagnantLoop = 0
-                            gainedPoints = 3
-                            const decrementedRemaining = Math.max(0, missingPointsTotal - 3)
+                            const decrementedRemaining = Math.max(0, missingPointsTotal - gainedPoints)
                             newMissingPointsTotal = decrementedRemaining
 
-                            this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + gainedPoints
+                            const currentEmail = this.bot.activeAccount?.email || this.bot.userData.userName
+                            void Database.getInstance().recordActivity(
+                                currentEmail,
+                                isMobile ? 'SEARCH_MOBILE' : 'SEARCH_DESKTOP',
+                                gainedPoints
+                            )
+
+                            this.bot.userData.currentPoints = confirmedServerBalance > currentServerBalance ? confirmedServerBalance : currentServerBalance + gainedPoints
                             this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
                             totalGainedPoints += gainedPoints
+                            lastExtraSyncedPoints = Number(this.bot.userData.currentPoints ?? 0)
+                            lastExtraSyncedProgress = currentServerProgress
 
                             this.bot.logger.info(
                                 isMobile,
                                 'SEARCH-BING-EXTRA',
-                                `[SEARCH-OPTIMISTIC] Extra query submitted (+3 est) | query="${query}" | estRemaining=${newMissingPointsTotal} (Server sync at query #${Math.ceil(searchCount / 4) * 4})`,
+                                `[SEARCH-VERIFIED] Extra server confirmed +${gainedPoints} points | query="${query}" | remaining=${newMissingPointsTotal} | balance=${this.bot.userData.currentPoints}`,
                                 'green'
                             )
                         } else {
-                            const currentServerProgress = isMobile
-                                ? (searchCounters.mobileSearch?.[0]?.pointProgress ?? 0)
-                                : ((searchCounters.pcSearch?.[0]?.pointProgress ?? 0) + (searchCounters.pcSearch?.[1]?.pointProgress ?? 0))
-                            const currentServerBalance = Number(this.bot.userData.currentPoints ?? 0)
+                            stagnantLoop++
+                            newMissingPointsTotal = missingPointsTotal
+                            this.bot.logger.warn(
+                                isMobile,
+                                'SEARCH-BING-EXTRA',
+                                `No points gained ${stagnantLoop}/${stagnantLoopMax} | query="${query}" | remaining=${newMissingPointsTotal}`
+                            )
 
-                            const syncProgressDelta = currentServerProgress - lastExtraSyncedProgress
-                            const syncBalanceDelta = currentServerBalance - lastExtraSyncedPoints
-                            const serverPointsGained = Math.max(syncProgressDelta, syncBalanceDelta)
-
-                            if (serverPointsGained > 0 || counterDelta > 0) {
-                                const currentProg = isMobile
-                                    ? (searchCounters.mobileSearch?.[0] ? `${searchCounters.mobileSearch[0].pointProgress}/${searchCounters.mobileSearch[0].pointProgressMax}` : 'mobile')
-                                    : (searchCounters.pcSearch?.[0] ? `${searchCounters.pcSearch[0].pointProgress}/${searchCounters.pcSearch[0].pointProgressMax}` : 'desktop')
-                                const confirmedGained = serverPointsGained > 0 ? serverPointsGained : Math.max(3, counterDelta)
+                            if (stagnantLoop >= stagnantLoopMax) {
                                 this.bot.logger.info(
                                     isMobile,
                                     'SEARCH-BING-EXTRA',
-                                    `[DAPI-SYNC] Server search counters confirmed in sync: ${currentProg} (+${confirmedGained} pts) | remaining=${newMissingPointsTotal}`,
-                                    'cyan'
+                                    `Stagnant threshold reached (${stagnantLoop}/${stagnantLoopMax}), performing server hard-verification...`
                                 )
-                                stagnantLoop = 0
-                                lastExtraSyncedProgress = currentServerProgress
-                                lastExtraSyncedPoints = currentServerBalance
-                                gainedPoints = Math.max(0, counterDelta)
-                            } else {
-                                stagnantLoop++
-                                this.bot.logger.info(
-                                    isMobile,
-                                    'SEARCH-BING-EXTRA',
-                                    `No points gained ${stagnantLoop}/${stagnantLoopMax} | query="${query}" | remaining=${newMissingPointsTotal}`
-                                )
-
-                                if (stagnantLoop >= stagnantLoopMax) {
+                                const hardRes = await this.verifyPointsWithServer(page, isMobile)
+                                if (hardRes.verifiedGained && hardRes.newBalance && hardRes.gained) {
+                                    const actualGained = Math.max(0, hardRes.gained)
                                     this.bot.logger.info(
                                         isMobile,
                                         'SEARCH-BING-EXTRA',
-                                        `Stagnant threshold reached (${stagnantLoop}/${stagnantLoopMax}), performing server hard-verification...`
+                                        `Hard-verification SUCCESS: Server points increased by +${actualGained} (new balance: ${hardRes.newBalance}). Resetting stagnant loop.`,
+                                        'green'
                                     )
-                                    const verifyRes = await this.verifyPointsWithServer(page, isMobile)
-                                    if (verifyRes.verifiedGained && verifyRes.newBalance) {
-                                        const actualGained = Math.max(0, verifyRes.gained ?? 0)
-                                        this.bot.logger.info(
-                                            isMobile,
-                                            'SEARCH-BING-EXTRA',
-                                            `Hard-verification SUCCESS: Server points increased by +${actualGained} (new balance: ${verifyRes.newBalance}). Resetting stagnant loop.`,
-                                            'green'
-                                        )
-                                        this.bot.userData.currentPoints = verifyRes.newBalance
-                                        this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + actualGained
-                                        totalGainedPoints += actualGained
-                                        lastExtraSyncedPoints = verifyRes.newBalance
-                                        lastExtraSyncedProgress = isMobile
-                                            ? (searchCounters.mobileSearch?.[0]?.pointProgress ?? 0)
-                                            : ((searchCounters.pcSearch?.[0]?.pointProgress ?? 0) + (searchCounters.pcSearch?.[1]?.pointProgress ?? 0))
-                                        stagnantLoop = 0
-                                    } else {
-                                        this.bot.logger.warn(
-                                            isMobile,
-                                            'SEARCH-BING-EXTRA',
-                                            `[COOLDOWN-DETECTED] Microsoft 15-Minute Search Cooldown aktif pada akun ini (Server verified points stagnant after ${stagnantLoopMax} queries). Aborting extra searches.`
-                                        )
-                                        this.bot.searchCooldownActive = true
-                                        const isDualMode = this.bot.config?.executionMode === 'dual'
-                                        if (isDualMode && typeof (this.bot as any).triggerCircuitBreaker === 'function') {
-                                            const targetAcc = this.bot.activeAccount?.email || this.bot.userData.userName
-                                            ;(this.bot as any).triggerCircuitBreaker(`15-Minute Search Cooldown aktif pada ${targetAcc}`)
-                                        }
-                                        isCooldownDetected = true
-                                        break
+                                    this.bot.userData.currentPoints = hardRes.newBalance
+                                    this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + actualGained
+                                    totalGainedPoints += actualGained
+                                    lastExtraSyncedPoints = hardRes.newBalance
+                                    lastExtraSyncedProgress = isMobile
+                                        ? (searchCounters.mobileSearch?.[0]?.pointProgress ?? 0)
+                                        : ((searchCounters.pcSearch?.[0]?.pointProgress ?? 0) + (searchCounters.pcSearch?.[1]?.pointProgress ?? 0))
+                                    stagnantLoop = 0
+                                    newMissingPointsTotal = Math.max(0, missingPointsTotal - actualGained)
+                                } else {
+                                    this.bot.logger.warn(
+                                        isMobile,
+                                        'SEARCH-BING-EXTRA',
+                                        `[COOLDOWN-DETECTED] Microsoft 15-Minute Search Cooldown aktif pada akun ini (Server verified points stagnant after ${stagnantLoopMax} queries). Aborting extra searches.`
+                                    )
+                                    this.bot.searchCooldownActive = true
+                                    const isDualMode = this.bot.config?.executionMode === 'dual'
+                                    if (isDualMode && typeof (this.bot as any).triggerCircuitBreaker === 'function') {
+                                        const targetAcc = this.bot.activeAccount?.email || this.bot.userData.userName
+                                        ;(this.bot as any).triggerCircuitBreaker(`15-Minute Search Cooldown aktif pada ${targetAcc}`)
                                     }
+                                    isCooldownDetected = true
+                                    break
                                 }
                             }
                         }
@@ -707,14 +650,33 @@ export class Search extends Workers {
                         const charDelay = Math.floor(Math.random() * (55 - 25 + 1)) + 25
                         await searchPage.keyboard.type(char, { delay: charDelay })
                     }
-                    await searchPage.keyboard.press('Enter')
-                    // Pasang waitForLoadState domcontentloaded { timeout: 15000 } secara graceful
-                    await searchPage.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {})
+
+                    const searchNavPromise = searchPage.waitForURL(
+                        url => url.pathname.includes('/search') && (url.searchParams.has('q') || url.href.includes('q=')),
+                        { timeout: 7000 }
+                    ).catch(() => null)
+
+                    const searchBtn = searchPage.locator('#sb_form_go, input[type="submit"], button[type="submit"], label[for="sb_form_go"]').first()
+                    const btnVisible = await searchBtn.isVisible().catch(() => false)
+                    if (btnVisible) {
+                        await searchBtn.click({ timeout: 2000 }).catch(() => {})
+                    } else {
+                        await searchPage.keyboard.press('Enter').catch(() => {})
+                    }
+
+                    const navigated = await searchNavPromise
+                    if (!navigated) {
+                        const cvid = randomBytes(16).toString('hex').toUpperCase()
+                        const formParam = isMobile ? 'QBLH' : 'QBRE'
+                        const searchUrl = `${this.bingHome}/search?q=${encodeURIComponent(query)}&form=${formParam}&cvid=${cvid}`
+                        await searchPage.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 12000 }).catch(() => {})
+                    }
                 } else {
-                    // Resilient Fallback: Navigasi langsung ke URL pencarian bersih tanpa parameter statis mencurigakan
-                    const cvid = randomBytes(16).toString('hex')
-                    const searchUrl = `${this.bingHome}/search?q=${encodeURIComponent(query)}&cvid=${cvid}`
-                    await searchPage.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {})
+                    // Resilient Fallback: Navigasi langsung ke URL pencarian dengan form & cvid valid
+                    const cvid = randomBytes(16).toString('hex').toUpperCase()
+                    const formParam = isMobile ? 'QBLH' : 'QBRE'
+                    const searchUrl = `${this.bingHome}/search?q=${encodeURIComponent(query)}&form=${formParam}&cvid=${cvid}`
+                    await searchPage.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 12000 }).catch(() => {})
                 }
 
                 this.bot.logger.debug(
@@ -756,7 +718,7 @@ export class Search extends Workers {
                     searchPage.evaluate(() => {
                         const rc = document.getElementById('id_rc')?.innerText?.replace(/[^0-9]/g, '')
                         if (rc && !isNaN(Number(rc)) && Number(rc) > 0) return Number(rc)
-                        const flyout = document.querySelector('#rh_meter .rh_meter_points, .id_rh_pts, #id_rh, #id_h')?.textContent?.replace(/[^0-9]/g, '')
+                        const flyout = document.querySelector('#rh_meter .rh_meter_points, .id_rh_pts, #id_rh')?.textContent?.replace(/[^0-9]/g, '')
                         if (flyout && !isNaN(Number(flyout)) && Number(flyout) > 0) return Number(flyout)
                         return null
                     }),
@@ -767,53 +729,15 @@ export class Search extends Workers {
                     this.bot.userData.currentPoints = inPageBalance
                 }
 
-                // Sinkronisasi DAPI berkala per 4 kueri saja
-                if (currentSearchCount % 4 === 0) {
-                    const counters = await this.bot.browser.func.getSearchPoints(searchPage, true, isMobile)
-                    this.bot.browser.func.cachedCounters = counters
-                    this.bot.logger.debug(
-                        isMobile,
-                        'SEARCH-BING',
-                        `Search counters after query (DAPI sync) | count=${currentSearchCount} | query="${query}"`
-                    )
-                    return counters
-                }
-
-                // Optimistic Counter Tracking (+3 poin per respon pencarian 200 OK)
-                if (currentCounters) {
-                    const updatedCounters = JSON.parse(JSON.stringify(currentCounters)) as Counters
-                    if (isMobile) {
-                        if (updatedCounters.mobileSearch?.[0]) {
-                            updatedCounters.mobileSearch[0].pointProgress = Math.min(
-                                updatedCounters.mobileSearch[0].pointProgressMax,
-                                (updatedCounters.mobileSearch[0].pointProgress || 0) + 3
-                            )
-                        }
-                    } else {
-                        if (updatedCounters.pcSearch?.[0]) {
-                            updatedCounters.pcSearch[0].pointProgress = Math.min(
-                                updatedCounters.pcSearch[0].pointProgressMax,
-                                (updatedCounters.pcSearch[0].pointProgress || 0) + 3
-                            )
-                        }
-                    }
-                    this.bot.browser.func.cachedCounters = updatedCounters
-                    this.bot.logger.debug(
-                        isMobile,
-                        'SEARCH-BING',
-                        `Search counters after query (Optimistic +3) | count=${currentSearchCount} | query="${query}"`
-                    )
-                    return updatedCounters
-                }
-
-                const counters = await this.bot.browser.func.getSearchPoints(searchPage, false, isMobile)
-
+                // Verifikasi counter riil server (tanpa faking optimis lokal)
+                const forceSync = (currentSearchCount % 4 === 0)
+                const counters = await this.bot.browser.func.getSearchPoints(searchPage, forceSync, isMobile)
+                this.bot.browser.func.cachedCounters = counters
                 this.bot.logger.debug(
                     isMobile,
                     'SEARCH-BING',
-                    `Search counters after query | attempt=${i + 1}/${maxAttempts} | query="${query}"`
+                    `Search counters after query (Server verified) | count=${currentSearchCount} | query="${query}"`
                 )
-
                 return counters
             } catch (error) {
                 if (i >= 5) {
@@ -919,9 +843,45 @@ export class Search extends Workers {
         page: Page,
         isMobile: boolean
     ): Promise<{ verifiedGained: boolean; newBalance?: number; gained?: number }> {
-        if (!isMobile) {
-            return { verifiedGained: false }
+        const oldRecordedPoints = Number(this.bot.userData.currentPoints ?? 0)
+
+        // 1. Verifikasi utama: DAPI real-time via getAppDashboardData (tersedia untuk desktop & mobile jika token aktif)
+        if (this.bot.accessToken) {
+            try {
+                const appData = await this.bot.browser.func.getAppDashboardData()
+                const serverBalance = appData?.response?.balance
+                if (typeof serverBalance === 'number' && serverBalance > oldRecordedPoints) {
+                    return {
+                        verifiedGained: true,
+                        newBalance: serverBalance,
+                        gained: serverBalance - oldRecordedPoints
+                    }
+                }
+            } catch {}
         }
+
+        // 2. Verifikasi live DOM: Ekstraksi saldo dari elemen header bing (#id_rc atau #rh_meter)
+        try {
+            if (page && !page.isClosed()) {
+                const inPagePoints = await page.evaluate(() => {
+                    const rc = document.getElementById('id_rc')?.innerText?.replace(/[^0-9]/g, '')
+                    if (rc && !isNaN(Number(rc)) && Number(rc) > 0) return Number(rc)
+                    const rh = document.querySelector('#rh_meter .rh_meter_points, .id_rh_pts')?.textContent?.replace(/[^0-9]/g, '')
+                    if (rh && !isNaN(Number(rh)) && Number(rh) > 0) return Number(rh)
+                    return null
+                }).catch(() => null)
+
+                if (inPagePoints && inPagePoints > oldRecordedPoints) {
+                    return {
+                        verifiedGained: true,
+                        newBalance: inPagePoints,
+                        gained: inPagePoints - oldRecordedPoints
+                    }
+                }
+            }
+        } catch {}
+
+        // 3. Fallback request context getuserinfo
         try {
             const ctx = page.context()
             if (ctx && ctx.request) {
@@ -935,22 +895,17 @@ export class Search extends Workers {
                     const availablePoints =
                         data?.dashboard?.userStatus?.availablePoints ??
                         data?.userStatus?.availablePoints
-                    const currentBalance =
-                        typeof availablePoints === 'number'
-                            ? availablePoints
-                            : Number(this.bot.userData.currentPoints ?? 0)
-                    const oldRecordedPoints = Number(this.bot.userData.currentPoints ?? 0)
-
-                    if (currentBalance > oldRecordedPoints) {
+                    if (typeof availablePoints === 'number' && availablePoints > oldRecordedPoints) {
                         return {
                             verifiedGained: true,
-                            newBalance: currentBalance,
-                            gained: currentBalance - oldRecordedPoints
+                            newBalance: availablePoints,
+                            gained: availablePoints - oldRecordedPoints
                         }
                     }
                 }
             }
         } catch {}
+
         return { verifiedGained: false }
     }
 }
