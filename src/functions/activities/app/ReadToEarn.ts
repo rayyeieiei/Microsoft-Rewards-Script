@@ -89,8 +89,8 @@ export class ReadToEarn extends Workers {
             let remainingQuota = 30
             try {
                 const appEarnable = await this.bot.browser.func.getAppEarnablePoints()
-                if (appEarnable && typeof appEarnable.readToEarn === 'number') {
-                    if (appEarnable.readToEarn === 0) {
+                if (appEarnable) {
+                    if (appEarnable.readToEarnCompleted === true) {
                         this.bot.logger.info(
                             this.bot.isMobile,
                             'READ-TO-EARN',
@@ -99,22 +99,25 @@ export class ReadToEarn extends Workers {
                         )
                         return
                     }
-                    remainingQuota = appEarnable.readToEarn
+                    if (typeof appEarnable.readToEarn === 'number' && appEarnable.readToEarn > 0) {
+                        remainingQuota = appEarnable.readToEarn
+                    } else {
+                        remainingQuota = 30
+                    }
                 } else {
-                    // Fallback progress bernilai 0 saat objek aktivitas undefined (remaining 30 - 0 = 30)
                     remainingQuota = 30
                 }
             } catch {
-                // Fallback progress bernilai 0 saat objek aktivitas undefined
                 remainingQuota = 30
             }
 
+            const targetOfferId = (this.bot as any).detectedReadArticleOfferId || 'ENUS_readarticle3_30points'
             const jsonData = {
                 amount: 1,
                 id: '1',
                 type: 101,
                 attributes: {
-                    offerid: 'ENUS_readarticle3_30points'
+                    offerid: targetOfferId
                 },
                 country: geoCountry
             }

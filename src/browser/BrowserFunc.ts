@@ -437,26 +437,22 @@ export default class BrowserFunc {
                     counters = dCounters
                 } else {
                     const dailySearchPts = Number(dashboardData?.userStatus?.levelInfo?.bingSearchDailyPoints || 0)
-                    if (dailySearchPts > 0) {
-                        const res = {
-                            pcSearch: [{ pointProgress: 0, pointProgressMax: dailySearchPts }],
-                            mobileSearch: []
-                        } as unknown as Counters
-                        this.cachedCounters = res
-                        counters = res
-                    } else {
-                        const res = dCounters || ({
-                            pcSearch: [{ pointProgress: 0, pointProgressMax: 60 }],
-                            mobileSearch: []
-                        } as unknown as Counters)
-                        this.cachedCounters = res
-                        counters = res
-                    }
+                    const userLevel = Number(dashboardData?.userStatus?.levelInfo?.activeLevel || 1)
+                    const isLevel2 = userLevel >= 2 || (dashboardData?.userStatus?.availablePoints ?? 0) >= 500
+                    const pcQuota = dailySearchPts > 0 ? dailySearchPts : (isLevel2 ? 90 : 30)
+                    const mobileQuota = isLevel2 ? 60 : (this.bot.config?.workers?.doMobileSearch ? 60 : 0)
+                    const res = {
+                        pcSearch: [{ pointProgress: 0, pointProgressMax: pcQuota }],
+                        mobileSearch: mobileQuota > 0 ? [{ pointProgress: 0, pointProgressMax: mobileQuota }] : []
+                    } as unknown as Counters
+                    this.cachedCounters = res
+                    counters = res
                 }
             } catch {
+                const isMobileEnabled = this.bot.config?.workers?.doMobileSearch !== false
                 counters = {
-                    pcSearch: [{ pointProgress: 0, pointProgressMax: 60 }],
-                    mobileSearch: []
+                    pcSearch: [{ pointProgress: 0, pointProgressMax: 90 }],
+                    mobileSearch: isMobileEnabled ? [{ pointProgress: 0, pointProgressMax: 60 }] : []
                 } as unknown as Counters
             }
         }
@@ -572,14 +568,12 @@ export default class BrowserFunc {
      */
     async getAppEarnablePoints(): Promise<AppEarnablePoints> {
         try {
-            const eligibleOffers = ['ENUS_readarticle3_30points', 'Gamification_Sapphire_DailyCheckIn']
-
             const request: AxiosRequestConfig = {
                 url: 'https://prod.rewardsplatform.microsoft.com/dapi/me?channel=SAAndroid&options=613',
                 method: 'GET',
                 headers: {
                     Authorization: `Bearer ${this.bot.accessToken}`,
-                    'X-Rewards-Country': this.bot.userData.geoLocale,
+                    'X-Rewards-Country': this.bot.userData.geoLocale || 'US',
                     'X-Rewards-Language': 'en',
                     'X-Rewards-ismobile': 'true'
                 }
@@ -587,25 +581,40 @@ export default class BrowserFunc {
 
             const response = await this.bot.axios.request(request)
             const userData: AppUserData = response.data
-            const eligibleActivities = userData.response.promotions.filter(x =>
-                eligibleOffers.includes(x.attributes.offerid ?? '')
-            )
+            const allPromotions = userData?.response?.promotions || []
 
             let readToEarn = 0
+            let readToEarnCompleted = false
+            let readOfferFound = false
             let checkIn = 0
 
-            for (const item of eligibleActivities) {
-                const attrs = item.attributes
+            for (const item of allPromotions) {
+                const attrs = item.attributes || {}
+                const offerId = (attrs.offerid ?? '').toLowerCase()
+                const isReadOffer =
+                    attrs.type === 'msnreadearn' ||
+                    offerId.includes('readarticle') ||
+                    (item.name ?? '').toLowerCase().includes('readarticle')
 
-                if (attrs.type === 'msnreadearn') {
-                    const pointMax = parseInt(attrs.pointmax ?? '0')
-                    const pointProgress = parseInt(attrs.pointprogress ?? '0')
-                    readToEarn = Math.max(0, pointMax - pointProgress)
-                } else if (attrs.type === 'checkin') {
-                    const progress = parseInt(attrs.progress ?? '0')
+                if (isReadOffer) {
+                    readOfferFound = true
+                    const pointMax = parseInt(attrs.pointmax ?? '30', 10) || 30
+                    const pointProgress = parseInt(attrs.pointprogress ?? '0', 10) || 0
+                    if (pointProgress >= pointMax) {
+                        readToEarn = 0
+                        readToEarnCompleted = true
+                    } else {
+                        readToEarn = Math.max(0, pointMax - pointProgress)
+                        readToEarnCompleted = false
+                    }
+                    if (attrs.offerid) {
+                        ;(this.bot as any).detectedReadArticleOfferId = attrs.offerid
+                    }
+                } else if (attrs.type === 'checkin' || offerId.includes('dailycheckin')) {
+                    const progress = parseInt(attrs.progress ?? '0', 10) || 0
                     const checkInDay = (progress % 7) + 1 // Hari ke-1 s/d Hari ke-7
                     const nextDayKey = `day_${checkInDay}_points`
-                    const possiblePoints = parseInt(attrs[nextDayKey] ?? '10') || 10
+                    const possiblePoints = parseInt(attrs[nextDayKey] ?? '10', 10) || 10
 
                     // Periksa apakah sudah check-in hari ini berdasarkan UTC dan waktu lokal
                     const lastUpdated = attrs.last_updated ? new Date(attrs.last_updated) : null
@@ -625,12 +634,20 @@ export default class BrowserFunc {
                 }
             }
 
+            // Jika promosi Read To Earn TIDAK ditemukan dalam respons DAPI, JANGAN asumsikan 0 (selesai)!
+            // Tetap berikan kuota 30 agar bot menjalankan Read To Earn secara aktif
+            if (!readOfferFound) {
+                readToEarn = 30
+                readToEarnCompleted = false
+            }
+
             const totalEarnablePoints = readToEarn + checkIn
 
             return {
                 readToEarn,
                 checkIn,
-                totalEarnablePoints
+                totalEarnablePoints,
+                readToEarnCompleted
             }
         } catch (error) {
             this.bot.logger.error(

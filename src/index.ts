@@ -2789,7 +2789,8 @@ export class MicrosoftRewardsBot {
                 }
 
                 this.updateDashboardAccount(accountEmail, { status: 'Searching...' })
-                const searchPoints = await this.browser.func.getSearchPoints()
+                const activeMobilePage = (this.mainMobilePage && !this.mainMobilePage.isClosed()) ? this.mainMobilePage : undefined
+                const searchPoints = await this.browser.func.getSearchPoints(activeMobilePage, false, true)
                 const missingSearchPoints = this.browser.func.missingSearchPoints(searchPoints)
 
                 // update search progress before search loop

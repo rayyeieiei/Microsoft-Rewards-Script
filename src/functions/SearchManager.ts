@@ -44,6 +44,13 @@ export class SearchManager {
             ? `${data.userStatus.counters.mobileSearch[0].pointProgress}/${data.userStatus.counters.mobileSearch[0].pointProgressMax}`
             : '0/0'
 
+        // Reconcile missingSearchPoints with data.userStatus.counters if mobile was falsely reported as 0
+        const dataMobileMax = data?.userStatus?.counters?.mobileSearch?.[0]?.pointProgressMax ?? 0
+        const dataMobileProg = data?.userStatus?.counters?.mobileSearch?.[0]?.pointProgress ?? 0
+        if (missingSearchPoints.mobilePoints === 0 && dataMobileMax > 0 && dataMobileProg < dataMobileMax) {
+            missingSearchPoints.mobilePoints = Math.max(0, dataMobileMax - dataMobileProg)
+        }
+
         const doMobile = this.bot.config.workers.doMobileSearch && missingSearchPoints.mobilePoints > 0
         const doDesktop = this.bot.config.workers.doDesktopSearch && missingSearchPoints.desktopPoints > 0
 

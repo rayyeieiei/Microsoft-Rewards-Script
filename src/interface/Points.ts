@@ -10,6 +10,7 @@ export interface AppEarnablePoints {
     readToEarn: number
     checkIn: number
     totalEarnablePoints: number
+    readToEarnCompleted?: boolean
 }
 
 export interface MissingSearchPoints {
