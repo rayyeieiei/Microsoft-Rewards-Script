@@ -285,20 +285,7 @@ export class UrlReward extends Workers {
                     }
 
                     // Buka Flyout Drawer jika belum terbuka di halaman
-                    const drawerLocator = page
-                        .locator('[role="dialog"], aside, [class*="flyout"], [class*="drawer"], div:has(> button[aria-label*="Close"])')
-                        .filter({ hasText: /Daily Set Streak|Complete all 3 activities/i })
-                        .first()
-                    if (!(await drawerLocator.isVisible().catch(() => false))) {
-                        const streakCard = page
-                            .locator('div, a, button, [role="button"]')
-                            .filter({ hasText: /Daily Set Streak/i })
-                            .first()
-                        if (await streakCard.isVisible().catch(() => false)) {
-                            await streakCard.click().catch(() => {})
-                            await this.bot.utils.wait(1500)
-                        }
-                    }
+                    await this.openDailySetStreakFlyout(page).catch(() => false)
                 } else {
                     if (!punchCard) {
                         if (!currentUrl.includes('/earn')) {

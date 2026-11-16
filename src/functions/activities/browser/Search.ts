@@ -147,6 +147,7 @@ export class Search extends Workers {
             let lastSyncedProgress = isMobile
                 ? (searchCounters.mobileSearch?.[0]?.pointProgress ?? 0)
                 : ((searchCounters.pcSearch?.[0]?.pointProgress ?? 0) + (searchCounters.pcSearch?.[1]?.pointProgress ?? 0))
+            const initialSessionTarget = missingPointsTotal
 
             for (let i = 0; i < queries.length; i++) {
                 if (signal?.aborted) {
@@ -225,14 +226,14 @@ export class Search extends Workers {
                     const previousMax = currentMax
                     currentMax = newMax
 
-                    // Hitung sisa poin yang benar: newMax - total poin pencarian yang sudah didapat sesi ini
-                    const earnedThisSession = totalGainedPoints
-                    newMissingPointsTotal = Math.max(0, newMax - earnedThisSession)
+                    // Kunci sisa poin agar TIDAK melompat melebihi sisa target sesi awal (Anti-Lonjakan Point)
+                    const sessionRemaining = Math.max(0, initialSessionTarget - totalGainedPoints)
+                    newMissingPointsTotal = Math.min(newMissingPointsTotal, sessionRemaining)
 
                     this.bot.logger.info(
                         isMobile,
                         'SEARCH-BING',
-                        `[LEVEL-UP] Search quota expanded mid-session (Level 1 -> Level 2 detected: max ${previousMax} -> ${newMax}). Recalculating remaining target to ${newMissingPointsTotal} points (earned this session: ${earnedThisSession}).`,
+                        `[LEVEL-UP] Search quota expanded mid-session (Level 1 -> Level 2 detected: max ${previousMax} -> ${newMax}). Locking session target to initial budget (${newMissingPointsTotal} pts remaining) to prevent abnormal activity surge.`,
                         'green'
                     )
                     gainedPoints = 3
@@ -318,6 +319,8 @@ export class Search extends Workers {
 
                     if (serverPointsGained > 0 || counterDelta > 0) {
                         const confirmedGained = serverPointsGained > 0 ? serverPointsGained : Math.max(3, counterDelta)
+                        const sessionRemaining = Math.max(0, initialSessionTarget - totalGainedPoints)
+                        newMissingPointsTotal = Math.min(newMissingPointsTotal, sessionRemaining)
                         this.bot.logger.info(
                             isMobile,
                             'SEARCH-BING',
@@ -498,10 +501,11 @@ export class Search extends Workers {
 
                         if (counterDelta < 0) {
                             // Kenaikan kuota maksimal di tengah jalan (Level Up / Quota Leap: Level 1 -> Level 2)
+                            newMissingPointsTotal = Math.max(0, missingPointsTotal - 3)
                             this.bot.logger.info(
                                 isMobile,
                                 'SEARCH-BING-EXTRA',
-                                `[LEVEL-UP] Search quota expanded mid-session. Resetting remaining target from ${missingPointsTotal} to ${newMissingPointsTotal} points.`,
+                                `[LEVEL-UP] Search quota expanded mid-session. Preserving current remaining target (${newMissingPointsTotal} pts) to prevent quota surge.`,
                                 'green'
                             )
                             gainedPoints = 3

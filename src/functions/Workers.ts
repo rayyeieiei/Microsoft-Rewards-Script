@@ -442,6 +442,9 @@ export class Workers {
             return true
         })
 
+        // Kunci uniqueDailySet hanya pada katalog hari ini (3 kartu) agar tidak melaporkan 9 item (preview besok/kemarin)
+        uniqueDailySet = todayDailySetItems
+
         let activitiesUncompleted = todayDailySetItems.filter(x => {
             if (!x || x.complete || (x.pointProgressMax > 0 && (x.pointProgress ?? 0) >= x.pointProgressMax))
                 return false
@@ -454,29 +457,30 @@ export class Workers {
             let hasUnfinishedFlyoutCards = false
             if (page && !page.isClosed()) {
                 try {
-                    const drawerLocator = page
-                        .locator('[role="dialog"], aside, [class*="flyout"], [class*="drawer"], div:has(> button[aria-label*="Close"])')
-                        .filter({ hasText: /Daily Set Streak|Complete all 3 activities/i })
-                        .first()
-                    let isDrawerVisible = await drawerLocator.isVisible().catch(() => false)
-                    if (!isDrawerVisible) {
-                        const streakCard = page
-                            .locator('div, a, button, [role="button"]')
-                            .filter({ hasText: /Daily Set Streak/i })
-                            .first()
-                        if (await streakCard.isVisible().catch(() => false)) {
-                            await streakCard.click().catch(() => {})
-                            await this.bot.utils.wait(1000)
-                            isDrawerVisible = await drawerLocator.isVisible().catch(() => false)
-                        }
-                    }
+                    const isDrawerVisible = await this.openDailySetStreakFlyout(page).catch(() => false)
 
                     if (isDrawerVisible) {
-                        const plusCardsCount = await drawerLocator
-                            .locator('div, [role="button"]')
-                            .filter({ hasText: /\+\d+/ })
-                            .count()
+                        const plusCardsCount = await page
+                            .evaluate(() => {
+                                const containers = Array.from(
+                                    document.querySelectorAll(
+                                        '[role="dialog"], aside, [class*="flyout"], [class*="drawer"], [class*="panel"], [class*="ms-Panel"], [class*="ms-Layer"], [class*="modal"]'
+                                    )
+                                )
+                                let count = 0
+                                for (const c of containers) {
+                                    const txt = (c.textContent || '').toLowerCase()
+                                    if (txt.includes('daily set streak') || txt.includes('complete all 3') || txt.includes('complete all')) {
+                                        const cards = c.querySelectorAll('button, a, [role="button"], [class*="card"], [class*="tile"]')
+                                        for (const card of Array.from(cards)) {
+                                            if (/\+\d+/.test(card.textContent || '')) count++
+                                        }
+                                    }
+                                }
+                                return count
+                            })
                             .catch(() => 0)
+
                         if (plusCardsCount > 0) {
                             hasUnfinishedFlyoutCards = true
                         }
@@ -2668,6 +2672,122 @@ export class Workers {
     }
 
     /**
+     * Buka Flyout Drawer "Daily Set Streak" di dashboard rewards.bing.com/earn
+     */
+    public async openDailySetStreakFlyout(page: Page): Promise<boolean> {
+        if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return false
+
+        try {
+            // 1. Cek apakah drawer sudah terbuka
+            const isAlreadyOpen = await page
+                .evaluate(() => {
+                    const containers = Array.from(
+                        document.querySelectorAll(
+                            '[role="dialog"], aside, [class*="flyout"], [class*="drawer"], [class*="panel"], [class*="ms-Panel"], [class*="ms-Layer"], [class*="modal"]'
+                        )
+                    )
+                    for (const c of containers) {
+                        const text = (c.textContent || '').toLowerCase()
+                        if (
+                            text.includes('daily set streak') ||
+                            text.includes('complete all 3') ||
+                            text.includes('complete all')
+                        ) {
+                            const rect = c.getBoundingClientRect()
+                            if (rect.width > 50 && rect.height > 50) return true
+                        }
+                    }
+                    return false
+                })
+                .catch(() => false)
+
+            if (isAlreadyOpen) return true
+
+            // 2. Klik kartu "Daily Set Streak" menggunakan DOM traversal presisi (menghindari matching root container)
+            const clicked = await page
+                .evaluate(() => {
+                    const all = Array.from(
+                        document.querySelectorAll(
+                            'h1, h2, h3, h4, h5, p, span, div, a, button, [role="button"]'
+                        )
+                    )
+                    for (const el of all) {
+                        if (el.children.length > 2) continue
+                        const txt = (el.textContent || '').trim()
+                        if (
+                            txt === 'Daily Set Streak' ||
+                            (/^Daily Set Streak/i.test(txt) && txt.length < 35) ||
+                            (/^Activity:\s*\d+\/\d+/i.test(txt) && txt.length < 25)
+                        ) {
+                            const clickable = (el.closest(
+                                'button, a, [role="button"], [class*="card"], [class*="tile"], [class*="item"]'
+                            ) || el) as HTMLElement
+                            clickable.scrollIntoView({ block: 'center', behavior: 'instant' })
+                            clickable.focus()
+                            clickable.click()
+                            clickable.dispatchEvent(
+                                new MouseEvent('click', { bubbles: true, cancelable: true, view: window })
+                            )
+                            return true
+                        }
+                    }
+                    return false
+                })
+                .catch(() => false)
+
+            // Playwright locator fallback jika DOM traversal tidak menemukan
+            if (!clicked) {
+                const streakCard = page
+                    .locator('button, a, [role="button"], [class*="card"], [class*="tile"]')
+                    .filter({ hasText: /^Daily Set Streak/i })
+                    .first()
+                if (await streakCard.isVisible().catch(() => false)) {
+                    await streakCard.click().catch(() => {})
+                }
+            }
+
+            await this.bot.utils.wait(2000)
+
+            // 3. Verifikasi apakah drawer sekarang terbuka
+            const isOpenNow = await page
+                .evaluate(() => {
+                    const containers = Array.from(
+                        document.querySelectorAll(
+                            '[role="dialog"], aside, [class*="flyout"], [class*="drawer"], [class*="panel"], [class*="ms-Panel"], [class*="ms-Layer"], [class*="modal"]'
+                        )
+                    )
+                    for (const c of containers) {
+                        const text = (c.textContent || '').toLowerCase()
+                        if (
+                            text.includes('daily set streak') ||
+                            text.includes('complete all 3') ||
+                            text.includes('complete all')
+                        ) {
+                            const rect = c.getBoundingClientRect()
+                            if (rect.width > 50 && rect.height > 50) return true
+                        }
+                    }
+                    const closeBtn = document.querySelector(
+                        'button[aria-label*="Close" i], button[title*="Close" i], [aria-label*="close" i], .ms-Dialog-button--close'
+                    )
+                    if (closeBtn) {
+                        const parent = closeBtn.closest('div, aside, section')
+                        if (parent && parent !== document.body) {
+                            const pt = (parent.textContent || '').toLowerCase()
+                            if (pt.includes('daily set') || pt.includes('streak') || pt.includes('complete all')) return true
+                        }
+                    }
+                    return false
+                })
+                .catch(() => false)
+
+            return isOpenNow
+        } catch {
+            return false
+        }
+    }
+
+    /**
      * Selesaikan kartu Daily Set langsung via Modern Flyout Drawer (rewards.bing.com/earn)
      */
     public async solveModernDailySetFlyout(
@@ -2681,43 +2801,34 @@ export class Workers {
             await ensureOnRewardsDashboard(page)
             await this.bot.utils.wait(1500)
 
-            const drawerSelector =
-                '[role="dialog"], aside, div[class*="flyout"], div[class*="drawer"], div[class*="panel"], div:has(> button[aria-label*="Close"])'
-            let drawer = page
-                .locator(drawerSelector)
-                .filter({ hasText: /Daily Set Streak|Complete all 3 activities/i })
-                .first()
-            let isDrawerOpen = await drawer.isVisible().catch(() => false)
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'DAILY-SET',
+                'Membuka Flyout Drawer "Daily Set Streak" langsung dari dashboard...',
+                'cyan'
+            )
 
-            if (!isDrawerOpen) {
-                // Cari kartu "Daily Set Streak" di dashboard untuk membuka drawer
-                const streakCard = page
-                    .locator('div, a, button, [role="button"]')
-                    .filter({ hasText: /Daily Set Streak/i })
-                    .first()
+            const isDrawerOpen = await this.openDailySetStreakFlyout(page)
 
-                if (await streakCard.isVisible().catch(() => false)) {
-                    this.bot.logger.info(
-                        this.bot.isMobile,
-                        'DAILY-SET',
-                        'Membuka Flyout Drawer "Daily Set Streak" langsung dari dashboard...',
-                        'cyan'
-                    )
-                    await streakCard.scrollIntoViewIfNeeded().catch(() => {})
-                    await streakCard.click().catch(async () => {
-                        await streakCard.evaluate((el: HTMLElement) => el.click()).catch(() => {})
-                    })
-                    await this.bot.utils.wait(2000)
+            // Cek jika kartu aktivitas sudah langsung terlihat di halaman (bisa berupa layout statis / responsive)
+            const hasVisibleCards = await page
+                .evaluate((titles: string[]) => {
+                    for (const t of titles) {
+                        if (!t) continue
+                        const all = Array.from(document.querySelectorAll('*'))
+                        for (const el of all) {
+                            if (el.children.length > 2) continue
+                            if ((el.textContent || '').toLowerCase().includes(t.toLowerCase())) {
+                                const rect = el.getBoundingClientRect()
+                                if (rect.width > 0 && rect.height > 0) return true
+                            }
+                        }
+                    }
+                    return false
+                }, activities.map(a => a.title).filter(Boolean))
+                .catch(() => false)
 
-                    drawer = page
-                        .locator(drawerSelector)
-                        .filter({ hasText: /Daily Set Streak|Complete all 3 activities/i })
-                        .first()
-                    isDrawerOpen = await drawer.isVisible().catch(() => false)
-                }
-            }
-
-            if (!isDrawerOpen) {
+            if (!isDrawerOpen && !hasVisibleCards) {
                 this.bot.logger.debug(
                     this.bot.isMobile,
                     'DAILY-SET',
@@ -2738,46 +2849,55 @@ export class Workers {
                 const key = activity.offerId || activity.title
                 if (executionMap.get(key)?.status === 'verified-complete') continue
 
-                const cleanTitle = (activity.title || '').replace(/[^\w\s]/g, ' ').trim()
-                const firstKeywords = cleanTitle.split(/\s+/).slice(0, 3).join(' ')
-                const firstWord = cleanTitle.split(/\s+/)[0] || ''
+                // 1. Evaluasi status kartu sebelum diklik
+                const cardCheck = await page
+                    .evaluate((targetTitle: string) => {
+                        const cleanTarget = targetTitle.toLowerCase().replace(/[^\w\s]/g, ' ').trim()
+                        const targetWords = cleanTarget.split(/\s+/).filter(w => w.length > 2)
+                        const all = Array.from(
+                            document.querySelectorAll('h1, h2, h3, h4, h5, p, span, div, a, button, [role="button"]')
+                        )
 
-                // Cari kartu di dalam drawer
-                const cardLocators = [
-                    drawer.locator(`div, [role="button"]`).filter({ hasText: activity.title }).first(),
-                    drawer.locator(`div, [role="button"]`).filter({ hasText: firstKeywords }).first(),
-                    drawer.locator(`div, [role="button"]`).filter({ hasText: firstWord }).first()
-                ]
+                        let foundEl: HTMLElement | null = null
+                        for (const el of all) {
+                            if (el.children.length > 2) continue
+                            const txt = (el.textContent || '').toLowerCase().replace(/[^\w\s]/g, ' ').trim()
+                            if (txt.includes(cleanTarget) || (targetWords.length > 0 && targetWords.every(w => txt.includes(w)))) {
+                                foundEl = el as HTMLElement
+                                break
+                            }
+                        }
+                        if (!foundEl && targetWords.length > 0) {
+                            const firstTwo = targetWords.slice(0, 2).join(' ')
+                            for (const el of all) {
+                                if (el.children.length > 2) continue
+                                if ((el.textContent || '').toLowerCase().includes(firstTwo)) {
+                                    foundEl = el as HTMLElement
+                                    break
+                                }
+                            }
+                        }
 
-                let cardEl: any = null
-                for (const loc of cardLocators) {
-                    if (await loc.isVisible().catch(() => false)) {
-                        cardEl = loc
-                        break
-                    }
-                }
+                        if (!foundEl) return { found: false, isComplete: false, points: 10 }
 
-                if (!cardEl) continue
-
-                // Periksa apakah kartu sudah memiliki centang selesai
-                const cardCheck = await cardEl
-                    .evaluate((node: HTMLElement) => {
-                        const txt = (node.innerText || '').toLowerCase()
+                        const card = (foundEl.closest(
+                            'button, a, [role="button"], [class*="card"], [class*="tile"], [class*="item"], div'
+                        ) || foundEl) as HTMLElement
+                        const txt = (card.innerText || card.textContent || '').toLowerCase()
                         const hasCheck =
-                            node.querySelector(
+                            card.querySelector(
                                 '.mee-icon-CheckMark, [data-icon-name="CheckMark"], svg[aria-label*="Complete"], [class*="check"]'
                             ) !== null ||
-                            node.classList.contains('completed') ||
-                            node.classList.contains('complete') ||
-                            node.getAttribute('aria-checked') === 'true'
-                        const hasPoints = /\+\d+/.test(txt)
+                            card.classList.contains('completed') ||
+                            card.classList.contains('complete') ||
+                            card.getAttribute('aria-checked') === 'true'
                         const ptMatch = txt.match(/\+(\d+)/)
-                        return {
-                            isComplete: hasCheck || (!hasPoints && (txt.includes('complete') || txt.includes('selesai'))),
-                            points: ptMatch && ptMatch[1] ? parseInt(ptMatch[1], 10) : 10
-                        }
-                    })
-                    .catch(() => ({ isComplete: false, points: 10 }))
+                        const points = ptMatch && ptMatch[1] ? parseInt(ptMatch[1], 10) : 10
+                        const isComplete = hasCheck || (!ptMatch && (txt.includes('complete') || txt.includes('selesai')))
+
+                        return { found: true, isComplete, points }
+                    }, activity.title)
+                    .catch(() => ({ found: false, isComplete: false, points: 10 }))
 
                 if (cardCheck.isComplete) {
                     this.bot.logger.info(
@@ -2799,12 +2919,6 @@ export class Workers {
                     continue
                 }
 
-                // Cari tombol atau elemen klik di dalam kartu
-                const actionBtn = cardEl
-                    .locator('button, a, [role="button"], div:has-text("+"), svg')
-                    .first()
-                const clickTarget = (await actionBtn.isVisible().catch(() => false)) ? actionBtn : cardEl
-
                 this.bot.logger.info(
                     this.bot.isMobile,
                     'DAILY-SET',
@@ -2814,10 +2928,65 @@ export class Workers {
                 const balanceBefore = Number(this.bot.userData.currentPoints ?? 0)
                 const popupPromise = page.context().waitForEvent('page', { timeout: 8000 }).catch(() => null)
 
-                await clickTarget.scrollIntoViewIfNeeded().catch(() => {})
-                await clickTarget.click({ timeout: 5000 }).catch(async () => {
-                    await clickTarget.evaluate((el: HTMLElement) => el.click()).catch(() => {})
-                })
+                // 2. Klik kartu di DOM
+                const clickSuccess = await page
+                    .evaluate((targetTitle: string) => {
+                        const cleanTarget = targetTitle.toLowerCase().replace(/[^\w\s]/g, ' ').trim()
+                        const targetWords = cleanTarget.split(/\s+/).filter(w => w.length > 2)
+                        const all = Array.from(
+                            document.querySelectorAll('h1, h2, h3, h4, h5, p, span, div, a, button, [role="button"]')
+                        )
+
+                        let foundEl: HTMLElement | null = null
+                        for (const el of all) {
+                            if (el.children.length > 2) continue
+                            const txt = (el.textContent || '').toLowerCase().replace(/[^\w\s]/g, ' ').trim()
+                            if (txt.includes(cleanTarget) || (targetWords.length > 0 && targetWords.every(w => txt.includes(w)))) {
+                                foundEl = el as HTMLElement
+                                break
+                            }
+                        }
+                        if (!foundEl && targetWords.length > 0) {
+                            const firstTwo = targetWords.slice(0, 2).join(' ')
+                            for (const el of all) {
+                                if (el.children.length > 2) continue
+                                if ((el.textContent || '').toLowerCase().includes(firstTwo)) {
+                                    foundEl = el as HTMLElement
+                                    break
+                                }
+                            }
+                        }
+                        if (!foundEl) return false
+
+                        const card = (foundEl.closest(
+                            'button, a, [role="button"], [class*="card"], [class*="tile"], [class*="item"], div'
+                        ) || foundEl) as HTMLElement
+                        const actionBtn = (card.querySelector(
+                            'button, a, [role="button"], [class*="button"], [class*="action"], svg'
+                        ) || card) as HTMLElement
+                        actionBtn.scrollIntoView({ block: 'center', behavior: 'instant' })
+                        actionBtn.focus()
+                        actionBtn.click()
+                        actionBtn.dispatchEvent(
+                            new MouseEvent('click', { bubbles: true, cancelable: true, view: window })
+                        )
+                        return true
+                    }, activity.title)
+                    .catch(() => false)
+
+                // Playwright locator fallback jika DOM traversal tidak menemukan
+                if (!clickSuccess) {
+                    const cleanTitle = (activity.title || '').replace(/[^\w\s]/g, ' ').trim()
+                    const firstWord = cleanTitle.split(/\s+/)[0] || ''
+                    const cardEl = page
+                        .locator('[role="dialog"], aside, [class*="flyout"], [class*="drawer"], [class*="panel"], body')
+                        .locator('button, a, [role="button"], [class*="card"]')
+                        .filter({ hasText: firstWord })
+                        .first()
+                    if (await cardEl.isVisible().catch(() => false)) {
+                        await cardEl.click().catch(() => {})
+                    }
+                }
 
                 const popup = await popupPromise
 
@@ -2886,39 +3055,57 @@ export class Workers {
                         await ensureOnRewardsDashboard(page)
                         await this.bot.utils.wait(1500)
                         // Buka kembali flyout drawer jika tertutup setelah navigasi ulang
-                        drawer = page
-                            .locator(drawerSelector)
-                            .filter({ hasText: /Daily Set Streak|Complete all 3 activities/i })
-                            .first()
-                        if (!(await drawer.isVisible().catch(() => false))) {
-                            const streakCard = page
-                                .locator('div, a, button, [role="button"]')
-                                .filter({ hasText: /Daily Set Streak/i })
-                                .first()
-                            if (await streakCard.isVisible().catch(() => false)) {
-                                await streakCard.click().catch(() => {})
-                                await this.bot.utils.wait(1500)
-                            }
-                        }
+                        await this.openDailySetStreakFlyout(page).catch(() => false)
                     } else {
                         await this.bot.utils.wait(2500)
                     }
                 }
 
-                // Verifikasi centang selesai pasca-eksekusi di dalam drawer
+                // 3. Verifikasi centang selesai pasca-eksekusi
                 await this.bot.utils.wait(2000)
-                const isNowDone = await cardEl
-                    .evaluate((node: HTMLElement) => {
+                const isNowDone = await page
+                    .evaluate((targetTitle: string) => {
+                        const cleanTarget = targetTitle.toLowerCase().replace(/[^\w\s]/g, ' ').trim()
+                        const targetWords = cleanTarget.split(/\s+/).filter(w => w.length > 2)
+                        const all = Array.from(
+                            document.querySelectorAll('h1, h2, h3, h4, h5, p, span, div, a, button, [role="button"]')
+                        )
+
+                        let foundEl: HTMLElement | null = null
+                        for (const el of all) {
+                            if (el.children.length > 2) continue
+                            const txt = (el.textContent || '').toLowerCase().replace(/[^\w\s]/g, ' ').trim()
+                            if (txt.includes(cleanTarget) || (targetWords.length > 0 && targetWords.every(w => txt.includes(w)))) {
+                                foundEl = el as HTMLElement
+                                break
+                            }
+                        }
+                        if (!foundEl && targetWords.length > 0) {
+                            const firstTwo = targetWords.slice(0, 2).join(' ')
+                            for (const el of all) {
+                                if (el.children.length > 2) continue
+                                if ((el.textContent || '').toLowerCase().includes(firstTwo)) {
+                                    foundEl = el as HTMLElement
+                                    break
+                                }
+                            }
+                        }
+                        if (!foundEl) return false
+
+                        const card = (foundEl.closest(
+                            'button, a, [role="button"], [class*="card"], [class*="tile"], [class*="item"], div'
+                        ) || foundEl) as HTMLElement
+                        const txt = (card.innerText || card.textContent || '').toLowerCase()
                         const hasCheck =
-                            node.querySelector(
+                            card.querySelector(
                                 '.mee-icon-CheckMark, [data-icon-name="CheckMark"], svg[aria-label*="Complete"], [class*="check"]'
                             ) !== null ||
-                            node.classList.contains('completed') ||
-                            node.classList.contains('complete') ||
-                            node.getAttribute('aria-checked') === 'true'
-                        const hasPoints = /\+\d+/.test(node.innerText || '')
-                        return hasCheck || !hasPoints
-                    })
+                            card.classList.contains('completed') ||
+                            card.classList.contains('complete') ||
+                            card.getAttribute('aria-checked') === 'true'
+                        const ptMatch = txt.match(/\+(\d+)/)
+                        return hasCheck || (!ptMatch && (txt.includes('complete') || txt.includes('selesai')))
+                    }, activity.title)
                     .catch(() => false)
 
                 const balanceAfter = await this.bot.browser.func.getCurrentPoints().catch(() => balanceBefore)
@@ -2955,13 +3142,14 @@ export class Workers {
             }
 
             // Tutup drawer agar tidak menghalangi elemen dashboard lainnya
-            const closeBtn = drawer
-                .locator('button[aria-label*="Close"], button:has-text("✕"), button:has-text("Close"), .ms-Dialog-button--close, [class*="close"]')
-                .first()
-            if (await closeBtn.isVisible().catch(() => false)) {
-                await closeBtn.click().catch(() => {})
-                await this.bot.utils.wait(1000)
-            }
+            await page
+                .evaluate(() => {
+                    const closeBtn = document.querySelector(
+                        'button[aria-label*="Close" i], button[title*="Close" i], [aria-label*="close" i], .ms-Dialog-button--close'
+                    ) as HTMLElement
+                    if (closeBtn) closeBtn.click()
+                })
+                .catch(() => {})
 
             return true
         } catch (err) {
@@ -2978,11 +3166,11 @@ export class Workers {
         if (!tab || (typeof tab.isClosed === 'function' && tab.isClosed())) return
 
         const startQuizSelector =
-            '#rqStartQuiz, #rqStartQuizToken, input[value*="Start"], button:has-text("Start"), div[role="button"]:has-text("Start"), button:has-text("Mulai"), div[role="button"]:has-text("Mulai"), .btOption, [data-bi-name="startQuiz"], [id*="StartQuiz"]'
+            '#rqStartQuiz, #rqStartQuizToken, input[value*="Start" i], button:has-text("Start"), div[role="button"]:has-text("Start"), button:has-text("Mulai"), div[role="button"]:has-text("Mulai"), .btOption, [data-bi-name="startQuiz"], [id*="StartQuiz"], input[value*="playing" i], a.rq_button'
         const quizOptionsSelector =
             '[id^="rqAnswerOption"], .btOption, [id^="btoption"], .rqOptions, .wk_Option, [role="radio"], button.optionBtn, .bt_poll, input[type="radio"], .rqOption, .rq_button, [data-option], .rq-option, [data-option-id], .quiz-option, .c-card__content [role="button"], div[class*="option"]:not([class*="disabled"]), button[class*="option"], div[role="radio"], button[role="radio"]'
         const nextBtnSelector =
-            '#rqNextQuestion, input#rqNextQuestion, input[value*="Next"], button:has-text("Next"), button:has-text("Berikutnya"), [id*="nextQuestion"], [data-bi-name="nextQuestion"]'
+            '#rqNextQuestion, input#rqNextQuestion, input[value*="Next" i], button:has-text("Next"), button:has-text("Berikutnya"), [id*="nextQuestion"], [data-bi-name="nextQuestion"]'
 
         try {
             await tab.waitForSelector(`${startQuizSelector}, ${quizOptionsSelector}`, {
@@ -2991,7 +3179,16 @@ export class Workers {
             }).catch(() => {})
         } catch {}
 
-        for (let q = 0; q < 10; q++) {
+        // Tunggu hidrasi widget jika belum langsung terlihat
+        for (let waitAttempt = 0; waitAttempt < 3; waitAttempt++) {
+            if (typeof tab.isClosed === 'function' && tab.isClosed()) return
+            const hasStart = await tab.locator(startQuizSelector).first().isVisible().catch(() => false)
+            const optCount = await tab.locator(quizOptionsSelector).count().catch(() => 0)
+            if (hasStart || optCount > 0) break
+            await this.bot.utils.wait(1500)
+        }
+
+        for (let q = 0; q < 12; q++) {
             if (typeof tab.isClosed === 'function' && tab.isClosed()) break
 
             const startBtn = tab.locator(startQuizSelector).first()
@@ -3044,6 +3241,12 @@ export class Workers {
                     await nextBtn.click({ force: true }).catch(() => {})
                     await this.bot.utils.wait(1500)
                     continue
+                }
+                // Jika optCount === 0 pada q === 0, tunggu hidrasi sekali lagi sebelum menyerah
+                if (q === 0) {
+                    await this.bot.utils.wait(2000)
+                    const recheckOpt = await quizOptions.count().catch(() => 0)
+                    if (recheckOpt > 0) continue
                 }
                 break
             }
