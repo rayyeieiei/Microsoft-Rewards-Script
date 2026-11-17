@@ -37,3 +37,8 @@ DAFTAR-AKUN-BANNED*
 
 # Standalone Lite Repo folder
 Microsoft-Rewards-Script - Lite/
+
+# Runtime artifacts & snapshots
+error_accounts.txt
+screen.jpg
+*.jpg
