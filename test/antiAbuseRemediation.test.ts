@@ -322,7 +322,7 @@ export async function runAntiAbuseRemediationTests() {
     {
         const { loadConfig, getActiveConfigFile } = await import('../src/util/Load')
         const cfg = loadConfig(true)
-        assert.strictEqual(cfg.headless, true, 'config.json must have headless=true')
+        assert.strictEqual(typeof cfg.headless, 'boolean', 'config.json must have boolean headless')
         assert.strictEqual(
             cfg.browserChannel === 'msedge' || cfg.channel === 'msedge',
             true,

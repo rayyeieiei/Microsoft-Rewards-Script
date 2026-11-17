@@ -122,6 +122,25 @@ class Browser {
             const edgeExecutable = this.resolveEdgeExecutablePath()
             const edgeChannel = this.bot.config.browserChannel || this.bot.config.channel || 'msedge'
 
+            // Linux Display Environment Auto-Recovery: jika headless: false namun DISPLAY belum diset, bind ke default :0 jika socket X11 ada
+            if (this.bot.config.headless === false && process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
+                if (fs.existsSync('/tmp/.X11-unix/X0')) {
+                    process.env.DISPLAY = ':0'
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'BROWSER',
+                        'DISPLAY variable missing in Linux environment, auto-set to default DISPLAY=:0'
+                    )
+                } else {
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'BROWSER',
+                        '⚠️ Headless=false diaktifkan di Linux namun tidak ada XServer/DISPLAY aktif! Browser mungkin gagal tampil.',
+                        'yellow'
+                    )
+                }
+            }
+
             const launchOptions: any = {
                 headless: this.bot.config.headless === true,
                 channel: edgeChannel,

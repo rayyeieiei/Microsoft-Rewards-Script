@@ -4,6 +4,7 @@ import path from 'path'
 import crypto from 'crypto'
 import { EventEmitter } from 'events'
 import { Database } from './Database'
+import { getActiveConfigFile } from './Load'
 
 export const logEmitter = new EventEmitter()
 
@@ -1460,9 +1461,10 @@ export class DashboardServer {
                         res.writeHead(200, { 'Content-Type': 'application/json' })
                         res.end(JSON.stringify({ success: true }))
 
-                        // Dynamic write to config.json
+                        // Dynamic write to active configuration file (config.dev.json when in -dev mode, or config.json)
                         try {
-                            const configPath = path.join(process.cwd(), 'config.json')
+                            const activeFile = getActiveConfigFile()
+                            const configPath = path.join(process.cwd(), activeFile)
                             const currentConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'))
                             const updatedConfig = { ...currentConfig, ...body }
                             fs.writeFileSync(configPath, JSON.stringify(updatedConfig, null, 4))
@@ -1472,11 +1474,11 @@ export class DashboardServer {
 
                             // Emit logs to reflect update
                             broadcastC2Log(
-                                `[CONFIG] Configuration updated via C2 Web UI: ${JSON.stringify(body)}`
+                                `[CONFIG] Configuration updated via C2 Web UI (${activeFile}): ${JSON.stringify(body)}`
                             )
                         } catch (err) {
                             const errMsg = err instanceof Error ? err.message : String(err)
-                            broadcastC2Log(`[ERROR] Failed to save config to config.json: ${errMsg}`)
+                            broadcastC2Log(`[ERROR] Failed to save config to ${getActiveConfigFile()}: ${errMsg}`)
                         }
                         return
                     }
