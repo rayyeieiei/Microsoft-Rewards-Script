@@ -351,10 +351,14 @@ export class ManualQuestQueue {
         await this.schedulePersist()
     }
 
-    public getSanitizedSnapshot(): Record<string, ManualQuestPublicDto[]> {
+    public getSanitizedSnapshot(activeAccountIds?: string[]): Record<string, ManualQuestPublicDto[]> {
         const snapshot: Record<string, ManualQuestPublicDto[]> = {}
+        const allowedIds = activeAccountIds ? new Set(activeAccountIds) : null
 
-        for (const accMap of this.queue.values()) {
+        for (const [accId, accMap] of this.queue.entries()) {
+            if (allowedIds && !allowedIds.has(accId)) {
+                continue
+            }
             for (const r of accMap.values()) {
                 const displayKey = r.displayAccount || 'unknown'
                 if (!snapshot[displayKey]) {
@@ -383,6 +387,122 @@ export class ManualQuestQueue {
         }
 
         return snapshot
+    }
+
+    public async pruneInactiveAccounts(activeAccountIds: string[]): Promise<number> {
+        const allowed = new Set(activeAccountIds)
+        let prunedCount = 0
+
+        for (const [accId, accMap] of this.queue.entries()) {
+            if (!allowed.has(accId)) {
+                prunedCount += accMap.size
+                this.queue.delete(accId)
+            }
+        }
+
+        if (prunedCount > 0) {
+            await this.schedulePersist()
+        }
+
+        return prunedCount
+    }
+
+    public async pruneStaleRecords(maxAgeDays = 14, nowMs = Date.now()): Promise<number> {
+        const maxAgeMs = maxAgeDays * 24 * 60 * 60 * 1000
+        let prunedCount = 0
+
+        for (const [accId, accMap] of this.queue.entries()) {
+            for (const [key, r] of accMap.entries()) {
+                const refTime = r.observedAt ? new Date(r.observedAt).getTime() : new Date(r.queuedAt).getTime()
+                if (!isNaN(refTime) && nowMs - refTime > maxAgeMs) {
+                    accMap.delete(key)
+                    prunedCount++
+                }
+            }
+            if (accMap.size === 0) {
+                this.queue.delete(accId)
+            }
+        }
+
+        if (prunedCount > 0) {
+            await this.schedulePersist()
+        }
+
+        return prunedCount
+    }
+
+    public async deleteRecord(accountIdOrDisplay: string, offerId: string): Promise<boolean> {
+        const targetOfferId = offerId.trim().toLowerCase()
+        let deleted = false
+
+        for (const [accId, accMap] of this.queue.entries()) {
+            const matchesAccount =
+                !accountIdOrDisplay ||
+                accId === accountIdOrDisplay ||
+                Array.from(accMap.values()).some(r => r.displayAccount === accountIdOrDisplay)
+
+            if (matchesAccount) {
+                for (const [key, r] of accMap.entries()) {
+                    if (r.offerId.trim().toLowerCase() === targetOfferId) {
+                        accMap.delete(key)
+                        deleted = true
+                    }
+                }
+                if (accMap.size === 0) {
+                    this.queue.delete(accId)
+                }
+            }
+        }
+
+        if (deleted) {
+            await this.schedulePersist()
+        }
+
+        return deleted
+    }
+
+    public async updateStateByOfferId(
+        offerId: string,
+        state: ManualQuestState,
+        displayAccountOrId?: string,
+        observedDelta?: number
+    ): Promise<boolean> {
+        const targetOfferId = offerId.trim().toLowerCase()
+        let updated = false
+
+        for (const [accId, accMap] of this.queue.entries()) {
+            const matchesAccount =
+                !displayAccountOrId ||
+                accId === displayAccountOrId ||
+                Array.from(accMap.values()).some(r => r.displayAccount === displayAccountOrId)
+
+            if (matchesAccount) {
+                for (const r of accMap.values()) {
+                    if (r.offerId.trim().toLowerCase() === targetOfferId) {
+                        r.state = state
+                        if (state === 'verified-complete') {
+                            r.complete = true
+                            r.completedAt = new Date().toISOString()
+                            if (typeof observedDelta === 'number') {
+                                r.observedAccountBalanceDelta = observedDelta
+                            }
+                        }
+                        updated = true
+                    }
+                }
+            }
+        }
+
+        if (updated) {
+            await this.schedulePersist()
+        }
+
+        return updated
+    }
+
+    public async clearAll(): Promise<void> {
+        this.queue.clear()
+        await this.schedulePersist()
     }
 
     public async pruneExpired(retentionDays: number, nowMs = Date.now()): Promise<number> {

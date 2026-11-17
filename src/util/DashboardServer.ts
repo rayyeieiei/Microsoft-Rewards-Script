@@ -213,6 +213,17 @@ export function registerManualQuestProvider(provider: ManualQuestProvider) {
     manualQuestProvider = provider
 }
 
+export type ManualQuestActionHandler = (
+    action: string,
+    offerId?: string,
+    displayAccount?: string
+) => Promise<boolean | number | void>
+let manualQuestActionHandler: ManualQuestActionHandler | null = null
+
+export function registerManualQuestActionHandler(handler: ManualQuestActionHandler) {
+    manualQuestActionHandler = handler
+}
+
 const htmlPage = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -515,6 +526,42 @@ const htmlPage = `<!DOCTYPE html>
         .quest-app-only { background-color: #1e293b; color: #38bdf8; border: 1px solid #0284c7; }
         .quest-punch-card { background-color: #3b0764; color: #e879f9; border: 1px solid #a855f7; }
         .quest-legacy { background-color: #3f3f46; color: #d4d4d8; border: 1px solid #71717a; }
+
+        .btn-xs {
+            padding: 0.25rem 0.6rem;
+            font-size: 0.75rem;
+            font-weight: 600;
+            border-radius: 4px;
+            border: none;
+            color: #fff;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+        .btn-xs:hover { opacity: 0.85; }
+        .btn-action-done {
+            background-color: #059669;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            padding: 2px 7px;
+            font-size: 0.75rem;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        .btn-action-done:hover { background-color: #10b981; }
+        .btn-action-del {
+            background-color: #dc2626;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            padding: 2px 7px;
+            font-size: 0.75rem;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        .btn-action-del:hover { background-color: #ef4444; }
     </style>
 </head>
 <body>
@@ -581,10 +628,14 @@ const htmlPage = `<!DOCTYPE html>
 
             <!-- Manual Action Required & Onboarding Queue -->
             <div class="panel" style="margin-top: 1.5rem; margin-bottom: 0;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem;">
                     <div class="panel-title" style="margin-bottom: 0;">
                         Manual Quests & Onboarding Queue
                         <span id="manual-quests-badge" class="status-badge status-pending" style="margin-left: 0.5rem; display: none;">0 Pending</span>
+                    </div>
+                    <div style="display: flex; gap: 0.5rem;">
+                        <button class="btn-xs" style="background-color: #3b82f6;" onclick="syncManualQuests('sync')" title="Sinkronkan dan bersihkan akun non-aktif">🔄 Sync Akun</button>
+                        <button class="btn-xs" style="background-color: #ef4444;" onclick="syncManualQuests('clear-all')" title="Hapus semua antrean manual">🗑️ Clear Queue</button>
                     </div>
                 </div>
                 <div class="table-container">
@@ -886,6 +937,41 @@ const htmlPage = `<!DOCTYPE html>
             }
         }
 
+        async function resolveManualQuest(offerId, displayAccount, action) {
+            try {
+                const res = await fetch('/api/manual-quests/action', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action, offerId, displayAccount })
+                });
+                const json = await res.json();
+                if (json.success) {
+                    fetchStatus();
+                }
+            } catch (err) {
+                console.error('Failed to resolve manual quest:', err);
+            }
+        }
+
+        async function syncManualQuests(action) {
+            if (action === 'clear-all' && !confirm('Bersihkan semua antrean manual quest?')) {
+                return;
+            }
+            try {
+                const res = await fetch('/api/manual-quests/action', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action })
+                });
+                const json = await res.json();
+                if (json.success) {
+                    fetchStatus();
+                }
+            } catch (err) {
+                console.error('Failed to sync manual quests:', err);
+            }
+        }
+
         async function fetchStatus() {
             try {
                 const res = await fetch('/api/status');
@@ -1048,11 +1134,16 @@ const htmlPage = `<!DOCTYPE html>
                                 kindLabel = 'Punch Card';
                             }
 
-                            let linkHtml = '<span style="color:#64748b;">-</span>';
+                            let openBtn = '';
                             if (q.destination && q.destination.origin && q.destination.path) {
                                 const fullUrl = q.destination.origin + q.destination.path;
-                                linkHtml = '<a href="' + fullUrl + '" target="_blank" rel="noopener noreferrer" style="color:#38bdf8; text-decoration:none; font-size:0.8rem; font-weight:600;">Open ↗</a>';
+                                openBtn = '<a href="' + fullUrl + '" target="_blank" rel="noopener noreferrer" style="color:#38bdf8; text-decoration:none; font-size:0.75rem; font-weight:600; margin-right:4px;">Open ↗</a>';
                             }
+                            const safeOfferId = (q.offerId || '').replace(/'/g, "\\'");
+                            const safeDisplay = (q.displayAccount || '').replace(/'/g, "\\'");
+                            const completeBtn = '<button class="btn-action-done" onclick="resolveManualQuest(\'' + safeOfferId + '\', \'' + safeDisplay + '\', \'mark-complete\')" title="Tandai Selesai">✓</button>';
+                            const dismissBtn = '<button class="btn-action-del" onclick="resolveManualQuest(\'' + safeOfferId + '\', \'' + safeDisplay + '\', \'dismiss\')" title="Hapus dari antrean">✕</button>';
+                            const actionCell = '<div style="display:flex; align-items:center; gap:4px;">' + openBtn + completeBtn + dismissBtn + '</div>';
 
                             return '<tr>' +
                                 '<td><strong>' + (q.displayAccount || '-') + '</strong></td>' +
@@ -1060,7 +1151,7 @@ const htmlPage = `<!DOCTYPE html>
                                 '<td>' + (q.title || q.offerId) + '</td>' +
                                 '<td class="highlight-green">+' + (q.expectedPoints || 0) + '</td>' +
                                 '<td><span class="status-badge ' + getStatusClass(q.state) + '">' + q.state + '</span></td>' +
-                                '<td>' + linkHtml + '</td>' +
+                                '<td>' + actionCell + '</td>' +
                                 '</tr>';
                         }).join('');
                     }
@@ -1310,6 +1401,39 @@ export class DashboardServer {
                         return
                     }
                 } else if (method === 'POST') {
+                    if (url === '/api/manual-quests/action') {
+                        const contentType = (req.headers['content-type'] || '').toLowerCase()
+                        if (!contentType.includes('application/json')) {
+                            res.writeHead(400, { 'Content-Type': 'application/json' })
+                            res.end(JSON.stringify({ success: false, reason: 'invalid-content-type' }))
+                            return
+                        }
+
+                        const body = await this.parseJsonBody(req)
+                        if (!body || body._error || typeof body !== 'object') {
+                            res.writeHead(400, { 'Content-Type': 'application/json' })
+                            res.end(JSON.stringify({ success: false, reason: body?._error || 'invalid-json' }))
+                            return
+                        }
+
+                        if (!manualQuestActionHandler) {
+                            res.writeHead(503, { 'Content-Type': 'application/json' })
+                            res.end(JSON.stringify({ success: false, reason: 'handler-unavailable' }))
+                            return
+                        }
+
+                        try {
+                            const result = await manualQuestActionHandler(body.action, body.offerId, body.displayAccount)
+                            broadcastC2Log(`[MANUAL-QUEST] Action '${body.action}' processed for offerId='${body.offerId || 'all'}' display='${body.displayAccount || 'all'}'`)
+                            res.writeHead(200, { 'Content-Type': 'application/json' })
+                            res.end(JSON.stringify({ success: true, result }))
+                        } catch (err: any) {
+                            res.writeHead(500, { 'Content-Type': 'application/json' })
+                            res.end(JSON.stringify({ success: false, error: err?.message || String(err) }))
+                        }
+                        return
+                    }
+
                     if (url === '/api/control') {
                         const contentType = (req.headers['content-type'] || '').toLowerCase()
                         if (!contentType.includes('application/json')) {

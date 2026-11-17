@@ -1764,8 +1764,32 @@ export class Workers {
                     `"${title}" | Progress: ${progress.progressStr} | Points: ${progress.pointsStr} | Status: Already Completed 🎉`,
                     'green'
                 )
+                try {
+                    const identity = resolveAccountIdentity(
+                        this.bot.activeAccount || { email: this.bot.userData.userName || 'unknown' }
+                    )
+                    const queue = (this.bot as any).manualQuestQueue as ManualQuestQueue | undefined
+                    if (queue && offerId) {
+                        await queue.updateState(identity.accountId, 'punch-card', offerId, 'verified-complete')
+                    }
+                } catch {}
                 continue
             }
+
+            // Sync already-complete child steps with manual quest queue
+            try {
+                const identity = resolveAccountIdentity(
+                    this.bot.activeAccount || { email: this.bot.userData.userName || 'unknown' }
+                )
+                const queue = (this.bot as any).manualQuestQueue as ManualQuestQueue | undefined
+                if (queue && Array.isArray(card.childPromotions)) {
+                    for (const child of card.childPromotions) {
+                        if (isChildComplete(child) && child.offerId) {
+                            await queue.updateState(identity.accountId, 'punch-card', child.offerId, 'verified-complete')
+                        }
+                    }
+                }
+            } catch {}
 
             const counts = this.getPunchCardTaskCounts(card)
 
@@ -2017,8 +2041,31 @@ export class Workers {
                         this.bot.logger.warn(
                             this.bot.isMobile,
                             'PUNCHCARD-GUARD',
-                            `[PUNCHCARD-GUARD] Langkah "${stepTitle}" adalah quest eksklusif aplikasi Bing App. Melewati navigasi browser.`
+                            `[PUNCHCARD-GUARD] Langkah "${stepTitle}" adalah quest eksklusif aplikasi Bing App. Dimasukkan ke Manual Quest Queue.`
                         )
+                        try {
+                            const identity = resolveAccountIdentity(
+                                this.bot.activeAccount || { email: this.bot.userData.userName || 'unknown' }
+                            )
+                            const queue = (this.bot as any).manualQuestQueue as ManualQuestQueue | undefined
+                            if (queue && targetChildOfferId) {
+                                await queue.enqueue({
+                                    accountId: identity.accountId,
+                                    displayAccount: identity.displayAccount,
+                                    questKind: 'punch-card',
+                                    offerId: targetChildOfferId,
+                                    title: `${title}: ${stepTitle}`,
+                                    expectedPoints: activeChild.pointProgressMax ?? 10,
+                                    complete: false,
+                                    locked: false,
+                                    lockReason: 'app-exclusive',
+                                    confidence: 'high',
+                                    observedAt: new Date().toISOString(),
+                                    state: 'manual-required',
+                                    queuedAt: new Date().toISOString()
+                                })
+                            }
+                        } catch {}
                         currentScope.recordAttempt(offerId, targetChildOfferId, 'processed-unverified')
                         continue
                     }
@@ -2064,6 +2111,20 @@ export class Workers {
                             if (offerId) this.completedOffersInSession.add(offerId)
                             this.completedOffersInSession.add(title.toLowerCase().trim())
                         }
+                        try {
+                            const identity = resolveAccountIdentity(
+                                this.bot.activeAccount || { email: this.bot.userData.userName || 'unknown' }
+                            )
+                            const queue = (this.bot as any).manualQuestQueue as ManualQuestQueue | undefined
+                            if (queue) {
+                                if (targetChildOfferId) {
+                                    await queue.updateState(identity.accountId, 'punch-card', targetChildOfferId, 'verified-complete', observedBalanceDelta)
+                                }
+                                if (runResult.after?.parentComplete && offerId) {
+                                    await queue.updateState(identity.accountId, 'punch-card', offerId, 'verified-complete', observedBalanceDelta)
+                                }
+                            }
+                        } catch {}
                     } else {
                         // Ambiguous / unchanged outcome -> ZERO second transport!
                         const childKey = targetChildOfferId ? `${offerId}:${targetChildOfferId}` : `${offerId}:${stepTitle}`

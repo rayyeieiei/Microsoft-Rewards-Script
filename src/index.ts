@@ -29,7 +29,8 @@ import {
     registerControlCallback,
     registerConfigCallback,
     registerIpConfirmCallback,
-    registerManualQuestProvider
+    registerManualQuestProvider,
+    registerManualQuestActionHandler
 } from './util/DashboardServer'
 import { AirplaneMode } from './util/AirplaneMode'
 import { ManualQuestQueue } from './runtime/manual/ManualQuestQueue'
@@ -1006,6 +1007,21 @@ export class MicrosoftRewardsBot {
 
         validateUniqueAccountIdentities(this.accounts)
         await this.manualQuestQueue.load()
+
+        // Sync manual quest queue: bersihkan akun non-aktif dan record basi
+        const activeIdentities = this.accounts.map(a => resolveAccountIdentity(a))
+        const activeIds = activeIdentities.map(i => i.accountId)
+        const prunedInactive = await this.manualQuestQueue.pruneInactiveAccounts(activeIds)
+        const prunedStale = await this.manualQuestQueue.pruneStaleRecords(14)
+        if (prunedInactive > 0 || prunedStale > 0) {
+            this.logger.info(
+                'main',
+                'QUEUE-SYNC',
+                `[QUEUE-SYNC] Antrean manual quest disinkronkan: ${prunedInactive} akun non-aktif, ${prunedStale} quest basi (>14 hari) dibersihkan.`,
+                'cyan'
+            )
+        }
+
         await Database.getInstance().initialize()
 
         // 1. Runtime Build Provenance
@@ -1191,7 +1207,36 @@ export class MicrosoftRewardsBot {
             })
             this.logger.info('main', 'DASHBOARD', `Local dashboard server started at http://localhost:4000`, 'green')
 
-            registerManualQuestProvider(() => this.manualQuestQueue.getSanitizedSnapshot())
+            registerManualQuestProvider(() => {
+                const activeAccountIds = this.accounts.map(a => resolveAccountIdentity(a).accountId)
+                return this.manualQuestQueue.getSanitizedSnapshot(activeAccountIds)
+            })
+
+            registerManualQuestActionHandler(async (action, offerId, displayAccount) => {
+                if (action === 'clear-all') {
+                    await this.manualQuestQueue.clearAll()
+                    this.logger.info('main', 'MANUAL-QUEST', 'Semua antrean manual quest telah dibersihkan.')
+                    return true
+                }
+                if (action === 'sync') {
+                    const activeAccountIds = this.accounts.map(a => resolveAccountIdentity(a).accountId)
+                    const p1 = await this.manualQuestQueue.pruneInactiveAccounts(activeAccountIds)
+                    const p2 = await this.manualQuestQueue.pruneStaleRecords(14)
+                    this.logger.info('main', 'MANUAL-QUEST', `Manual quest synced: ${p1} inactive accounts pruned, ${p2} stale records pruned.`)
+                    return p1 + p2
+                }
+                if (action === 'mark-complete' && offerId) {
+                    await this.manualQuestQueue.updateStateByOfferId(offerId, 'verified-complete', displayAccount)
+                    this.logger.info('main', 'MANUAL-QUEST', `Quest ${offerId} (${displayAccount || 'unknown'}) ditandai selesai secara manual.`, 'green')
+                    return true
+                }
+                if (action === 'dismiss' && offerId) {
+                    await this.manualQuestQueue.deleteRecord(displayAccount || '', offerId)
+                    this.logger.info('main', 'MANUAL-QUEST', `Quest ${offerId} (${displayAccount || 'unknown'}) dihapus dari antrean manual.`, 'yellow')
+                    return true
+                }
+                return false
+            })
 
             // Update initial dashboard state
             this.updateDashboardGlobal({
