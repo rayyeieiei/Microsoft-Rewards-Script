@@ -333,6 +333,7 @@ export async function runAntiAbuseRemediationTests() {
         // Test dev fallback
         const devConfigPath = path.join(process.cwd(), 'config.dev.json')
         const devConfigExistedBefore = fs.existsSync(devConfigPath)
+        const originalDevConfigContent = devConfigExistedBefore ? fs.readFileSync(devConfigPath, 'utf-8') : null
         try {
             fs.writeFileSync(devConfigPath, JSON.stringify({ ...cfg, headless: true }), 'utf-8')
             const originalArgv = [...process.argv]
@@ -344,6 +345,8 @@ export async function runAntiAbuseRemediationTests() {
         } finally {
             if (!devConfigExistedBefore && fs.existsSync(devConfigPath)) {
                 fs.unlinkSync(devConfigPath)
+            } else if (devConfigExistedBefore && originalDevConfigContent !== null) {
+                fs.writeFileSync(devConfigPath, originalDevConfigContent, 'utf-8')
             }
             loadConfig(true)
         }

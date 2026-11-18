@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import fs from 'node:fs'
 import cluster, { Worker } from 'cluster'
 import { chromium, type BrowserContext, type Cookie, type Page } from 'patchright'
 import axios from 'axios'
@@ -1222,8 +1223,9 @@ export class MicrosoftRewardsBot {
                     const activeAccountIds = this.accounts.map(a => resolveAccountIdentity(a).accountId)
                     const p1 = await this.manualQuestQueue.pruneInactiveAccounts(activeAccountIds)
                     const p2 = await this.manualQuestQueue.pruneStaleRecords(14)
-                    this.logger.info('main', 'MANUAL-QUEST', `Manual quest synced: ${p1} inactive accounts pruned, ${p2} stale records pruned.`)
-                    return p1 + p2
+                    const p3 = await this.manualQuestQueue.pruneExpired(1)
+                    this.logger.info('main', 'MANUAL-QUEST', `Manual quest synced: ${p1} inactive accounts pruned, ${p2 + p3} stale/completed records pruned.`)
+                    return p1 + p2 + p3
                 }
                 if (action === 'mark-complete' && offerId) {
                     await this.manualQuestQueue.updateStateByOfferId(offerId, 'verified-complete', displayAccount)
@@ -1238,7 +1240,18 @@ export class MicrosoftRewardsBot {
                 return false
             })
 
-            // Update initial dashboard state
+            // Update initial dashboard state with all loaded accounts
+            for (const acc of this.accounts) {
+                this.updateDashboardAccount(acc.email, {
+                    email: acc.email,
+                    status: 'Ready',
+                    initialPoints: 0,
+                    collectedPoints: 0,
+                    desktopProgress: '0/0',
+                    mobileProgress: '0/0'
+                })
+            }
+
             this.updateDashboardGlobal({
                 useDynamicWifiProxy: !!this.config.useDynamicWifiProxy,
                 useAdbIpRotation: !!this.config.useAdbIpRotation,
@@ -1361,9 +1374,16 @@ export class MicrosoftRewardsBot {
                             this.logger.info('main', 'MANUAL-BROWSER', `[MANUAL-BROWSER] Sesi berhasil dimuat (${loadResult.source}) untuk ${targetAcc.email}`)
                         }
 
+                        if (process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
+                            if (fs.existsSync('/tmp/.X11-unix/X0')) {
+                                process.env.DISPLAY = ':0'
+                            }
+                        }
+
+                        const edgeChannel = this.config.browserChannel || this.config.channel || 'msedge'
                         const browser = await chromium.launch({
                             headless: false,
-                            channel: this.config.channel || 'msedge',
+                            channel: edgeChannel,
                             args: [
                                 '--no-sandbox',
                                 '--disable-setuid-sandbox',

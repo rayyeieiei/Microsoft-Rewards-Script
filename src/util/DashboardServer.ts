@@ -133,6 +133,11 @@ export function updateDashboardGlobal(update: Partial<Omit<DashboardState, 'acco
 
 export function checkLinuxDisplayAvailable(): { available: boolean; error?: string } {
     if (process.platform === 'linux') {
+        if (!process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
+            if (fs.existsSync('/tmp/.X11-unix/X0')) {
+                process.env.DISPLAY = ':0'
+            }
+        }
         const hasX11 = Boolean(process.env.DISPLAY && process.env.DISPLAY.trim() !== '')
         const hasWayland = Boolean(process.env.WAYLAND_DISPLAY && process.env.WAYLAND_DISPLAY.trim() !== '')
         if (!hasX11 && !hasWayland) {
@@ -771,9 +776,11 @@ const htmlPage = `<!DOCTYPE html>
 
         function runSingle() {
             const email = document.getElementById('single-email').value.trim();
-            if (email) {
-                sendControl('start-single', email);
+            if (!email) {
+                alert('Pilih akun terlebih dahulu!');
+                return;
             }
+            sendControl('start-single', email);
         }
 
         async function openManualBrowser() {
@@ -1026,6 +1033,9 @@ const htmlPage = `<!DOCTYPE html>
                                 selectElem.value = currentVal;
                             }
                         }
+                        if (!selectElem.value && data.loadedAccounts && data.loadedAccounts.length > 0) {
+                            selectElem.value = data.loadedAccounts[0];
+                        }
                     }
                 }
 
@@ -1141,7 +1151,10 @@ const htmlPage = `<!DOCTYPE html>
                             }
                             const safeOfferId = (q.offerId || '').replace(/'/g, "\\'");
                             const safeDisplay = (q.displayAccount || '').replace(/'/g, "\\'");
-                            const completeBtn = '<button class="btn-action-done" onclick="resolveManualQuest(\'' + safeOfferId + '\', \'' + safeDisplay + '\', \'mark-complete\')" title="Tandai Selesai">✓</button>';
+                            const isCompleted = q.state === 'verified-complete' || q.complete;
+                            const completeBtn = !isCompleted
+                                ? '<button class="btn-action-done" onclick="resolveManualQuest(\'' + safeOfferId + '\', \'' + safeDisplay + '\', \'mark-complete\')" title="Tandai Selesai">✓</button>'
+                                : '';
                             const dismissBtn = '<button class="btn-action-del" onclick="resolveManualQuest(\'' + safeOfferId + '\', \'' + safeDisplay + '\', \'dismiss\')" title="Hapus dari antrean">✕</button>';
                             const actionCell = '<div style="display:flex; align-items:center; gap:4px;">' + openBtn + completeBtn + dismissBtn + '</div>';
 
