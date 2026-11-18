@@ -960,6 +960,14 @@ const htmlPage = `<!DOCTYPE html>
             }
         }
 
+        function handleQuestBtn(btn) {
+            if (!btn) return;
+            const offerId = decodeURIComponent(btn.getAttribute('data-offer') || '');
+            const displayAccount = decodeURIComponent(btn.getAttribute('data-display') || '');
+            const action = btn.getAttribute('data-action') || '';
+            resolveManualQuest(offerId, displayAccount, action);
+        }
+
         async function syncManualQuests(action) {
             if (action === 'clear-all' && !confirm('Bersihkan semua antrean manual quest?')) {
                 return;
@@ -1149,13 +1157,13 @@ const htmlPage = `<!DOCTYPE html>
                                 const fullUrl = q.destination.origin + q.destination.path;
                                 openBtn = '<a href="' + fullUrl + '" target="_blank" rel="noopener noreferrer" style="color:#38bdf8; text-decoration:none; font-size:0.75rem; font-weight:600; margin-right:4px;">Open ↗</a>';
                             }
-                            const safeOfferId = (q.offerId || '').replace(/'/g, "\\'");
-                            const safeDisplay = (q.displayAccount || '').replace(/'/g, "\\'");
+                            const safeOfferId = encodeURIComponent(q.offerId || '');
+                            const safeDisplay = encodeURIComponent(q.displayAccount || '');
                             const isCompleted = q.state === 'verified-complete' || q.complete;
                             const completeBtn = !isCompleted
-                                ? '<button class="btn-action-done" onclick="resolveManualQuest(\'' + safeOfferId + '\', \'' + safeDisplay + '\', \'mark-complete\')" title="Tandai Selesai">✓</button>'
+                                ? '<button class="btn-action-done" data-offer="' + safeOfferId + '" data-display="' + safeDisplay + '" data-action="mark-complete" onclick="handleQuestBtn(this)" title="Tandai Selesai">✓</button>'
                                 : '';
-                            const dismissBtn = '<button class="btn-action-del" onclick="resolveManualQuest(\'' + safeOfferId + '\', \'' + safeDisplay + '\', \'dismiss\')" title="Hapus dari antrean">✕</button>';
+                            const dismissBtn = '<button class="btn-action-del" data-offer="' + safeOfferId + '" data-display="' + safeDisplay + '" data-action="dismiss" onclick="handleQuestBtn(this)" title="Hapus dari antrean">✕</button>';
                             const actionCell = '<div style="display:flex; align-items:center; gap:4px;">' + openBtn + completeBtn + dismissBtn + '</div>';
 
                             return '<tr>' +
