@@ -905,7 +905,18 @@ export class MicrosoftRewardsBot {
                     }
                 }
 
-                // 4. Stop dashboard server if running
+                // 4. Auto-disconnect USB Tethering on shutdown to prevent background data drain
+                try {
+                    await this.tryDisableUsbTethering()
+                } catch (err) {
+                    this.logger.error(
+                        'main',
+                        'SHUTDOWN',
+                        `Error disabling USB tethering during shutdown: ${err instanceof Error ? err.message : String(err)}`
+                    )
+                }
+
+                // 5. Stop dashboard server if running
                 if (this.dashboardServer) {
                     try {
                         await this.dashboardServer.stop()
@@ -977,6 +988,41 @@ export class MicrosoftRewardsBot {
         } catch {
             return 'UNKNOWN_IP'
         }
+    }
+
+    /**
+     * Mematikan USB Tethering di HP Android secara aman via ADB untuk menghentikan kebocoran kuota
+     */
+    public async tryDisableUsbTethering(): Promise<boolean> {
+        const serial = this.config.networkRecovery?.adbSerial?.trim()
+        try {
+            if (this.config.useAdbIpRotation || this.config.networkRecovery?.reassertUsbTethering) {
+                return await AirplaneMode.disableUsbTethering(serial)
+            }
+            // Jika tidak diaktifkan via config secara eksplisit, periksa device ADB secara aman
+            const devCheck = await AirplaneMode.checkDevice(serial)
+            if (devCheck.ready && devCheck.deviceCount > 0) {
+                return await AirplaneMode.disableUsbTethering(serial)
+            }
+        } catch (err) {
+            this.logger.debug('main', 'NETWORK', `Silent skip USB untethering: ${err instanceof Error ? err.message : String(err)}`)
+        }
+        return false
+    }
+
+    /**
+     * Memastikan USB Tethering di HP Android aktif sebelum mulai tugas
+     */
+    public async tryEnableUsbTethering(): Promise<boolean> {
+        const serial = this.config.networkRecovery?.adbSerial?.trim()
+        try {
+            if (this.config.useAdbIpRotation || this.config.networkRecovery?.reassertUsbTethering) {
+                return await AirplaneMode.enableUsbTethering(serial)
+            }
+        } catch (err) {
+            this.logger.debug('main', 'NETWORK', `Silent skip USB tethering enable: ${err instanceof Error ? err.message : String(err)}`)
+        }
+        return false
     }
 
     async initialize(): Promise<void> {
@@ -1239,6 +1285,7 @@ export class MicrosoftRewardsBot {
                     }
                     this.logger.info('main', 'C2-CONTROL', 'Requesting bot execution to stop gracefully...')
                     this.stopRequested = true
+                    this.tryDisableUsbTethering().catch(() => {})
                 } else if (cmd.action === 'start-single') {
                     if (!cmd.email) {
                         this.logger.error('main', 'C2-CONTROL', 'No email provided for single account run!')
@@ -2268,6 +2315,9 @@ export class MicrosoftRewardsBot {
             proxyMode: !!this.localProxyPort
         })
 
+        // Pastikan USB Tethering aktif jika menggunakan rotasi IP ADB
+        await this.tryEnableUsbTethering()
+
         let currentIpAddress = await this.getCurrentIP(this.localProxyPort || undefined)
         this.logger.info('main', 'NETWORK', `Current Active IP: [ ${currentIpAddress} ]`)
         this.updateDashboardGlobal({ currentIP: currentIpAddress })
@@ -2413,6 +2463,7 @@ export class MicrosoftRewardsBot {
                 await this.localProxy.stop()
             }
             this.teardownCliOperatorListener()
+            await this.tryDisableUsbTethering()
             process.exit(0)
         }
 
@@ -2420,6 +2471,7 @@ export class MicrosoftRewardsBot {
             await this.localProxy.stop()
         }
         this.teardownCliOperatorListener()
+        await this.tryDisableUsbTethering()
         return accountStats
     }
 
@@ -2451,6 +2503,9 @@ export class MicrosoftRewardsBot {
             useDynamicWifiProxy: !!this.config.useDynamicWifiProxy,
             proxyMode: !!this.localProxyPort
         })
+
+        // Pastikan USB Tethering aktif jika menggunakan rotasi IP ADB
+        await this.tryEnableUsbTethering()
 
         let currentIpAddress = await this.getCurrentIP(this.localProxyPort || undefined)
         this.logger.info('main', 'NETWORK', `Current Active IP: [ ${currentIpAddress} ]`)
@@ -2602,6 +2657,7 @@ export class MicrosoftRewardsBot {
                 await this.localProxy.stop()
             }
             this.teardownCliOperatorListener()
+            await this.tryDisableUsbTethering()
             process.exit(0)
         }
 
@@ -2609,6 +2665,7 @@ export class MicrosoftRewardsBot {
             await this.localProxy.stop()
         }
         this.teardownCliOperatorListener()
+        await this.tryDisableUsbTethering()
         return accountStats
     }
 

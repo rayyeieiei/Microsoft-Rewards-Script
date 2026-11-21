@@ -168,4 +168,63 @@ export class AirplaneMode {
             return false;
         }
     }
+
+    /**
+     * Mematikan USB Tethering di HP Android secara aman via ADB.
+     * Mengembalikan fungsi USB ke MTP standar agar PC Windows langsung memutus koneksi kartu jaringan virtual RNDIS.
+     */
+    public static async disableUsbTethering(serial?: string): Promise<boolean> {
+        const adbPrefix = serial ? `adb -s ${serial}` : 'adb';
+        this.log('\n🛑  [ADB-NETWORK] Mematikan USB Tethering di HP Android agar kuota tidak bocor...');
+        try {
+            // Preflight check device
+            const devCheck = await this.checkDevice(serial);
+            if (!devCheck.ready) {
+                this.log(`⚠️  [ADB-NETWORK] Tidak dapat mematikan USB Tethering: Device ADB tidak terdeteksi (${devCheck.reason}).`);
+                return false;
+            }
+
+            // 1. Android 11+ AOSP untether command
+            try {
+                await execAsync(`${adbPrefix} shell cmd tethering untether usb`).catch(() => {});
+            } catch {}
+
+            // 2. Kembalikan fungsi USB ke MTP (File Transfer) yang otomatis mencabut adapter RNDIS di Windows
+            try {
+                await execAsync(`${adbPrefix} shell svc usb setFunctions mtp`).catch(() => {});
+            } catch {}
+
+            // 3. Fallback su / root jika diperlukan
+            try {
+                await execAsync(`${adbPrefix} shell su -c "cmd tethering untether usb || svc usb setFunctions mtp"`).catch(() => {});
+            } catch {}
+
+            this.log('✅  [ADB-NETWORK] USB Tethering berhasil dimatikan. Laptop berhenti menyedot kuota seluler HP!\n');
+            return true;
+        } catch (error) {
+            this.log(`⚠️  [ADB-NETWORK] Gagal mematikan USB Tethering via ADB: ${error instanceof Error ? error.message : String(error)}`, true);
+            return false;
+        }
+    }
+
+    /**
+     * Menyalakan kembali USB Tethering di HP Android via ADB
+     */
+    public static async enableUsbTethering(serial?: string): Promise<boolean> {
+        const adbPrefix = serial ? `adb -s ${serial}` : 'adb';
+        this.log('🔌  [ADB-NETWORK] Memastikan USB Tethering aktif di HP Android...');
+        try {
+            const devCheck = await this.checkDevice(serial);
+            if (!devCheck.ready) {
+                this.log(`⚠️  [ADB-NETWORK] Device ADB tidak terdeteksi (${devCheck.reason}).`);
+                return false;
+            }
+            await execAsync(`${adbPrefix} shell cmd tethering tether usb`).catch(() => {});
+            await execAsync(`${adbPrefix} shell svc usb setFunctions rndis`).catch(() => {});
+            return true;
+        } catch (error) {
+            this.log(`⚠️  [ADB-NETWORK] Gagal mengaktifkan USB Tethering: ${error instanceof Error ? error.message : String(error)}`, true);
+            return false;
+        }
+    }
 }

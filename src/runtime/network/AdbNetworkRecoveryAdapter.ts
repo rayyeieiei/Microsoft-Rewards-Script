@@ -361,6 +361,16 @@ export class AdbNetworkRecoveryAdapter implements NetworkRecoveryAdapter {
     }
 
     /**
+     * Mematikan USB Tethering di device ADB untuk menghemat kuota seluler
+     */
+    public async untetherUsb(signal?: AbortSignal): Promise<void> {
+        try {
+            await this.runAdb(['shell', 'cmd', 'tethering', 'untether', 'usb'], signal).catch(() => {})
+            await this.runAdb(['shell', 'svc', 'usb', 'setFunctions', 'mtp'], signal).catch(() => {})
+        } catch {}
+    }
+
+    /**
      * Best-effort single bounded restoration attempt.
      */
     public async attemptRestoration(signal?: AbortSignal): Promise<boolean> {
