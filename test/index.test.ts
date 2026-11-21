@@ -23,6 +23,7 @@ import { runChapter27ReadToEarnResilienceAndTokenSyncTests } from './chapter27Re
 import { runChapter28TokenExchangeAndConcurrencyMutexTests } from './chapter28TokenExchangeAndConcurrencyMutex.test'
 import { runChapter29SigintBandwidthTelemetryTests } from './chapter29SigintBandwidthTelemetry.test'
 import { runChapter30ZombieWorkerAndPunchCardResolverTests } from './chapter30ZombieWorkerAndPunchCardResolver.test'
+import { runChapter31UsbTetheringAndNetworkGuardTests } from './chapter31UsbTetheringAndNetworkGuard.test'
 
 async function runAll() {
     console.log('🧪 Starting Full Test Suite Execution...\n')
@@ -100,6 +101,9 @@ async function runAll() {
     console.log('')
 
     await runChapter30ZombieWorkerAndPunchCardResolverTests()
+    console.log('')
+
+    await runChapter31UsbTetheringAndNetworkGuardTests()
     console.log('')
 
     console.log('🎉 ALL TESTS IN SUITE PASSED SUCCESSFULLY!')
