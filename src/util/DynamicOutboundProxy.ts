@@ -19,25 +19,10 @@ export class DynamicOutboundProxy {
     }
 
     /**
-     * Mendeteksi IP lokal dari adapter Wi-Fi di Windows secara real-time
+     * Mendeteksi IP lokal dari adapter USB Tethering / Wi-Fi di Windows secara real-time
      */
     private updateWifiIp(): string {
-        const interfaces = os.networkInterfaces()
-        let foundIp = ''
-
-        for (const name of Object.keys(interfaces)) {
-            if (name.toLowerCase().includes('wi-fi') || name.toLowerCase().includes('wireless')) {
-                const iface = interfaces[name]
-                if (iface) {
-                    const ipv4 = iface.find(details => details.family === 'IPv4' && !details.internal)
-                    if (ipv4) {
-                        foundIp = ipv4.address
-                        break
-                    }
-                }
-            }
-        }
-
+        const foundIp = this.getRawWifiIp()
         if (foundIp) {
             this.currentWifiIp = foundIp
         } else {
@@ -49,8 +34,22 @@ export class DynamicOutboundProxy {
 
     private getRawWifiIp(): string {
         const interfaces = os.networkInterfaces()
+
+        // 1. Prioritas 1: Deteksi USB Tethering Android (Subnet khas 192.168.42.x)
         for (const name of Object.keys(interfaces)) {
-            if (name.toLowerCase().includes('wi-fi') || name.toLowerCase().includes('wireless')) {
+            const iface = interfaces[name]
+            if (iface) {
+                const usbIpv4 = iface.find(details => details.family === 'IPv4' && !details.internal && details.address.startsWith('192.168.42.'))
+                if (usbIpv4) {
+                    return usbIpv4.address
+                }
+            }
+        }
+
+        // 2. Prioritas 2: Adapter dengan nama/deskripsi RNDIS, Tethering, Cell, atau USB
+        for (const name of Object.keys(interfaces)) {
+            const lower = name.toLowerCase()
+            if (lower.includes('rndis') || lower.includes('tether') || lower.includes('cell') || lower.includes('usb')) {
                 const iface = interfaces[name]
                 if (iface) {
                     const ipv4 = iface.find(details => details.family === 'IPv4' && !details.internal)
@@ -60,6 +59,35 @@ export class DynamicOutboundProxy {
                 }
             }
         }
+
+        // 3. Prioritas 3: Wi-Fi atau Wireless Hotspot
+        for (const name of Object.keys(interfaces)) {
+            const lower = name.toLowerCase()
+            if (lower.includes('wi-fi') || lower.includes('wireless')) {
+                const iface = interfaces[name]
+                if (iface) {
+                    const ipv4 = iface.find(details => details.family === 'IPv4' && !details.internal)
+                    if (ipv4) {
+                        return ipv4.address
+                    }
+                }
+            }
+        }
+
+        // 4. Prioritas 4: Ethernet atau Local Area Connection aktif (non-internal, non-127.0.0.1)
+        for (const name of Object.keys(interfaces)) {
+            const lower = name.toLowerCase()
+            if (lower.includes('ethernet') || lower.includes('local area connection')) {
+                const iface = interfaces[name]
+                if (iface) {
+                    const ipv4 = iface.find(details => details.family === 'IPv4' && !details.internal && !details.address.startsWith('127.'))
+                    if (ipv4) {
+                        return ipv4.address
+                    }
+                }
+            }
+        }
+
         return ''
     }
 
@@ -71,8 +99,8 @@ export class DynamicOutboundProxy {
         }
 
         this.logger.warn('main', 'NETWORK-GUARD', '=======================================================', 'yellow')
-        this.logger.warn('main', 'NETWORK-GUARD', '⚠️ KONEKSI WI-FI HOTSPOT TERPUTUS! PAUSING EXECUTION...', 'yellow')
-        this.logger.warn('main', 'NETWORK-GUARD', '🔊 Memutar suara notifikasi... Menunggu Wi-Fi PC terhubung kembali ke Hotspot HP...', 'yellow')
+        this.logger.warn('main', 'NETWORK-GUARD', '⚠️ KONEKSI JARINGAN (USB TETHERING / WI-FI) TERPUTUS! PAUSING EXECUTION...', 'yellow')
+        this.logger.warn('main', 'NETWORK-GUARD', '🔊 Memutar suara notifikasi... Menunggu koneksi PC terhubung kembali ke HP...', 'yellow')
         this.logger.warn('main', 'NETWORK-GUARD', '=======================================================', 'yellow')
 
         try {
@@ -84,7 +112,7 @@ export class DynamicOutboundProxy {
             ip = this.getRawWifiIp()
         }
 
-        this.logger.info('main', 'NETWORK-GUARD', `🚀 SUKSES! Wi-Fi Terhubung Kembali! IP Baru: [ ${ip} ]`, 'green')
+        this.logger.info('main', 'NETWORK-GUARD', `🚀 SUKSES! Jaringan Terhubung Kembali! IP Baru: [ ${ip} ]`, 'green')
         try {
             require('child_process').exec(`powershell -c (New-Object Media.SoundPlayer "C:\\Windows\\Media\\notify.wav").PlaySync();`);
         } catch {}
