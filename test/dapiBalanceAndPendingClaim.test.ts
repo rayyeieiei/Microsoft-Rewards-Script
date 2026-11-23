@@ -312,5 +312,75 @@ export async function runDapiBalanceAndPendingClaimTests() {
         console.log('✅ Test 6 Passed: Workers in-browser DOM evaluate and multi-claim verified')
     }
 
-    console.log('🎉 ALL 6 DAPI BALANCE & PENDING CLAIM TESTS PASSED SUCCESSFULLY!\n')
+    // Test 7: Detailed discovery of pending points (reads pending points in detail first before claiming)
+    {
+        const bot = new MicrosoftRewardsBot()
+        bot.userData.currentPoints = 2000
+        let logMessages: string[] = []
+        bot.logger = {
+            info: (_isMobile: any, _tag: string, msg: string) => { logMessages.push(msg) },
+            warn: (_isMobile: any, _tag: string, msg: string) => { logMessages.push(String(msg)) },
+            error: (_isMobile: any, _tag: string, msg: string) => { logMessages.push(String(msg)) },
+            debug: (_isMobile: any, _tag: string, msg: string) => { logMessages.push(String(msg)) }
+        } as any
+
+        let evaluateCalled = false
+        const mockPage = {
+            isClosed: () => false,
+            url: () => 'https://rewards.bing.com/earn',
+            evaluate: async (fn: any) => {
+                evaluateCalled = true
+                return {
+                    items: [
+                        {
+                            title: 'Streak Bonus Activity',
+                            points: 12,
+                            actionText: 'Claim >',
+                            source: 'Dashboard Card'
+                        }
+                    ],
+                    count: 1,
+                    label: 'Claim >'
+                }
+            },
+            locator: (_sel: string) => ({
+                filter: (_opt: any) => ({
+                    count: async () => 0,
+                    nth: () => ({})
+                }),
+                count: async () => 0,
+                first: () => ({
+                    isVisible: async () => false,
+                    click: async () => {}
+                })
+            })
+        } as any
+
+        bot.browser = {
+            func: {
+                getCurrentPoints: async () => 2012
+            }
+        } as any
+
+        bot.utils = {
+            wait: async (_ms: number) => {}
+        } as any
+
+        const workers = new Workers(bot)
+        await workers.doClaimPendingPoints(mockPage)
+
+        assert.strictEqual(evaluateCalled, true, 'page.evaluate should be called for DOM scan')
+        assert.strictEqual(bot.userData.currentPoints, 2012, 'Account balance should be updated to 2012')
+        assert.strictEqual(bot.userData.gainedPoints, 12, 'gainedPoints should be +12')
+
+        const detailedScanLog = logMessages.find(m => m.includes('📌 Ditemukan 1 item pending point terperinci:'))
+        assert.ok(detailedScanLog, `Log should detect detailed scan item list, found: ${logMessages.join(', ')}`)
+
+        const itemLog = logMessages.find(m => m.includes('"Streak Bonus Activity" | Poin: 12 Pts | Status/Aksi: "Claim >"'))
+        assert.ok(itemLog, `Log should detail the specific item, found: ${logMessages.join(', ')}`)
+
+        console.log('✅ Test 7 Passed: Detailed pending points discovery and precision claim execution verified')
+    }
+
+    console.log('🎉 ALL 7 DAPI BALANCE & PENDING CLAIM TESTS PASSED SUCCESSFULLY!\n')
 }

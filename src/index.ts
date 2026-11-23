@@ -2980,7 +2980,7 @@ export class MicrosoftRewardsBot {
                         ? this.mainDesktopPage
                         : null
                 if (activeOwnerPage) {
-                    await this.workers.doClaimPendingPoints(activeOwnerPage)
+                    await this.workers.doClaimPendingPoints(activeOwnerPage, false, data)
                 }
 
                 if (this.config.workers.doAppPromotions && appData) {
@@ -3054,7 +3054,7 @@ export class MicrosoftRewardsBot {
                         ? this.mainDesktopPage
                         : null
                 if (postActivitiesPage) {
-                    await this.workers.doClaimPendingPoints(postActivitiesPage, true)
+                    await this.workers.doClaimPendingPoints(postActivitiesPage, true, punchCardData)
                 }
 
                 this.updateDashboardAccount(accountEmail, { status: 'Searching...' })
@@ -3116,7 +3116,7 @@ export class MicrosoftRewardsBot {
                             if (this.config.workers.doPunchCards) {
                                 await this.workers.doPunchCards(postSearchData, activePage)
                             }
-                            await this.workers.doClaimPendingPoints(activePage)
+                            await this.workers.doClaimPendingPoints(activePage, false, postSearchData)
                         }
                     }
                 } catch (postError) {

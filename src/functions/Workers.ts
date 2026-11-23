@@ -148,7 +148,7 @@ export class Workers {
         }
     }
 
-    public async doClaimPendingPoints(page: Page, isRecheck: boolean = false): Promise<void> {
+    public async doClaimPendingPoints(page: Page, isRecheck: boolean = false, data?: DashboardData): Promise<void> {
         if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return
         await this.checkAccountSuspended(page)
 
@@ -174,14 +174,82 @@ export class Workers {
                 'DASHBOARD',
                 `${prefix}Scanning Rewards dashboard for pending coins / "Ready to claim" cards...`
             )
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'DASHBOARD-SCAN',
+                `${prefix}🔍 Memeriksa pending points secara terperinci di dashboard...`
+            )
 
             let clicked = false
             let textFound = ''
+            const detailedDiscoveredItems: Array<{
+                title: string
+                points: number
+                actionText: string
+                source: string
+            }> = []
 
-            // 3. Multi-tier in-browser DOM scan via page.evaluate
+            // A. Periksa pending points dari objek API data jika tersedia
+            if (data) {
+                if (data.pointClaimBannerPromotion && !data.pointClaimBannerPromotion.complete) {
+                    detailedDiscoveredItems.push({
+                        title: data.pointClaimBannerPromotion.title || data.pointClaimBannerPromotion.name || 'Point Claim Banner',
+                        points: Number(data.pointClaimBannerPromotion.pointProgressMax ?? 0),
+                        actionText: 'Ready to claim',
+                        source: 'API (pointClaimBannerPromotion)'
+                    })
+                }
+                if (data.monthlyBonusHeroBannerPromotion && !data.monthlyBonusHeroBannerPromotion.complete) {
+                    detailedDiscoveredItems.push({
+                        title: data.monthlyBonusHeroBannerPromotion.title || 'Monthly Bonus Hero Banner',
+                        points: Number(data.monthlyBonusHeroBannerPromotion.pointProgressMax ?? 0),
+                        actionText: 'Ready to claim',
+                        source: 'API (monthlyBonusHeroBannerPromotion)'
+                    })
+                }
+                if (data.starBonusWeeklyBannerPromotion && !data.starBonusWeeklyBannerPromotion.complete) {
+                    detailedDiscoveredItems.push({
+                        title: data.starBonusWeeklyBannerPromotion.title || 'Star Bonus Weekly Banner',
+                        points: Number(data.starBonusWeeklyBannerPromotion.pointProgressMax ?? 0),
+                        actionText: 'Ready to claim',
+                        source: 'API (starBonusWeeklyBannerPromotion)'
+                    })
+                }
+                const promoItems = [
+                    ...(data.promotionalItems ?? []),
+                    ...(data.morePromotions ?? [])
+                ]
+                for (const promo of promoItems) {
+                    if (!promo) continue
+                    const idLower = (promo.offerId ?? '').toLowerCase()
+                    const titleLower = (promo.title ?? '').toLowerCase()
+                    const isClaimPromo = idLower.includes('claim') || idLower.includes('bonus') || titleLower.includes('claim') || titleLower.includes('klaim')
+                    if (isClaimPromo && !promo.complete && (promo.pointProgressMax ?? 0) > 0) {
+                        const remaining = (promo.pointProgressMax ?? 0) - (promo.pointProgress ?? 0)
+                        if (remaining > 0) {
+                            detailedDiscoveredItems.push({
+                                title: promo.title || promo.offerId || 'Promotional Bonus',
+                                points: remaining,
+                                actionText: 'Ready to claim',
+                                source: 'API (promotionalItems)'
+                            })
+                        }
+                    }
+                }
+            }
+
+            // B. Multi-tier in-browser DOM scan via page.evaluate
             if (typeof page.evaluate === 'function') {
                 try {
                     const domResult = await page.evaluate(() => {
+                        interface DiscoveredItem {
+                            title: string
+                            points: number
+                            actionText: string
+                            source: string
+                        }
+
+                        const discoveredItems: DiscoveredItem[] = []
                         let count = 0
                         const foundLabels: string[] = []
 
@@ -197,49 +265,147 @@ export class Workers {
                             }
                         }
 
-                        // A. Check for "Ready to claim" / "Siap diklaim" card containers
-                        const allEls = Array.from(document.querySelectorAll('*'))
-                        for (const el of allEls) {
-                            const txt = (el.textContent || '').trim().toLowerCase()
-                            if ((txt.includes('ready to claim') || txt.includes('siap diklaim')) && txt.length < 800) {
-                                if (el.closest('header, nav, footer, #footer, #b_results, #ans_nws, article.news')) continue
-                                const btn = (el.querySelector('button, a, [role="button"], [class*="claim"], [id*="claim"]') || el) as HTMLElement
-                                if (btn && triggerClick(btn)) {
-                                    count++
-                                    foundLabels.push('Ready to claim')
-                                }
-                            }
+                        const extractPts = (txt: string): number => {
+                            const m = txt.match(/\+(\d+)\s*(?:points|poin|pts|koin)?/i) ||
+                                      txt.match(/(?:ready\s*to\s*claim|siap\s*diklaim)[\s\S]*?(\d+)/i) ||
+                                      txt.match(/(\d+)\s*(?:points|poin|pts|koin)/i) ||
+                                      txt.match(/(?:claim|klaim|collect)[\s\S]*?(\d+)/i)
+                            return m && m[1] ? parseInt(m[1], 10) : 0
                         }
 
-                        // B. Direct buttons/links with claim keywords
-                        const claimCandidates = Array.from(document.querySelectorAll('button, a, [role="button"], [class*="claim"], [id*="claim"], [data-bi-id*="claim"]'))
-                        for (const c of claimCandidates) {
-                            const cTxt = (c.textContent || '').trim().toLowerCase()
-                            if (!cTxt || cTxt.length > 50) continue
-                            if (c.closest('header, nav, footer, #footer, #b_results, #ans_nws')) continue
-                            if (cTxt.includes('terms') || cTxt.includes('feedback') || cTxt.includes('privacy') || cTxt.includes('suggest')) continue
+                        const extractTitle = (container: HTMLElement): string => {
+                            const heading = container.querySelector('h1, h2, h3, h4, h5, [class*="title"], [class*="header"], strong, b')
+                            if (heading && heading.textContent) {
+                                const hTxt = heading.textContent.trim()
+                                if (hTxt && hTxt.length < 80) return hTxt
+                            }
+                            const lines = (container.textContent || '').split('\n').map(l => l.trim()).filter(Boolean)
+                            for (const line of lines) {
+                                if (line.length > 3 && line.length < 80 && !/^(?:\+\d+|\d+|claim|klaim|ready to claim|points|poin)$/i.test(line)) {
+                                    return line
+                                }
+                            }
+                            return 'Pending Activity'
+                        }
 
-                            const isClaimBtn = /^(?:claim|klaim)(?:\s*(?:all|semua|points|poin|now|sekarang|\+\d+|\d+|>))?$/i.test(cTxt) ||
-                                /(?:claim|klaim)\s*\+?\d+/i.test(cTxt) ||
-                                /\+\d+\s*(?:claim|klaim)/i.test(cTxt) ||
-                                cTxt.includes('ready to claim') ||
-                                cTxt.includes('siap diklaim')
+                        const claimRegex = /ready\s*to\s*claim|siap\s*di\s*klaim|siap\s*diklaim|\bclaim\b|\bklaim\b|\bcollect\b|\bkumpulkan\b|\bcheck-?in\b|\babsen\b/i
 
-                            if (isClaimBtn) {
-                                const htmlEl = c as HTMLElement
-                                const rect = htmlEl.getBoundingClientRect()
-                                if (rect.width > 0 && rect.height > 0) {
-                                    if (triggerClick(htmlEl)) {
+                        // 1. Scan flyout/drawer/dialog/modal containers first
+                        const modalContainers = Array.from(document.querySelectorAll(
+                            '.flyout, .drawer, [role="dialog"], [class*="modal"], [class*="drawer"], .ms-Panel, [class*="flyout"], [class*="panel"]'
+                        )) as HTMLElement[]
+
+                        for (const mc of modalContainers) {
+                            const mTxt = (mc.textContent || '').trim()
+                            if (!mTxt || mTxt.length > 3000) continue
+
+                            const claimBtns = Array.from(mc.querySelectorAll('button, a, [role="button"], [class*="claim"], [id*="claim"]')) as HTMLElement[]
+                            for (const cb of claimBtns) {
+                                const cbt = (cb.textContent || '').trim()
+                                const isClaim = /^(?:claim|klaim|collect|kumpulkan)(?:\s*(?:all|semua|points|poin|now|sekarang|\+\d+|\d+|>))?$/i.test(cbt) ||
+                                                /(?:claim|klaim|collect)\s*\+?\d+/i.test(cbt) ||
+                                                /\+\d+\s*(?:claim|klaim)/i.test(cbt) ||
+                                                /ready\s*to\s*claim|siap\s*diklaim/i.test(cbt)
+                                if (isClaim) {
+                                    const parentItem = cb.closest('li, [class*="item"], [class*="card"], [class*="row"]') || mc
+                                    const pts = extractPts(parentItem.textContent || cbt)
+                                    const title = extractTitle(parentItem as HTMLElement)
+                                    discoveredItems.push({
+                                        title,
+                                        points: pts,
+                                        actionText: cbt || 'Claim',
+                                        source: 'Flyout / Modal'
+                                    })
+                                    if (triggerClick(cb)) {
                                         count++
-                                        foundLabels.push(cTxt)
+                                        foundLabels.push(`[Modal] ${cbt || 'Claim'}`)
                                     }
                                 }
                             }
                         }
 
-                        // C. Dismiss / Confirm modal flyout dialog if opened
-                        const modalBtns = Array.from(document.querySelectorAll('.flyout button, .drawer button, [role="dialog"] button, [class*="modal"] button, [class*="drawer"] button, .ms-Panel button, [class*="flyout"] button'))
-                        for (const mb of modalBtns) {
+                        // 2. Scan card containers in main page
+                        const cardContainers = Array.from(document.querySelectorAll(
+                            '[class*="card"], [class*="tile"], [class*="banner"], [class*="promo"], [class*="item"], [role="region"], li, article'
+                        )) as HTMLElement[]
+
+                        for (const container of cardContainers) {
+                            const txt = (container.textContent || '').trim()
+                            if (!txt || txt.length > 2000) continue
+                            if (container.closest('header, nav, footer, #footer, #b_results, #ans_nws, article.news, .flyout, .drawer, [role="dialog"]')) continue
+
+                            if (claimRegex.test(txt)) {
+                                const isCompleted = txt.includes('completed') || txt.includes('diklaim') || txt.includes('claimed')
+                                const innerBtn = (container.querySelector('button, a, [role="button"], [class*="claim"], [class*="action"], [id*="claim"]') || container) as HTMLElement
+                                const innerBtnTxt = (innerBtn?.textContent || '').trim()
+
+                                const hasActiveClaimBtn = claimRegex.test(innerBtnTxt) || /ready|siap|koin|\+\d+/i.test(innerBtnTxt)
+                                if (!isCompleted || hasActiveClaimBtn) {
+                                    const pts = extractPts(txt)
+                                    const title = extractTitle(container)
+                                    const actionLabel = innerBtnTxt || 'Claim'
+
+                                    const exists = discoveredItems.some(it => it.title === title && it.points === pts)
+                                    if (!exists) {
+                                        discoveredItems.push({
+                                            title,
+                                            points: pts,
+                                            actionText: actionLabel,
+                                            source: 'Dashboard Card'
+                                        })
+                                        if (triggerClick(innerBtn)) {
+                                            count++
+                                            foundLabels.push(actionLabel)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // 3. Scan direct buttons/links
+                        const directButtons = Array.from(document.querySelectorAll(
+                            'button, a, [role="button"], [class*="claim"], [id*="claim"], [data-bi-id*="claim"]'
+                        )) as HTMLElement[]
+
+                        for (const btn of directButtons) {
+                            const bTxt = (btn.textContent || '').trim()
+                            if (!bTxt || bTxt.length > 60) continue
+                            if (btn.closest('header, nav, footer, #footer, #b_results, #ans_nws, article.news')) continue
+                            if (/terms|privacy|feedback|suggest|bantuan|syarat/i.test(bTxt)) continue
+
+                            const isClaim = /^(?:claim|klaim|collect|kumpulkan)(?:\s*(?:all|semua|points|poin|now|sekarang|\+\d+|\d+|>))?$/i.test(bTxt) ||
+                                            /(?:claim|klaim|collect)\s*\+?\d+/i.test(bTxt) ||
+                                            /\+\d+\s*(?:claim|klaim)/i.test(bTxt) ||
+                                            /ready\s*to\s*claim|siap\s*diklaim/i.test(bTxt)
+
+                            if (isClaim) {
+                                const rect = btn.getBoundingClientRect()
+                                if (rect.width > 0 && rect.height > 0) {
+                                    const parent = (btn.closest('div, li, section') || btn) as HTMLElement
+                                    const pts = extractPts(parent.textContent || bTxt)
+                                    const title = extractTitle(parent)
+                                    const exists = discoveredItems.some(it => it.title === title && it.points === pts)
+                                    if (!exists) {
+                                        discoveredItems.push({
+                                            title,
+                                            points: pts,
+                                            actionText: bTxt,
+                                            source: 'Direct Button'
+                                        })
+                                        if (triggerClick(btn)) {
+                                            count++
+                                            foundLabels.push(bTxt)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // 4. Modal flyout confirmation
+                        const modalConfirmBtns = Array.from(document.querySelectorAll(
+                            '.flyout button, .drawer button, [role="dialog"] button, [class*="modal"] button, [class*="drawer"] button, .ms-Panel button, [class*="flyout"] button'
+                        )) as HTMLElement[]
+                        for (const mb of modalConfirmBtns) {
                             const mt = (mb.textContent || '').trim().toLowerCase()
                             if (['claim all', 'klaim semua', 'claim', 'klaim', 'got it', 'ok', 'terima', 'done', 'close', 'tutup'].includes(mt)) {
                                 triggerClick(mb as HTMLElement)
@@ -247,18 +413,63 @@ export class Workers {
                             }
                         }
 
-                        return { count, label: foundLabels.join(', ') }
+                        return {
+                            items: discoveredItems,
+                            count,
+                            label: foundLabels.join(', ')
+                        }
                     })
 
-                    if (domResult && domResult.count > 0) {
-                        clicked = true
-                        textFound = domResult.label
+                    if (domResult) {
+                        const items = Array.isArray(domResult.items) ? domResult.items : []
+                        for (const it of items) {
+                            if (!detailedDiscoveredItems.some(d => d.title === it.title && d.points === it.points)) {
+                                detailedDiscoveredItems.push(it)
+                            }
+                        }
+                        if (domResult.count > 0 || items.length > 0) {
+                            clicked = true
+                            textFound = domResult.label || items.map(i => i.actionText || i.title).join(', ')
+                        }
                     }
                 } catch {}
             }
 
+            // C. Log detail hasil temuan pending points sebelum proses berikutnya
+            if (detailedDiscoveredItems.length > 0) {
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'DASHBOARD-SCAN',
+                    `${prefix}📌 Ditemukan ${detailedDiscoveredItems.length} item pending point terperinci:`,
+                    'cyan'
+                )
+                for (const [idx, item] of detailedDiscoveredItems.entries()) {
+                    if (!item) continue
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'DASHBOARD-SCAN',
+                        `${prefix}  [${idx + 1}] "${item.title}" | Poin: ${item.points > 0 ? item.points + ' Pts' : 'Klaim Siap'} | Status/Aksi: "${item.actionText}" | Sumber: ${item.source}`,
+                        'yellow'
+                    )
+                }
+                const totalPts = detailedDiscoveredItems.reduce((acc, it) => acc + (it.points || 0), 0)
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'DASHBOARD-SCAN',
+                    `${prefix}⚡ Terdeteksi total pending: ${totalPts > 0 ? totalPts + ' Pts' : 'Koin Siap Klaim'}. Memulai eksekusi klaim instan...`,
+                    'green'
+                )
+            } else if (!clicked) {
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'DASHBOARD-SCAN',
+                    `${prefix}ℹ️ Hasil scan terperinci: Tidak ada koin pending yang nyangkut (0 Pts).`,
+                    'gray'
+                )
+            }
+
             // 4. Deteksi kontainer kartu dengan pencarian berbasis Playwright locator (kompatibel dengan Mock Test 5 & dynamic DOM)
-            const cardRegex = /ready to claim|\+\d+\s*claim|[0-9]+\s*koin|(?:claim|klaim)\s*\+?\d+|siap diklaim/i
+            const cardRegex = /ready\s*to\s*claim|siap\s*di\s*klaim|siap\s*diklaim|\bclaim\b|\bklaim\b|\bcollect\b|\bkumpulkan\b|\bcheck-?in\b|\babsen\b/i
             const cardCandidates = page
                 .locator('div, section, article, [class*="card"], [class*="tile"], [class*="item"], [role="region"], li, a')
                 .filter({ hasText: cardRegex })
@@ -271,7 +482,7 @@ export class Workers {
                 if (!isCardVis) continue
 
                 const cardTxt = (await card.innerText().catch(() => '')).trim()
-                if (!cardTxt || cardTxt.length > 1500) continue
+                if (!cardTxt || cardTxt.length > 2000) continue
                 if (cardTxt.length < 50 && (cardTxt.startsWith('Available points') || cardTxt.startsWith('Poin yang tersedia'))) {
                     continue
                 }
@@ -280,10 +491,10 @@ export class Workers {
                 // Ambil nilai poin yang tertera di dalam teks kartu (misal: "195") untuk dicatat di log
                 let claimedPoints = '0'
                 const ptsMatch =
-                    cardTxt.match(/(?:ready to claim|siap diklaim)[\s\S]*?(\d+)/i) ||
-                    cardTxt.match(/\+(\d+)\s*(?:claim|klaim)/i) ||
+                    cardTxt.match(/\+(\d+)\s*(?:points|poin|pts|koin)?/i) ||
+                    cardTxt.match(/(?:ready\s*to\s*claim|siap\s*diklaim)[\s\S]*?(\d+)/i) ||
                     cardTxt.match(/(\d+)\s*(?:koin|pts|points)/i) ||
-                    cardTxt.match(/(?:claim|klaim)[\s\S]*?(\d+)/i) ||
+                    cardTxt.match(/(?:claim|klaim|collect)[\s\S]*?(\d+)/i) ||
                     cardTxt.match(/(\d+)/)
 
                 if (ptsMatch && ptsMatch[1]) {
@@ -300,8 +511,8 @@ export class Workers {
                 let clickExecuted = false
 
                 // Multi-tier locator:
-                // 1. Tier 1: card.locator('button, a, [role="button"]').filter({ hasText: /claim|klaim|>/i }).first()
-                const tier1Btn = card.locator('button, a, [role="button"]').filter({ hasText: /claim|klaim|>/i }).first()
+                // 1. Tier 1: card.locator('button, a, [role="button"]').filter({ hasText: /claim|klaim|collect|kumpulkan|>/i }).first()
+                const tier1Btn = card.locator('button, a, [role="button"]').filter({ hasText: /claim|klaim|collect|kumpulkan|>/i }).first()
                 if (await tier1Btn.isVisible().catch(() => false)) {
                     await tier1Btn.click({ timeout: 5000 }).catch(async () => {
                         await tier1Btn.evaluate((b: HTMLElement) => {
@@ -476,7 +687,7 @@ export class Workers {
                     'yellow'
                 )
                 await this.bot.utils.wait(2500)
-                return await this.doClaimPendingPoints(page, true)
+                return await this.doClaimPendingPoints(page, true, data)
             }
         } catch {
             this.bot.logger.debug(this.bot.isMobile, 'DASHBOARD', 'Pengecekan koin nyangkut selesai.')
