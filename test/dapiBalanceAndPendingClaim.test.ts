@@ -256,5 +256,61 @@ export async function runDapiBalanceAndPendingClaimTests() {
         console.log('✅ Test 5 Passed: Workers pending coin multi-tier locator and container click verified')
     }
 
-    console.log('🎉 ALL 5 DAPI BALANCE & PENDING CLAIM TESTS PASSED SUCCESSFULLY!\n')
+    // Test 6: Workers in-browser DOM evaluate and multi-claim verification
+    {
+        const bot = new MicrosoftRewardsBot()
+        bot.userData.currentPoints = 3000
+        let logMessages: string[] = []
+        bot.logger = {
+            info: (_isMobile: any, _tag: string, msg: string) => { logMessages.push(msg) },
+            warn: (_isMobile: any, _tag: string, msg: string) => { logMessages.push(String(msg)) },
+            error: (_isMobile: any, _tag: string, msg: string) => { logMessages.push(String(msg)) },
+            debug: (_isMobile: any, _tag: string, msg: string) => { logMessages.push(String(msg)) }
+        } as any
+
+        let evaluateCalled = false
+        const mockPage = {
+            isClosed: () => false,
+            url: () => 'https://rewards.bing.com/earn',
+            evaluate: async (fn: any) => {
+                evaluateCalled = true
+                return { count: 2, label: 'Ready to claim, Klaim +10' }
+            },
+            locator: (_sel: string) => ({
+                filter: (_opt: any) => ({
+                    count: async () => 0,
+                    nth: () => ({})
+                }),
+                count: async () => 0,
+                first: () => ({
+                    isVisible: async () => false,
+                    click: async () => {}
+                })
+            })
+        } as any
+
+        bot.browser = {
+            func: {
+                getCurrentPoints: async () => 3050
+            }
+        } as any
+
+        bot.utils = {
+            wait: async (_ms: number) => {}
+        } as any
+
+        const workers = new Workers(bot)
+        await workers.doClaimPendingPoints(mockPage)
+
+        assert.strictEqual(evaluateCalled, true, 'page.evaluate should be called for DOM scan')
+        assert.strictEqual(bot.userData.currentPoints, 3050, 'Account balance should be updated to 3050')
+        assert.strictEqual(bot.userData.gainedPoints, 50, 'gainedPoints should be +50')
+
+        const detectedLog = logMessages.find(m => m.includes('Koin nyangkut terdeteksi ("Ready to claim, Klaim +10")'))
+        assert.ok(detectedLog, `Log should detect labels, found: ${logMessages.join(', ')}`)
+
+        console.log('✅ Test 6 Passed: Workers in-browser DOM evaluate and multi-claim verified')
+    }
+
+    console.log('🎉 ALL 6 DAPI BALANCE & PENDING CLAIM TESTS PASSED SUCCESSFULLY!\n')
 }

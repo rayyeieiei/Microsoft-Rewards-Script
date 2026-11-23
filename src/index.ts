@@ -2974,8 +2974,13 @@ export class MicrosoftRewardsBot {
                     await this.activities.observeAppOnlyRewards(data)
                 }
 
-                if (this.mainMobilePage) {
-                    await this.workers.doClaimPendingPoints(this.mainMobilePage)
+                const activeOwnerPage = (this.mainMobilePage && !this.mainMobilePage.isClosed())
+                    ? this.mainMobilePage
+                    : (this.mainDesktopPage && !this.mainDesktopPage.isClosed())
+                        ? this.mainDesktopPage
+                        : null
+                if (activeOwnerPage) {
+                    await this.workers.doClaimPendingPoints(activeOwnerPage)
                 }
 
                 if (this.config.workers.doAppPromotions && appData) {
@@ -3043,8 +3048,13 @@ export class MicrosoftRewardsBot {
                     await this.workers.doPunchCards(punchCardData, this.mainMobilePage)
                 }
 
-                if (this.mainMobilePage) {
-                    await this.workers.doClaimPendingPoints(this.mainMobilePage, true)
+                const postActivitiesPage = (this.mainMobilePage && !this.mainMobilePage.isClosed())
+                    ? this.mainMobilePage
+                    : (this.mainDesktopPage && !this.mainDesktopPage.isClosed())
+                        ? this.mainDesktopPage
+                        : null
+                if (postActivitiesPage) {
+                    await this.workers.doClaimPendingPoints(postActivitiesPage, true)
                 }
 
                 this.updateDashboardAccount(accountEmail, { status: 'Searching...' })

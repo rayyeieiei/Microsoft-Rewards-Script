@@ -591,9 +591,14 @@ export class Login {
         ]).catch(() => null)
         const html = await page.content()
         const $ = await this.bot.browser.utils.loadInCheerio(html)
-        if ($('section#dailyset').length > 0) {
+        if (
+            $('section#dailyset').length > 0 ||
+            $('#daily-sets').length > 0 ||
+            $('script[id="__NEXT_DATA__"]').length > 0 ||
+            (typeof page.url === 'function' && page.url().includes('/earn'))
+        ) {
             this.bot.rewardsVersion = 'modern'
-            this.bot.logger.warn(this.bot.isMobile, 'GET-REWARD-SESSION', 'Modern Rewards dashboard detected.')
+            this.bot.logger.info(this.bot.isMobile, 'GET-REWARD-SESSION', 'Modern Rewards dashboard detected.')
         }
         const token = $(this.selectors.requestToken).attr('value') ?? $(this.selectors.requestTokenMeta).attr('content')
         if (token) this.bot.requestToken = token

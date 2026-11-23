@@ -11,13 +11,53 @@ export class ClaimBonusPoints extends Workers {
     private oldBalance: number = this.bot.userData.currentPoints
 
     public async claimBonusPoints() {
-        if (!this.bot.requestToken && this.bot.rewardsVersion === 'legacy') {
-            this.bot.logger.warn(
-                this.bot.isMobile,
-                'CLAIM-BONUS-POINTS',
-                'Skipping: Request token not available, this activity requires it!'
-            )
-            return
+        const activePage =
+            this.bot.mainMobilePage && !this.bot.mainMobilePage.isClosed()
+                ? this.bot.mainMobilePage
+                : this.bot.mainDesktopPage && !this.bot.mainDesktopPage.isClosed()
+                  ? this.bot.mainDesktopPage
+                  : null
+
+        if (!this.bot.requestToken) {
+            if (activePage && typeof activePage.evaluate === 'function') {
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'CLAIM-BONUS-POINTS',
+                    'Request token not available in Node context. Executing in-browser ClaimAllPointsAsync...'
+                )
+                try {
+                    await activePage.evaluate(async () => {
+                        await fetch('/api/claimallpointsasync', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                                'X-Requested-With': 'XMLHttpRequest'
+                            },
+                            body: 'timeZone=' + new Date().getTimezoneOffset()
+                        }).catch(() => {})
+                    })
+                    const newBal = await this.bot.browser.func.getCurrentPoints(activePage).catch(() => this.oldBalance)
+                    const gained = Math.max(0, newBal - this.oldBalance)
+                    if (gained > 0) {
+                        this.bot.userData.currentPoints = newBal
+                        this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gained
+                        this.bot.logger.info(
+                            this.bot.isMobile,
+                            'CLAIM-BONUS-POINTS',
+                            `Completed in-browser ClaimAllPointsAsync | gainedPoints=+${gained} | newBalance=${newBal}`,
+                            'green'
+                        )
+                    }
+                } catch {}
+                return
+            } else if (this.bot.rewardsVersion === 'legacy') {
+                this.bot.logger.warn(
+                    this.bot.isMobile,
+                    'CLAIM-BONUS-POINTS',
+                    'Skipping: Request token not available, this activity requires it!'
+                )
+                return
+            }
         }
 
         this.bot.logger.info(
