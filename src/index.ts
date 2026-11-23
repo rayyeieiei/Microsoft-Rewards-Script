@@ -86,6 +86,7 @@ import {
 import {
     resolveBuildMetadata
 } from './runtime/diagnostics/BuildMetadata'
+import { PauseCoordinator } from './runtime/control/PauseCoordinator'
 
 import type { Account } from './interface/Account'
 import AxiosClient from './util/Axios'
@@ -212,6 +213,7 @@ export class MicrosoftRewardsBot {
     public config: any
     public utils: Utils
     public manualQuestQueue: ManualQuestQueue
+    public pauseCoordinator: PauseCoordinator
     public activities: Activities
     public browser: { func: BrowserFunc; utils: BrowserUtils }
 
@@ -311,6 +313,59 @@ export class MicrosoftRewardsBot {
 
         return this.mobileTokenRefreshPromise
     }
+
+    public async checkManualInspectionPoint(stage: string): Promise<void> {
+        if (!this.pauseCoordinator) return
+        const accountEmail = this.activeAccount?.email
+        if (!accountEmail) return
+
+        if (!this.pauseCoordinator.isPauseRequested(accountEmail)) {
+            return
+        }
+
+        this.logger.info(
+            this.isMobile,
+            'MANUAL-BROWSER',
+            `[MANUAL-BROWSER] Checkpoint reached at "${stage}" for ${accountEmail}. Memarkir bot otomatis dan menyimpan sesi...`,
+            'cyan'
+        )
+
+        await this.pauseCoordinator.checkPoint(stage, {
+            isMobile: this.isMobile,
+            page: this.mainMobilePage || this.mainDesktopPage,
+            scope: this.accountScope,
+            saveSession: async () => {
+                if (this.accountScope) {
+                    const desktopCtx = this.accountScope.getContext('desktop')
+                    if (desktopCtx) await AccountSessionStore.saveContextSession(desktopCtx, this.accountScope, 'desktop').catch(() => {})
+                    const mobileCtx = this.accountScope.getContext('mobile')
+                    if (mobileCtx) await AccountSessionStore.saveContextSession(mobileCtx, this.accountScope, 'mobile').catch(() => {})
+                }
+            },
+            reloadSession: async () => {
+                if (this.accountScope) {
+                    const desktopCtx = this.accountScope.getContext('desktop')
+                    if (desktopCtx) {
+                        const loadRes = await AccountSessionStore.loadSession(this.accountScope, 'desktop', { legacyEmail: accountEmail })
+                        if (loadRes.status === 'loaded' && loadRes.state?.cookies) await desktopCtx.addCookies(loadRes.state.cookies).catch(() => {})
+                    }
+                    const mobileCtx = this.accountScope.getContext('mobile')
+                    if (mobileCtx) {
+                        const loadRes = await AccountSessionStore.loadSession(this.accountScope, 'mobile', { legacyEmail: accountEmail })
+                        if (loadRes.status === 'loaded' && loadRes.state?.cookies) await mobileCtx.addCookies(loadRes.state.cookies).catch(() => {})
+                    }
+                }
+            }
+        })
+
+        this.logger.info(
+            this.isMobile,
+            'MANUAL-BROWSER',
+            `[MANUAL-BROWSER] Sesi inspeksi selesai. Melanjutkan farming otomatis untuk ${accountEmail} dari stage "${stage}"...`,
+            'green'
+        )
+    }
+
     private _cookies: { mobile: Cookie[]; desktop: Cookie[] } = { mobile: [], desktop: [] }
     public get cookies(): { mobile: Cookie[]; desktop: Cookie[] } {
         return this.accountScope?.cookies || this._cookies
@@ -470,6 +525,7 @@ export class MicrosoftRewardsBot {
             this.logger = new Logger(this)
             this.utils = parentBot.utils
             this.manualQuestQueue = parentBot.manualQuestQueue
+            this.pauseCoordinator = parentBot.pauseCoordinator
             this.localProxy = parentBot.localProxy
             this.localProxyPort = parentBot.localProxyPort
             this.networkRecoveryController = parentBot.networkRecoveryController
@@ -493,6 +549,11 @@ export class MicrosoftRewardsBot {
                     warn: msg => this.logger.warn(this.isMobile, 'QUEUE', msg),
                     debug: msg => this.logger.debug(this.isMobile, 'QUEUE', msg)
                 }
+            })
+            this.pauseCoordinator = new PauseCoordinator({
+                info: msg => this.logger.info(this.isMobile, 'PAUSE-COORD', msg),
+                warn: msg => this.logger.warn(this.isMobile, 'PAUSE-COORD', msg),
+                debug: msg => this.logger.debug(this.isMobile, 'PAUSE-COORD', msg)
             })
             this.activeWorkers = this.config.clusters
             this.exitedWorkers = []
@@ -1352,10 +1413,21 @@ export class MicrosoftRewardsBot {
                         this.logger.error('main', 'MANUAL-BROWSER', `[MANUAL-BROWSER] Akun ${cmd.email} tidak ditemukan dalam konfigurasi!`)
                         return
                     }
-                    if (this.isRunning && this.activeAccount?.email?.toLowerCase() === targetAcc.email.toLowerCase()) {
-                        this.logger.warn('main', 'MANUAL-BROWSER', `[MANUAL-BROWSER] Akun ${targetAcc.email} sedang aktif dijalankan bot. Tunggu hingga akun selesai.`)
-                        return
+
+                    const isTargetActive = (this.activeAccount?.email?.toLowerCase() === targetAcc.email.toLowerCase()) ||
+                        Array.from(this.activeWorkerBots).some(b => b.activeAccount?.email?.toLowerCase() === targetAcc.email.toLowerCase())
+
+                    let wasPausedForInspection = false
+                    if (this.isRunning && isTargetActive) {
+                        this.logger.info('main', 'MANUAL-BROWSER', `[MANUAL-BROWSER] Akun ${targetAcc.email} sedang aktif farming. Meminta cooperative pause...`, 'cyan')
+                        this.updateDashboardAccount(targetAcc.email, { status: 'Manual Inspection (Paused)' })
+                        wasPausedForInspection = await this.pauseCoordinator.requestPause(targetAcc.email)
+                        if (!wasPausedForInspection) {
+                            this.logger.warn('main', 'MANUAL-BROWSER', `[MANUAL-BROWSER] Timeout menunggu checkpoint, melanjutkan inspeksi manual...`)
+                        }
                     }
+
+                    this.pauseCoordinator.setInspecting(targetAcc.email, true)
 
                     this.logger.info('main', 'MANUAL-BROWSER', `[MANUAL-BROWSER] Meluncurkan browser headful inspeksi untuk: ${targetAcc.email}...`, 'cyan')
 
@@ -1416,6 +1488,12 @@ export class MicrosoftRewardsBot {
                                     await AccountDisposer.dispose(scope).catch(() => {})
                                 }
                                 this.activeManualInspector = null
+                                this.pauseCoordinator.setInspecting(targetAcc.email, false)
+                                if (wasPausedForInspection) {
+                                    this.logger.info('main', 'MANUAL-BROWSER', `[MANUAL-BROWSER] Sesi inspeksi manual ditutup. Melanjutkan farming otomatis untuk ${targetAcc.email}...`, 'cyan')
+                                    this.updateDashboardAccount(targetAcc.email, { status: 'Resuming Farming...' })
+                                    this.pauseCoordinator.resume(targetAcc.email)
+                                }
                             }
                         })
 
@@ -1427,12 +1505,21 @@ export class MicrosoftRewardsBot {
                             await AccountDisposer.dispose(scope).catch(() => {})
                         }
                         this.activeManualInspector = null
+                        this.pauseCoordinator.setInspecting(targetAcc.email, false)
+                        if (wasPausedForInspection) {
+                            this.pauseCoordinator.resume(targetAcc.email)
+                        }
                     }
                 } else if (cmd.action === 'close-manual-browser') {
                     if (this.activeManualInspector) {
                         this.logger.info('main', 'MANUAL-BROWSER', `[MANUAL-BROWSER] Menutup browser inspeksi aktif (${this.activeManualInspector.email})...`)
+                        const inspectingEmail = this.activeManualInspector.email
                         await this.activeManualInspector.browser.close().catch(() => {})
                         this.activeManualInspector = null
+                        if (inspectingEmail) {
+                            this.pauseCoordinator.setInspecting(inspectingEmail, false)
+                            this.pauseCoordinator.resume(inspectingEmail)
+                        }
                     } else {
                         this.logger.info('main', 'MANUAL-BROWSER', '[MANUAL-BROWSER] Tidak ada browser inspeksi yang sedang aktif.')
                     }
@@ -1723,6 +1810,13 @@ export class MicrosoftRewardsBot {
                     const isDualMode = this.config?.executionMode === 'dual'
                     if (isDualMode && this.isCircuitBreakerTriggered()) break
 
+                    // Wait if account is currently being inspected manually
+                    while (this.pauseCoordinator.isInspecting(account.email)) {
+                        this.logger.info('main', 'SEQUENTIAL-QUEUE', `Akun ${account.email} sedang diinspeksi manual. Menunggu inspeksi selesai sebelum memulai farming...`)
+                        this.updateDashboardAccount(account.email, { status: 'Manual Inspection (Wait)' })
+                        await this.utils.wait(2000)
+                    }
+
                     this.searchCooldownActive = false
                     this.batchCircuitBreakerTriggered = false
                     this.activeAccount = account
@@ -1731,8 +1825,37 @@ export class MicrosoftRewardsBot {
                     // Batas waktu adaptif dinamis (12 - 25 menit) pada mode sequential
                     const dynamicDeadlineMs = calculateDynamicDeadline(100, 2 * 60 * 1000)
                     let deadlineTimeout: NodeJS.Timeout | undefined
+                    let resolveDeadlineTimeout: (() => void) | null = null
+
                     const deadlinePromise = new Promise<{ kind: 'timeout' }>(resolve => {
-                        deadlineTimeout = setTimeout(() => resolve({ kind: 'timeout' }), dynamicDeadlineMs)
+                        resolveDeadlineTimeout = () => resolve({ kind: 'timeout' })
+                        deadlineTimeout = setTimeout(resolveDeadlineTimeout, dynamicDeadlineMs)
+                    })
+
+                    let deadlineElapsedBeforePause = 0
+                    let pauseStartTime = 0
+                    const deadlineStart = Date.now()
+
+                    const unhookPause = this.pauseCoordinator.onPause((email, stage) => {
+                        if (email.toLowerCase() === account.email.toLowerCase()) {
+                            if (deadlineTimeout) {
+                                clearTimeout(deadlineTimeout)
+                                deadlineTimeout = undefined
+                            }
+                            pauseStartTime = Date.now()
+                            deadlineElapsedBeforePause += (pauseStartTime - (deadlineStart + deadlineElapsedBeforePause))
+                            this.logger.info('main', 'ACCOUNT-DEADLINE', `[ACCOUNT-DEADLINE] Batas waktu adaptif dibekukan selama inspeksi manual (${account.email}).`)
+                        }
+                    })
+
+                    const unhookResume = this.pauseCoordinator.onResume((email, pausedDurationMs) => {
+                        if (email.toLowerCase() === account.email.toLowerCase()) {
+                            const remainingDeadlineMs = Math.max(60000, dynamicDeadlineMs - deadlineElapsedBeforePause)
+                            if (resolveDeadlineTimeout) {
+                                deadlineTimeout = setTimeout(resolveDeadlineTimeout, remainingDeadlineMs)
+                            }
+                            this.logger.info('main', 'ACCOUNT-DEADLINE', `[ACCOUNT-DEADLINE] Batas waktu adaptif dilanjutkan (${(remainingDeadlineMs / 60000).toFixed(1)} menit tersisa untuk ${account.email}).`)
+                        }
                     })
 
                     try {
@@ -1766,6 +1889,8 @@ export class MicrosoftRewardsBot {
                         }
                     } finally {
                         if (deadlineTimeout) clearTimeout(deadlineTimeout)
+                        unhookPause()
+                        unhookResume()
                         QueryCore.resetSessionQueries()
                         this.activeAccount = null
                         this.userData.userName = ''
@@ -1832,46 +1957,75 @@ export class MicrosoftRewardsBot {
                 // Barrier Synchronization with Dynamic Adaptive Deadline
                 const dynamicDeadlineMs = calculateDynamicDeadline(100, 2 * 60 * 1000)
                 let deadlineTimeout: NodeJS.Timeout | undefined
+                let resolveDeadlineTimeout: (() => void) | null = null
+
                 const deadlinePromise = new Promise<{ kind: 'timeout' }>(resolve => {
-                    deadlineTimeout = setTimeout(() => resolve({ kind: 'timeout' }), dynamicDeadlineMs)
+                    resolveDeadlineTimeout = () => resolve({ kind: 'timeout' })
+                    deadlineTimeout = setTimeout(resolveDeadlineTimeout, dynamicDeadlineMs)
                 })
 
-                const barrierPromise = Promise.allSettled(workerPromises).then(results => ({
-                    kind: 'completed' as const,
-                    results
-                }))
-
-                const raceResult = await Promise.race([barrierPromise, deadlinePromise])
-                if (deadlineTimeout) clearTimeout(deadlineTimeout)
-
-                if (raceResult.kind === 'timeout') {
-                    this.logger.error(
-                        'main',
-                        'ACCOUNT-DEADLINE',
-                        `[ACCOUNT-DEADLINE-EXCEEDED] Batch [${batchIndex + 1}/${batches.length}] melebihi batas waktu adaptif ${(dynamicDeadlineMs / 60000).toFixed(0)} menit! Memutus barrier untuk mencegah zombie worker runner deadlock.`
-                    )
-                    for (const bot of this.activeWorkerBots) {
-                        try {
-                            bot.accountScope?.abortController.abort()
-                            await bot.cleanupBrowserResources()
-                        } catch {}
+                const batchEmails = new Set(batch.map(a => a.email.toLowerCase()))
+                const unhookDualPause = this.pauseCoordinator.onPause((email, stage) => {
+                    if (batchEmails.has(email.toLowerCase())) {
+                        if (deadlineTimeout) {
+                            clearTimeout(deadlineTimeout)
+                            deadlineTimeout = undefined
+                        }
+                        this.logger.info('main', 'ACCOUNT-DEADLINE', `[ACCOUNT-DEADLINE] Batas waktu adaptif batch dibekukan selama inspeksi manual (${email}).`)
                     }
-                    try {
-                        this.accountScope?.abortController.abort()
-                        await this.cleanupBrowserResources()
-                    } catch {}
+                })
 
-                    // Bounded Join saat timeout akun: await hingga promise eksekusi akun lama benar-benar keluar sebelum memulai akun berikutnya
-                    await Promise.race([
-                        Promise.allSettled(workerPromises),
-                        new Promise(resolve => setTimeout(resolve, 10000))
-                    ])
-                } else {
-                    for (const res of raceResult.results) {
-                        if (res.status === 'fulfilled' && res.value) {
-                            accountStats.push(res.value)
+                const unhookDualResume = this.pauseCoordinator.onResume((email, pausedDurationMs) => {
+                    if (batchEmails.has(email.toLowerCase())) {
+                        if (resolveDeadlineTimeout) {
+                            deadlineTimeout = setTimeout(resolveDeadlineTimeout, dynamicDeadlineMs)
+                        }
+                        this.logger.info('main', 'ACCOUNT-DEADLINE', `[ACCOUNT-DEADLINE] Batas waktu adaptif batch dilanjutkan pasca inspeksi manual (${email}).`)
+                    }
+                })
+
+                try {
+                    const barrierPromise = Promise.allSettled(workerPromises).then(results => ({
+                        kind: 'completed' as const,
+                        results
+                    }))
+
+                    const raceResult = await Promise.race([barrierPromise, deadlinePromise])
+                    if (deadlineTimeout) clearTimeout(deadlineTimeout)
+
+                    if (raceResult.kind === 'timeout') {
+                        this.logger.error(
+                            'main',
+                            'ACCOUNT-DEADLINE',
+                            `[ACCOUNT-DEADLINE-EXCEEDED] Batch [${batchIndex + 1}/${batches.length}] melebihi batas waktu adaptif ${(dynamicDeadlineMs / 60000).toFixed(0)} menit! Memutus barrier untuk mencegah zombie worker runner deadlock.`
+                        )
+                        for (const bot of this.activeWorkerBots) {
+                            try {
+                                bot.accountScope?.abortController.abort()
+                                await bot.cleanupBrowserResources()
+                            } catch {}
+                        }
+                        try {
+                            this.accountScope?.abortController.abort()
+                            await this.cleanupBrowserResources()
+                        } catch {}
+
+                        // Bounded Join saat timeout akun: await hingga promise eksekusi akun lama benar-benar keluar sebelum memulai akun berikutnya
+                        await Promise.race([
+                            Promise.allSettled(workerPromises),
+                            new Promise(resolve => setTimeout(resolve, 10000))
+                        ])
+                    } else {
+                        for (const res of raceResult.results) {
+                            if (res.status === 'fulfilled' && res.value) {
+                                accountStats.push(res.value)
+                            }
                         }
                     }
+                } finally {
+                    if (deadlineTimeout) clearTimeout(deadlineTimeout)
+                    unhookDualPause()
+                    unhookDualResume()
                 }
                 processedInBatchCount = workerPromises.length
             }
@@ -2526,6 +2680,7 @@ export class MicrosoftRewardsBot {
                     }
                     if (this.config.workers.doDailyCheckIn) {
                         try {
+                            await this.checkManualInspectionPoint('before_immediate_daily_checkin')
                             this.updateDashboardAccount(accountEmail, { status: 'Daily Check-in' })
                             await this.activities.doDailyCheckIn()
                         } catch (checkInErr) {
@@ -2539,6 +2694,7 @@ export class MicrosoftRewardsBot {
 
                     if (this.config.workers.doReadToEarn) {
                         try {
+                            await this.checkManualInspectionPoint('before_immediate_read_to_earn')
                             this.updateDashboardAccount(accountEmail, { status: 'Read to Earn' })
                             await this.activities.doReadToEarn()
                         } catch (readErr) {
@@ -2828,17 +2984,20 @@ export class MicrosoftRewardsBot {
                 }
 
                 if (this.config.workers.doDailySet && data && this.mainMobilePage) {
+                    await this.checkManualInspectionPoint('before_daily_set')
                     await ensureOnRewardsDashboard(this.mainMobilePage)
                     this.updateDashboardAccount(accountEmail, { status: 'Daily Set' })
                     await this.workers.doDailySet(data, this.mainMobilePage)
                 }
 
                 if (this.config.workers.doSpecialPromotions && data && this.mainMobilePage) {
+                    await this.checkManualInspectionPoint('before_special_promotions')
                     this.updateDashboardAccount(accountEmail, { status: 'Special Promotions' })
                     await this.workers.doSpecialPromotions(data, this.mainMobilePage)
                 }
 
                 if (this.config.workers.doMorePromotions && data && this.mainMobilePage) {
+                    await this.checkManualInspectionPoint('before_more_promotions')
                     this.updateDashboardAccount(accountEmail, { status: 'More Promotions' })
                     await this.workers.doMorePromotions(data, this.mainMobilePage)
                 }
@@ -2848,11 +3007,13 @@ export class MicrosoftRewardsBot {
                 }
 
                 if (!immediateMobileExecuted && this.config.workers.doDailyCheckIn) {
+                    await this.checkManualInspectionPoint('before_daily_checkin')
                     this.updateDashboardAccount(accountEmail, { status: 'Daily Check-in' })
                     await this.activities.doDailyCheckIn()
                 }
 
                 if (!immediateMobileExecuted && this.config.workers.doReadToEarn) {
+                    await this.checkManualInspectionPoint('before_read_to_earn')
                     this.updateDashboardAccount(accountEmail, { status: 'Read to Earn' })
                     await this.activities.doReadToEarn()
                 }
@@ -2877,6 +3038,7 @@ export class MicrosoftRewardsBot {
 
                 const punchCardData = refreshedDashboard || data
                 if (this.config.workers.doPunchCards && punchCardData && this.mainMobilePage) {
+                    await this.checkManualInspectionPoint('before_punch_cards')
                     this.updateDashboardAccount(accountEmail, { status: 'Punch Cards' })
                     await this.workers.doPunchCards(punchCardData, this.mainMobilePage)
                 }
@@ -2910,6 +3072,7 @@ export class MicrosoftRewardsBot {
 
                 this.cookies.mobile = await initialContext.cookies()
 
+                await this.checkManualInspectionPoint('before_searches')
                 const { mobilePoints, desktopPoints } = await this.searchManager.doSearches(
                     data,
                     missingSearchPoints,

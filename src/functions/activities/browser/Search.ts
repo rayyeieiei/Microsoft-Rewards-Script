@@ -177,6 +177,10 @@ export class Search extends Workers {
                     break
                 }
 
+                if (typeof (this.bot as any).checkManualInspectionPoint === 'function') {
+                    await (this.bot as any).checkManualInspectionPoint(`search_${isMobile ? 'mobile' : 'desktop'}_${i + 1}`)
+                }
+
                 if (isDualMode && typeof (this.bot as any).isCircuitBreakerTriggered === 'function' && (this.bot as any).isCircuitBreakerTriggered()) {
                     this.bot.logger.warn(
                         isMobile,

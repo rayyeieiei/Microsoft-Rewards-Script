@@ -22,6 +22,7 @@ import { runChapter29SigintBandwidthTelemetryTests } from './chapter29SigintBand
 import { runDapiBalanceAndPendingClaimTests } from './dapiBalanceAndPendingClaim.test'
 import { runPunchCardUrlResolutionTests } from './punchCardUrlResolution.test'
 import { runChapter30ZombieWorkerAndPunchCardResolverTests } from './chapter30ZombieWorkerAndPunchCardResolver.test'
+import { runPauseCoordinatorTests } from './pauseCoordinator.test'
 
 async function runAll() {
     console.log('🧪 Starting Full Test Suite Execution...\n')
@@ -96,6 +97,9 @@ async function runAll() {
     console.log('')
 
     await runChapter30ZombieWorkerAndPunchCardResolverTests()
+    console.log('')
+
+    await runPauseCoordinatorTests()
     console.log('')
 
     console.log('🎉 ALL TESTS IN SUITE PASSED SUCCESSFULLY!')

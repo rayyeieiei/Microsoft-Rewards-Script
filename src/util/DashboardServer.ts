@@ -756,7 +756,7 @@ const htmlPage = `<!DOCTYPE html>
             const s = (status || '').toLowerCase();
             if (s.includes('pending')) return 'status-pending';
             if (s.includes('stealth')) return 'status-stealth';
-            if (s.includes('login') || s.includes('auth') || s.includes('manual')) return 'status-login';
+            if (s.includes('login') || s.includes('auth') || s.includes('manual') || s.includes('paused') || s.includes('inspect')) return 'status-login';
             if (s.includes('completed') || s.includes('done') || s.includes('verified')) return 'status-done';
             if (s.includes('error') || s.includes('failed') || s.includes('locked')) return 'status-error';
             return 'status-running';
