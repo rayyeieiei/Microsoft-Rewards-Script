@@ -382,5 +382,48 @@ export async function runDapiBalanceAndPendingClaimTests() {
         console.log('✅ Test 7 Passed: Detailed pending points discovery and precision claim execution verified')
     }
 
-    console.log('🎉 ALL 7 DAPI BALANCE & PENDING CLAIM TESTS PASSED SUCCESSFULLY!\n')
+    // Test 8: Immediate pass-through when claim points is 0 (no stuck / no retry)
+    {
+        const bot = new MicrosoftRewardsBot()
+        bot.userData.currentPoints = 3210
+        let logMessages: string[] = []
+        bot.logger = {
+            info: (_isMobile: any, _tag: string, msg: string) => { logMessages.push(msg) },
+            warn: (_isMobile: any, _tag: string, msg: string) => { logMessages.push(String(msg)) },
+            error: (_isMobile: any, _tag: string, msg: string) => { logMessages.push(String(msg)) },
+            debug: (_isMobile: any, _tag: string, msg: string) => { logMessages.push(String(msg)) }
+        } as any
+
+        const mockPage = {
+            isClosed: () => false,
+            url: () => 'https://rewards.bing.com/earn',
+            evaluate: async (fn: any) => ({
+                items: [],
+                count: 0,
+                label: ''
+            }),
+            locator: (_sel: string) => ({
+                filter: (_opt: any) => ({
+                    count: async () => 0,
+                    nth: () => ({})
+                }),
+                count: async () => 0,
+                first: () => ({
+                    isVisible: async () => false,
+                    click: async () => {}
+                })
+            })
+        } as any
+
+        const workers = new Workers(bot)
+        await workers.doClaimPendingPoints(mockPage)
+
+        const zeroPassLog = logMessages.find(m => m.includes('Tidak ada koin pending yang nyangkut (0 Pts). Langsung lanjut ke task berikutnya.'))
+        assert.ok(zeroPassLog, `Should immediately proceed when 0 Pts, found: ${logMessages.join(', ')}`)
+        assert.strictEqual(logMessages.filter(m => m.includes('CLAIM-RETRY')).length, 0, 'Must NOT trigger any retry loop')
+
+        console.log('✅ Test 8 Passed: 0 Pts pending claim cleanly and immediately advances to next task')
+    }
+
+    console.log('🎉 ALL 8 DAPI BALANCE & PENDING CLAIM TESTS PASSED SUCCESSFULLY!\n')
 }

@@ -189,56 +189,7 @@ export class Workers {
                 source: string
             }> = []
 
-            // A. Periksa pending points dari objek API data jika tersedia
-            if (data) {
-                if (data.pointClaimBannerPromotion && !data.pointClaimBannerPromotion.complete) {
-                    detailedDiscoveredItems.push({
-                        title: data.pointClaimBannerPromotion.title || data.pointClaimBannerPromotion.name || 'Point Claim Banner',
-                        points: Number(data.pointClaimBannerPromotion.pointProgressMax ?? 0),
-                        actionText: 'Ready to claim',
-                        source: 'API (pointClaimBannerPromotion)'
-                    })
-                }
-                if (data.monthlyBonusHeroBannerPromotion && !data.monthlyBonusHeroBannerPromotion.complete) {
-                    detailedDiscoveredItems.push({
-                        title: data.monthlyBonusHeroBannerPromotion.title || 'Monthly Bonus Hero Banner',
-                        points: Number(data.monthlyBonusHeroBannerPromotion.pointProgressMax ?? 0),
-                        actionText: 'Ready to claim',
-                        source: 'API (monthlyBonusHeroBannerPromotion)'
-                    })
-                }
-                if (data.starBonusWeeklyBannerPromotion && !data.starBonusWeeklyBannerPromotion.complete) {
-                    detailedDiscoveredItems.push({
-                        title: data.starBonusWeeklyBannerPromotion.title || 'Star Bonus Weekly Banner',
-                        points: Number(data.starBonusWeeklyBannerPromotion.pointProgressMax ?? 0),
-                        actionText: 'Ready to claim',
-                        source: 'API (starBonusWeeklyBannerPromotion)'
-                    })
-                }
-                const promoItems = [
-                    ...(data.promotionalItems ?? []),
-                    ...(data.morePromotions ?? [])
-                ]
-                for (const promo of promoItems) {
-                    if (!promo) continue
-                    const idLower = (promo.offerId ?? '').toLowerCase()
-                    const titleLower = (promo.title ?? '').toLowerCase()
-                    const isClaimPromo = idLower.includes('claim') || idLower.includes('bonus') || titleLower.includes('claim') || titleLower.includes('klaim')
-                    if (isClaimPromo && !promo.complete && (promo.pointProgressMax ?? 0) > 0) {
-                        const remaining = (promo.pointProgressMax ?? 0) - (promo.pointProgress ?? 0)
-                        if (remaining > 0) {
-                            detailedDiscoveredItems.push({
-                                title: promo.title || promo.offerId || 'Promotional Bonus',
-                                points: remaining,
-                                actionText: 'Ready to claim',
-                                source: 'API (promotionalItems)'
-                            })
-                        }
-                    }
-                }
-            }
-
-            // B. Multi-tier in-browser DOM scan via page.evaluate
+            // A. In-browser DOM scan terarah khusus kartu "CLAIM READY POINT" / "Ready to claim" & tombol "CLAIM"
             if (typeof page.evaluate === 'function') {
                 try {
                     const domResult = await page.evaluate(() => {
@@ -266,8 +217,8 @@ export class Workers {
                         }
 
                         const extractPts = (txt: string): number => {
-                            const m = txt.match(/\+(\d+)\s*(?:points|poin|pts|koin)?/i) ||
-                                      txt.match(/(?:ready\s*to\s*claim|siap\s*diklaim)[\s\S]*?(\d+)/i) ||
+                            const m = txt.match(/(?:claim\s*ready\s*points?|ready\s*to\s*claim|siap\s*diklaim)[\s\S]*?(\d+)/i) ||
+                                      txt.match(/\+(\d+)\s*(?:points|poin|pts|koin)?/i) ||
                                       txt.match(/(\d+)\s*(?:points|poin|pts|koin)/i) ||
                                       txt.match(/(?:claim|klaim|collect)[\s\S]*?(\d+)/i)
                             return m && m[1] ? parseInt(m[1], 10) : 0
@@ -285,65 +236,36 @@ export class Workers {
                                     return line
                                 }
                             }
-                            return 'Pending Activity'
+                            return 'CLAIM READY POINT'
                         }
 
-                        const claimRegex = /ready\s*to\s*claim|siap\s*di\s*klaim|siap\s*diklaim|\bclaim\b|\bklaim\b|\bcollect\b|\bkumpulkan\b|\bcheck-?in\b|\babsen\b/i
+                        // Pattern khusus: "CLAIM READY POINT", "Ready to claim", "Siap diklaim"
+                        const claimReadyPattern = /claim\s*ready\s*points?|ready\s*to\s*claim|siap\s*di\s*klaim|siap\s*diklaim/i
 
-                        // 1. Scan flyout/drawer/dialog/modal containers first
-                        const modalContainers = Array.from(document.querySelectorAll(
-                            '.flyout, .drawer, [role="dialog"], [class*="modal"], [class*="drawer"], .ms-Panel, [class*="flyout"], [class*="panel"]'
-                        )) as HTMLElement[]
-
-                        for (const mc of modalContainers) {
-                            const mTxt = (mc.textContent || '').trim()
-                            if (!mTxt || mTxt.length > 3000) continue
-
-                            const claimBtns = Array.from(mc.querySelectorAll('button, a, [role="button"], [class*="claim"], [id*="claim"]')) as HTMLElement[]
-                            for (const cb of claimBtns) {
-                                const cbt = (cb.textContent || '').trim()
-                                const isClaim = /^(?:claim|klaim|collect|kumpulkan)(?:\s*(?:all|semua|points|poin|now|sekarang|\+\d+|\d+|>))?$/i.test(cbt) ||
-                                                /(?:claim|klaim|collect)\s*\+?\d+/i.test(cbt) ||
-                                                /\+\d+\s*(?:claim|klaim)/i.test(cbt) ||
-                                                /ready\s*to\s*claim|siap\s*diklaim/i.test(cbt)
-                                if (isClaim) {
-                                    const parentItem = cb.closest('li, [class*="item"], [class*="card"], [class*="row"]') || mc
-                                    const pts = extractPts(parentItem.textContent || cbt)
-                                    const title = extractTitle(parentItem as HTMLElement)
-                                    discoveredItems.push({
-                                        title,
-                                        points: pts,
-                                        actionText: cbt || 'Claim',
-                                        source: 'Flyout / Modal'
-                                    })
-                                    if (triggerClick(cb)) {
-                                        count++
-                                        foundLabels.push(`[Modal] ${cbt || 'Claim'}`)
-                                    }
-                                }
-                            }
-                        }
-
-                        // 2. Scan card containers in main page
+                        // 1. Scan card containers (mencari kartu claim ready)
                         const cardContainers = Array.from(document.querySelectorAll(
-                            '[class*="card"], [class*="tile"], [class*="banner"], [class*="promo"], [class*="item"], [role="region"], li, article'
+                            '[class*="card"], [class*="tile"], [class*="banner"], [class*="promo"], [role="region"], [data-bi-id*="claim"], .c-card, [class*="item"]'
                         )) as HTMLElement[]
 
                         for (const container of cardContainers) {
                             const txt = (container.textContent || '').trim()
-                            if (!txt || txt.length > 2000) continue
-                            if (container.closest('header, nav, footer, #footer, #b_results, #ans_nws, article.news, .flyout, .drawer, [role="dialog"]')) continue
+                            if (!txt || txt.length > 1500) continue
+                            if (container.closest('header, nav, footer, #footer, #b_results, #ans_nws, article.news')) continue
+                            // Abaikan check-in quest dan balance display
+                            if (/check-?in\s*:\s*\d+\/\d+/i.test(txt) || /available\s*points|poin\s*yang\s*tersedia/i.test(txt)) continue
 
-                            if (claimRegex.test(txt)) {
-                                const isCompleted = txt.includes('completed') || txt.includes('diklaim') || txt.includes('claimed')
-                                const innerBtn = (container.querySelector('button, a, [role="button"], [class*="claim"], [class*="action"], [id*="claim"]') || container) as HTMLElement
-                                const innerBtnTxt = (innerBtn?.textContent || '').trim()
+                            const hasClaimReady = claimReadyPattern.test(txt)
+                            const hasClaimWord = /\b(?:claim|klaim|collect)\b/i.test(txt)
 
-                                const hasActiveClaimBtn = claimRegex.test(innerBtnTxt) || /ready|siap|koin|\+\d+/i.test(innerBtnTxt)
-                                if (!isCompleted || hasActiveClaimBtn) {
-                                    const pts = extractPts(txt)
-                                    const title = extractTitle(container)
-                                    const actionLabel = innerBtnTxt || 'Claim'
+                            if (hasClaimReady || hasClaimWord) {
+                                const pts = extractPts(txt)
+                                const btn = (container.querySelector('button, a, [role="button"], [class*="claim"], [class*="action"], [id*="claim"]') || container) as HTMLElement
+                                const btnTxt = (btn?.textContent || '').trim()
+
+                                // Hanya proses kartu yang benar-benar memiliki status ready to claim atau memiliki poin > 0 dan tombol claim
+                                if (hasClaimReady || (pts > 0 && /\b(?:claim|klaim|collect)\b/i.test(btnTxt))) {
+                                    const title = hasClaimReady ? 'CLAIM READY POINT' : extractTitle(container)
+                                    const actionLabel = btnTxt || 'CLAIM'
 
                                     const exists = discoveredItems.some(it => it.title === title && it.points === pts)
                                     if (!exists) {
@@ -353,7 +275,7 @@ export class Workers {
                                             actionText: actionLabel,
                                             source: 'Dashboard Card'
                                         })
-                                        if (triggerClick(innerBtn)) {
+                                        if (triggerClick(btn)) {
                                             count++
                                             foundLabels.push(actionLabel)
                                         }
@@ -362,46 +284,45 @@ export class Workers {
                             }
                         }
 
-                        // 3. Scan direct buttons/links
-                        const directButtons = Array.from(document.querySelectorAll(
-                            'button, a, [role="button"], [class*="claim"], [id*="claim"], [data-bi-id*="claim"]'
-                        )) as HTMLElement[]
+                        // 2. Scan tombol langsung jika belum menemukan dari kartu
+                        if (discoveredItems.length === 0) {
+                            const directButtons = Array.from(document.querySelectorAll(
+                                'button, a, [role="button"], [class*="claim"], [id*="claim"], [data-bi-id*="claim"]'
+                            )) as HTMLElement[]
 
-                        for (const btn of directButtons) {
-                            const bTxt = (btn.textContent || '').trim()
-                            if (!bTxt || bTxt.length > 60) continue
-                            if (btn.closest('header, nav, footer, #footer, #b_results, #ans_nws, article.news')) continue
-                            if (/terms|privacy|feedback|suggest|bantuan|syarat/i.test(bTxt)) continue
+                            for (const btn of directButtons) {
+                                const bTxt = (btn.textContent || '').trim()
+                                if (!bTxt || bTxt.length > 50) continue
+                                if (btn.closest('header, nav, footer, #footer, #b_results, #ans_nws, article.news')) continue
+                                if (/terms|privacy|feedback|suggest|bantuan|syarat/i.test(bTxt)) continue
 
-                            const isClaim = /^(?:claim|klaim|collect|kumpulkan)(?:\s*(?:all|semua|points|poin|now|sekarang|\+\d+|\d+|>))?$/i.test(bTxt) ||
-                                            /(?:claim|klaim|collect)\s*\+?\d+/i.test(bTxt) ||
-                                            /\+\d+\s*(?:claim|klaim)/i.test(bTxt) ||
-                                            /ready\s*to\s*claim|siap\s*diklaim/i.test(bTxt)
+                                const isClaim = claimReadyPattern.test(bTxt) || /^(?:claim|klaim|collect)(?:\s*(?:all|semua|points|poin|now|sekarang|\+\d+|\d+|>))?$/i.test(bTxt)
 
-                            if (isClaim) {
-                                const rect = btn.getBoundingClientRect()
-                                if (rect.width > 0 && rect.height > 0) {
-                                    const parent = (btn.closest('div, li, section') || btn) as HTMLElement
-                                    const pts = extractPts(parent.textContent || bTxt)
-                                    const title = extractTitle(parent)
-                                    const exists = discoveredItems.some(it => it.title === title && it.points === pts)
-                                    if (!exists) {
-                                        discoveredItems.push({
-                                            title,
-                                            points: pts,
-                                            actionText: bTxt,
-                                            source: 'Direct Button'
-                                        })
-                                        if (triggerClick(btn)) {
-                                            count++
-                                            foundLabels.push(bTxt)
+                                if (isClaim) {
+                                    const rect = btn.getBoundingClientRect()
+                                    if (rect.width > 0 && rect.height > 0) {
+                                        const parent = (btn.closest('[class*="card"], [class*="tile"], div, li') || btn) as HTMLElement
+                                        const pts = extractPts(parent.textContent || bTxt)
+                                        const title = claimReadyPattern.test(parent.textContent || bTxt) ? 'CLAIM READY POINT' : extractTitle(parent)
+                                        const exists = discoveredItems.some(it => it.title === title && it.points === pts)
+                                        if (!exists) {
+                                            discoveredItems.push({
+                                                title,
+                                                points: pts,
+                                                actionText: bTxt,
+                                                source: 'Direct Button'
+                                            })
+                                            if (triggerClick(btn)) {
+                                                count++
+                                                foundLabels.push(bTxt)
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
 
-                        // 4. Modal flyout confirmation
+                        // 3. Modal flyout confirmation (jika muncul dialog "Claim all" / "Got it")
                         const modalConfirmBtns = Array.from(document.querySelectorAll(
                             '.flyout button, .drawer button, [role="dialog"] button, [class*="modal"] button, [class*="drawer"] button, .ms-Panel button, [class*="flyout"] button'
                         )) as HTMLElement[]
@@ -435,7 +356,7 @@ export class Workers {
                 } catch {}
             }
 
-            // C. Log detail hasil temuan pending points sebelum proses berikutnya
+            // B. Log detail hasil temuan pending points
             if (detailedDiscoveredItems.length > 0) {
                 this.bot.logger.info(
                     this.bot.isMobile,
@@ -459,135 +380,119 @@ export class Workers {
                     `${prefix}⚡ Terdeteksi total pending: ${totalPts > 0 ? totalPts + ' Pts' : 'Koin Siap Klaim'}. Memulai eksekusi klaim instan...`,
                     'green'
                 )
-            } else if (!clicked) {
-                this.bot.logger.info(
-                    this.bot.isMobile,
-                    'DASHBOARD-SCAN',
-                    `${prefix}ℹ️ Hasil scan terperinci: Tidak ada koin pending yang nyangkut (0 Pts).`,
-                    'gray'
-                )
             }
 
-            // 4. Deteksi kontainer kartu dengan pencarian berbasis Playwright locator (kompatibel dengan Mock Test 5 & dynamic DOM)
-            const cardRegex = /ready\s*to\s*claim|siap\s*di\s*klaim|siap\s*diklaim|\bclaim\b|\bklaim\b|\bcollect\b|\bkumpulkan\b|\bcheck-?in\b|\babsen\b/i
-            const cardCandidates = page
-                .locator('div, section, article, [class*="card"], [class*="tile"], [class*="item"], [role="region"], li, a')
-                .filter({ hasText: cardRegex })
+            // C. Fallback Playwright Locator HANYA JIKA evaluate belum mengklik apapun (misal di mock test atau browser evaluate gagal)
+            if (!clicked) {
+                const cardCandidates = page
+                    .locator('[class*="card"], [class*="tile"], [class*="banner"], [role="region"], [data-bi-id*="claim"], .c-card, div, section')
+                    .filter({ hasText: /claim\s*ready\s*points?|ready\s*to\s*claim|siap\s*di\s*klaim|siap\s*diklaim/i })
 
-            const cardCount = await cardCandidates.count().catch(() => 0)
+                const cardCount = await cardCandidates.count().catch(() => 0)
 
-            for (let i = 0; i < cardCount; i++) {
-                const card = cardCandidates.nth(i)
-                const isCardVis = await card.isVisible().catch(() => false)
-                if (!isCardVis) continue
+                for (let i = 0; i < cardCount; i++) {
+                    const card = cardCandidates.nth(i)
+                    const isCardVis = await card.isVisible().catch(() => false)
+                    if (!isCardVis) continue
 
-                const cardTxt = (await card.innerText().catch(() => '')).trim()
-                if (!cardTxt || cardTxt.length > 2000) continue
-                if (cardTxt.length < 50 && (cardTxt.startsWith('Available points') || cardTxt.startsWith('Poin yang tersedia'))) {
-                    continue
-                }
-                if (!cardRegex.test(cardTxt)) continue
+                    const cardTxt = (await card.innerText().catch(() => '')).trim()
+                    if (!cardTxt || cardTxt.length > 1500) continue
+                    if (/check-?in\s*:\s*\d+\/\d+/i.test(cardTxt) || /available\s*points|poin\s*yang\s*tersedia/i.test(cardTxt)) continue
 
-                // Ambil nilai poin yang tertera di dalam teks kartu (misal: "195") untuk dicatat di log
-                let claimedPoints = '0'
-                const ptsMatch =
-                    cardTxt.match(/\+(\d+)\s*(?:points|poin|pts|koin)?/i) ||
-                    cardTxt.match(/(?:ready\s*to\s*claim|siap\s*diklaim)[\s\S]*?(\d+)/i) ||
-                    cardTxt.match(/(\d+)\s*(?:koin|pts|points)/i) ||
-                    cardTxt.match(/(?:claim|klaim|collect)[\s\S]*?(\d+)/i) ||
-                    cardTxt.match(/(\d+)/)
+                    let claimedPoints = '0'
+                    const ptsMatch =
+                        cardTxt.match(/(?:claim\s*ready\s*points?|ready\s*to\s*claim|siap\s*diklaim)[\s\S]*?(\d+)/i) ||
+                        cardTxt.match(/\+(\d+)\s*(?:points|poin|pts|koin)?/i) ||
+                        cardTxt.match(/(\d+)\s*(?:koin|pts|points)/i) ||
+                        cardTxt.match(/(?:claim|klaim|collect)[\s\S]*?(\d+)/i) ||
+                        cardTxt.match(/(\d+)/)
 
-                if (ptsMatch && ptsMatch[1]) {
-                    claimedPoints = ptsMatch[1]
-                }
+                    if (ptsMatch && ptsMatch[1]) {
+                        claimedPoints = ptsMatch[1]
+                    }
 
-                this.bot.logger.info(
-                    this.bot.isMobile,
-                    'DASHBOARD',
-                    `[DASHBOARD] 🎉 Terdeteksi koin pending: ${claimedPoints} Pts. Mengeksekusi klaim...`,
-                    'green'
-                )
+                    // JANGAN KLIK APAPUN JIKA POIN 0 ATAU TIDAK ADA POIN!
+                    if (Number(claimedPoints) <= 0) continue
 
-                let clickExecuted = false
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'DASHBOARD',
+                        `[DASHBOARD] 🎉 Terdeteksi koin pending: ${claimedPoints} Pts. Mengeksekusi klaim...`,
+                        'green'
+                    )
 
-                // Multi-tier locator:
-                // 1. Tier 1: card.locator('button, a, [role="button"]').filter({ hasText: /claim|klaim|collect|kumpulkan|>/i }).first()
-                const tier1Btn = card.locator('button, a, [role="button"]').filter({ hasText: /claim|klaim|collect|kumpulkan|>/i }).first()
-                if (await tier1Btn.isVisible().catch(() => false)) {
-                    await tier1Btn.click({ timeout: 5000 }).catch(async () => {
-                        await tier1Btn.evaluate((b: HTMLElement) => {
-                            b.click()
-                            b.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
-                        }).catch(() => {})
-                    })
-                    clickExecuted = true
-                }
+                    let clickExecuted = false
 
-                // 2. Tier 2: card.locator('[class*="claim"], [class*="action"], [id*="claim"]').first()
-                if (!clickExecuted) {
-                    const tier2Btn = card.locator('[class*="claim"], [class*="action"], [id*="claim"]').first()
-                    if (await tier2Btn.isVisible().catch(() => false)) {
-                        await tier2Btn.click({ timeout: 5000 }).catch(async () => {
-                            await tier2Btn.evaluate((b: HTMLElement) => {
+                    // Tier 1: Tombol inner button
+                    const tier1Btn = card.locator('button, a, [role="button"]').filter({ hasText: /claim|klaim|collect|kumpulkan|>/i }).first()
+                    if (await tier1Btn.isVisible().catch(() => false)) {
+                        await tier1Btn.click({ timeout: 5000 }).catch(async () => {
+                            await tier1Btn.evaluate((b: HTMLElement) => {
                                 b.click()
                                 b.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
                             }).catch(() => {})
                         })
                         clickExecuted = true
                     }
-                }
 
-                // 3. Tier 3: card.click({ force: true })
-                if (!clickExecuted) {
-                    await card.click({ force: true, timeout: 5000 }).catch(async () => {
-                        await card.evaluate((b: HTMLElement) => {
-                            b.click()
-                            b.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
-                        }).catch(() => {})
-                    })
-                    clickExecuted = true
-                }
-
-                if (clickExecuted) {
-                    await this.bot.utils.wait(1500)
-                    clicked = true
-                    textFound = textFound ? `${textFound}, ${claimedPoints} Pts` : `${claimedPoints} Pts`
-                }
-            }
-
-            // 5. Evaluasi tombol claim langsung di DOM jika belum menemukan dari kartu
-            if (!clicked) {
-                const directBtns = page.locator(
-                    'button:has-text("Claim"), [role="button"]:has-text("Claim"), button.c-action-trigger, button:has-text("Klaim"), [role="button"]:has-text("Klaim")'
-                )
-                const directCount = await directBtns.count().catch(() => 0)
-                for (let j = 0; j < directCount; j++) {
-                    const btn = directBtns.nth(j)
-                    if (await btn.isVisible().catch(() => false)) {
-                        const bTxt = (await btn.innerText().catch(() => '')).trim().toLowerCase()
-                        if (bTxt.includes('available') || bTxt.includes('tersedia')) continue
-                        const isClaimBtn = /^(?:claim|klaim)(?:\s*(?:all|semua|points|poin|now|sekarang|\+\d+|\d+|>))?$/i.test(bTxt) ||
-                            /(?:claim|klaim)\s*\+?\d+/i.test(bTxt) ||
-                            /\+\d+\s*(?:claim|klaim)/i.test(bTxt) ||
-                            bTxt.includes('claim') ||
-                            bTxt.includes('klaim') ||
-                            bTxt.includes('siap diklaim') ||
-                            bTxt.includes('ready to claim')
-
-                        if (isClaimBtn) {
-                            await btn.click({ timeout: 5000 }).catch(async () => {
-                                await btn.evaluate((b: HTMLElement) => b.click()).catch(() => {})
+                    // Tier 2: Kelas action/claim
+                    if (!clickExecuted) {
+                        const tier2Btn = card.locator('[class*="claim"], [class*="action"], [id*="claim"]').first()
+                        if (await tier2Btn.isVisible().catch(() => false)) {
+                            await tier2Btn.click({ timeout: 5000 }).catch(async () => {
+                                await tier2Btn.evaluate((b: HTMLElement) => {
+                                    b.click()
+                                    b.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
+                                }).catch(() => {})
                             })
-                            await this.bot.utils.wait(1500)
-                            clicked = true
-                            textFound = textFound ? `${textFound}, ${bTxt}` : bTxt
-                            break
+                            clickExecuted = true
                         }
+                    }
+
+                    // Tier 3: Container card click
+                    if (!clickExecuted) {
+                        await card.click({ force: true, timeout: 5000 }).catch(async () => {
+                            await card.evaluate((b: HTMLElement) => {
+                                b.click()
+                                b.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
+                            }).catch(() => {})
+                        })
+                        clickExecuted = true
+                    }
+
+                    if (clickExecuted) {
+                        await this.bot.utils.wait(1500)
+                        clicked = true
+                        textFound = textFound ? `${textFound}, ${claimedPoints} Pts` : `${claimedPoints} Pts`
+                        break // Berhenti setelah menemukan dan mengeksekusi kartu claim!
                     }
                 }
             }
 
-            // 6. Direct browser endpoint trigger /api/claimallpointsasync
+            // D. Jika tidak ada yang diklik (poin 0 atau tidak ada kartu), langsung lanjut ke task berikutnya
+            if (!clicked) {
+                if (!isRecheck) {
+                    this.pass1FoundCoins = false
+                }
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'DASHBOARD-SCAN',
+                    `${prefix}ℹ️ Hasil scan terperinci: Tidak ada koin pending yang nyangkut (0 Pts). Langsung lanjut ke task berikutnya.`,
+                    'gray'
+                )
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'DASHBOARD',
+                    `${prefix}✅ Pengecekan koin selesai: Tidak ada koin nyangkut (0 pending claims).`
+                )
+                return
+            }
+
+            if (!isRecheck) {
+                this.pass1FoundCoins = true
+            }
+
+            // E. Direct browser endpoint trigger /api/claimallpointsasync
             if (typeof page.evaluate === 'function') {
                 await page.evaluate(async () => {
                     try {
@@ -603,28 +508,12 @@ export class Workers {
                 }).catch(() => {})
             }
 
-            // 7. Coba tutup panel/modal jika ada
+            // F. Tutup panel/modal jika terbuka
             const closeBtn = page.locator(
                 'button[aria-label*="close" i], button[aria-label*="tutup" i], button.ms-Panel-closeButton, [data-icon-name="Cancel"], [aria-label="Close"]'
             ).first()
             if (await closeBtn.isVisible().catch(() => false)) {
                 await closeBtn.click().catch(() => {})
-            }
-
-            if (!clicked) {
-                if (!isRecheck) {
-                    this.pass1FoundCoins = false
-                }
-                this.bot.logger.info(
-                    this.bot.isMobile,
-                    'DASHBOARD',
-                    `${prefix}✅ Pengecekan koin selesai: Tidak ada koin nyangkut (0 pending claims).`
-                )
-                return
-            }
-
-            if (!isRecheck) {
-                this.pass1FoundCoins = true
             }
 
             this.bot.logger.info(
@@ -661,33 +550,6 @@ export class Workers {
                     `${prefix}🎯 Klaim instan selesai (${newBalance} pts).`,
                     'green'
                 )
-            }
-
-            // Final verify: apakah masih ada koin pending / card nyangkut yang tersisa?
-            const remainingCardCount = await page
-                .locator('div, section, article, [class*="card"], [class*="tile"], [class*="item"], [role="region"], li, a')
-                .filter({ hasText: cardRegex })
-                .count()
-                .catch(() => 0)
-
-            const remainingDirectBtns = await page
-                .locator('button:has-text("Claim"), [role="button"]:has-text("Claim"), button.c-action-trigger, button:has-text("Klaim"), [role="button"]:has-text("Klaim")')
-                .count()
-                .catch(() => 0)
-
-            const finalVerify = {
-                isClean: remainingCardCount === 0 && remainingDirectBtns === 0
-            }
-
-            if (finalVerify.isClean === false && !isRecheck) {
-                this.bot.logger.info(
-                    this.bot.isMobile,
-                    'DASHBOARD',
-                    `[CLAIM-RETRY] Terdeteksi koin pending masih belum bersih (isClean=false). Menunggu 2500ms untuk 1x retry klaim ulang...`,
-                    'yellow'
-                )
-                await this.bot.utils.wait(2500)
-                return await this.doClaimPendingPoints(page, true, data)
             }
         } catch {
             this.bot.logger.debug(this.bot.isMobile, 'DASHBOARD', 'Pengecekan koin nyangkut selesai.')
