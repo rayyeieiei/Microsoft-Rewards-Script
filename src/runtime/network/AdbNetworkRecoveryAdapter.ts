@@ -355,6 +355,7 @@ export class AdbNetworkRecoveryAdapter implements NetworkRecoveryAdapter {
         if (this.policy.reassertUsbTethering) {
             try {
                 await this.runAdb(['shell', 'cmd', 'tethering', 'tether', 'usb'], signal).catch(() => {})
+                await this.runAdb(['shell', 'svc', 'usb', 'setFunctions', 'rndis,adb'], signal).catch(() => {})
                 await this.runAdb(['shell', 'svc', 'usb', 'setFunctions', 'rndis'], signal).catch(() => {})
             } catch {}
         }
@@ -366,7 +367,7 @@ export class AdbNetworkRecoveryAdapter implements NetworkRecoveryAdapter {
     public async untetherUsb(signal?: AbortSignal): Promise<void> {
         try {
             await this.runAdb(['shell', 'cmd', 'tethering', 'untether', 'usb'], signal).catch(() => {})
-            await this.runAdb(['shell', 'svc', 'usb', 'setFunctions', 'mtp'], signal).catch(() => {})
+            await this.runAdb(['shell', 'svc', 'usb', 'setFunctions', 'mtp,adb'], signal).catch(() => {})
         } catch {}
     }
 

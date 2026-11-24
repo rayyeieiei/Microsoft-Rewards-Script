@@ -38,21 +38,52 @@ export class AirplaneMode {
     }
 
     /**
-     * Memeriksa ketersediaan dan status device ADB
+     * Memeriksa ketersediaan dan status device ADB dengan deteksi unauthorized, offline, dan auto-reconnect retry
      */
     public static async checkDevice(serial?: string): Promise<{ ready: boolean; reason?: string; deviceCount: number }> {
-        try {
-            const adbPrefix = serial ? `adb -s ${serial}` : 'adb';
-            const { stdout } = await execAsync(`${adbPrefix} devices`);
-            const lines = stdout.trim().split(/\r?\n/).slice(1).map(l => l.trim()).filter(Boolean);
-            const devices = lines.filter(l => l.includes('\tdevice') || l.endsWith(' device'));
-            if (devices.length === 0) {
-                return { ready: false, reason: 'device-not-found', deviceCount: 0 };
+        const adbPrefix = serial ? `adb -s ${serial}` : 'adb';
+
+        for (let attempt = 1; attempt <= 2; attempt++) {
+            try {
+                // Jika serial adalah alamat IP:port (Wireless ADB), coba sambungkan otomatis jika belum tersambung
+                if (serial && serial.includes(':') && attempt === 1) {
+                    await execAsync(`adb connect ${serial}`).catch(() => {});
+                }
+
+                const { stdout } = await execAsync(`${adbPrefix} devices`);
+                const lines = stdout.trim().split(/\r?\n/).slice(1).map(l => l.trim()).filter(Boolean);
+
+                // 1. Cek device aktif (authorized & ready)
+                const readyDevices = lines.filter(l => l.includes('\tdevice') || l.endsWith(' device'));
+                if (readyDevices.length > 0) {
+                    return { ready: true, deviceCount: readyDevices.length };
+                }
+
+                // 2. Cek apakah ada device unauthorized (butuh konfirmasi di layar HP)
+                const unauthorizedDevices = lines.filter(l => l.includes('unauthorized'));
+                if (unauthorizedDevices.length > 0) {
+                    this.log(`⚠️  [ADB-AUTH] Device terdeteksi tetapi BELUM DIIZINKAN (unauthorized)! Buka layar HP dan centang 'Selalu izinkan' lalu klik IZINKAN (ALLOW).`, true);
+                    return { ready: false, reason: 'device-unauthorized', deviceCount: unauthorizedDevices.length };
+                }
+
+                // 3. Cek apakah device berstatus offline
+                const offlineDevices = lines.filter(l => l.includes('offline'));
+                if (offlineDevices.length > 0) {
+                    this.log(`⚠️  [ADB-OFFLINE] Device terdeteksi tetapi berstatus OFFLINE. Mencoba reconnect...`);
+                    await execAsync(`${adbPrefix} reconnect`).catch(() => {});
+                }
+
+                // Jika percobaan pertama belum menemukan device, coba reconnect dan beri jeda 1.5 detik
+                if (attempt === 1) {
+                    await execAsync(`${adbPrefix} reconnect`).catch(() => {});
+                    await this.wait(1500);
+                }
+            } catch (err: any) {
+                return { ready: false, reason: 'adb-unavailable', deviceCount: 0 };
             }
-            return { ready: true, deviceCount: devices.length };
-        } catch (err: any) {
-            return { ready: false, reason: 'adb-unavailable', deviceCount: 0 };
         }
+
+        return { ready: false, reason: 'device-not-found', deviceCount: 0 };
     }
 
     /**
@@ -144,6 +175,7 @@ export class AirplaneMode {
             this.log('🔌  [ADB-NETWORK] Memastikan USB Tethering tetap menyala...');
             // Ada dua command sakti, kita tembak dua-duanya biar Samsung/Xiaomi/Oppo/Vivo nurut
             await execAsync(`${adbPrefix} shell cmd tethering tether usb`).catch(() => {});
+            await execAsync(`${adbPrefix} shell svc usb setFunctions rndis,adb`).catch(() => {});
             await execAsync(`${adbPrefix} shell svc usb setFunctions rndis`).catch(() => {});
 
             this.log(`⏳  [ADB-NETWORK] Nunggu ${postDelayMs / 1000} detik biar PC Windows ngebaca jaringan USB...`);
@@ -189,14 +221,14 @@ export class AirplaneMode {
                 await execAsync(`${adbPrefix} shell cmd tethering untether usb`).catch(() => {});
             } catch {}
 
-            // 2. Kembalikan fungsi USB ke MTP (File Transfer) yang otomatis mencabut adapter RNDIS di Windows
+            // 2. Kembalikan fungsi USB ke MTP dengan tetap mempertahankan interface ADB (mtp,adb)
             try {
-                await execAsync(`${adbPrefix} shell svc usb setFunctions mtp`).catch(() => {});
+                await execAsync(`${adbPrefix} shell svc usb setFunctions mtp,adb`).catch(() => {});
             } catch {}
 
             // 3. Fallback su / root jika diperlukan
             try {
-                await execAsync(`${adbPrefix} shell su -c "cmd tethering untether usb || svc usb setFunctions mtp"`).catch(() => {});
+                await execAsync(`${adbPrefix} shell su -c "cmd tethering untether usb || svc usb setFunctions mtp,adb"`).catch(() => {});
             } catch {}
 
             this.log('✅  [ADB-NETWORK] USB Tethering berhasil dimatikan. Laptop berhenti menyedot kuota seluler HP!\n');
@@ -220,6 +252,7 @@ export class AirplaneMode {
                 return false;
             }
             await execAsync(`${adbPrefix} shell cmd tethering tether usb`).catch(() => {});
+            await execAsync(`${adbPrefix} shell svc usb setFunctions rndis,adb`).catch(() => {});
             await execAsync(`${adbPrefix} shell svc usb setFunctions rndis`).catch(() => {});
             return true;
         } catch (error) {
